@@ -1,0 +1,121 @@
+{
+  "name": "assethive",
+  "version": "1.1.2",
+  "description": "Bridge-like 3D asset manager with Unreal import workflow",
+  "main": "electron/main.js",
+  "scripts": {
+    "predev": "kill-port 5173",
+    "dev:renderer": "vite --port 5173 --strictPort",
+    "dev:electron": "wait-on tcp:5173 && electron .",
+    "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:electron\"",
+    "build:renderer": "vite build",
+    "build": "npm run build:renderer",
+    "build:updater": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-updater.ps1",
+    "validate:package": "node scripts/validate-package.cjs",
+    "package:dir": "npm run build && npm run build:updater && npm run validate:package && electron-builder --win --x64 --dir",
+    "package:msi": "npm run build && npm run build:updater && npm run validate:package && electron-builder --win msi --x64",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "check:unused-deps": "node scripts/check-unused-deps.cjs",
+    "check:unused-deps:strict": "set ASSETHIVE_STRICT_UNUSED_DEPS=1&& node scripts/check-unused-deps.cjs"
+  },
+  "keywords": [],
+  "author": "BlackBlade Studio",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "overrides": {
+    "@mapbox/node-pre-gyp": {
+      "tar": "^7.5.20"
+    }
+  },
+  "dependencies": {
+    "7zip-bin": "^5.2.0",
+    "chokidar": "^5.0.0",
+    "fuse.js": "^7.1.0",
+    "pinyin": "^3.1.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "sharp": "^0.34.5",
+    "three": "^0.183.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@types/three": "^0.183.1",
+    "@vitejs/plugin-react": "^5.1.0",
+    "concurrently": "^9.2.1",
+    "electron": "^40.8.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "kill-port": "^2.0.1",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.46.0",
+    "vite": "^7.1.7",
+    "wait-on": "^8.0.5"
+  },
+  "build": {
+    "appId": "com.blackblade.assethive",
+    "productName": "AssetHive",
+    "copyright": "Copyright © 2026 BlackBlade Studio. All rights reserved.",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/sharp/**/*",
+      "node_modules/@img/**/*"
+    ],
+    "directories": {
+      "output": "Output/installer",
+      "buildResources": "LOGO"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "AssetHiveUpdater.exe",
+        "to": "AssetHiveUpdater.exe"
+      },
+      {
+        "from": "LOGO/Icon_V2_256.png",
+        "to": "LOGO/Icon_V2_256.png"
+      },
+      {
+        "from": "AssetHive-UE-Plugin/AssetHive",
+        "to": "AssetHive-UE-Plugin/AssetHive",
+        "filter": [
+          "**/*",
+          "!**/*.pdb",
+          "!**/Intermediate/**"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "msi",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "LOGO/Icon_V2_256.png",
+      "artifactName": "AssetHive-${version}-Windows.${ext}"
+    },
+    "msi": {
+      "oneClick": false,
+      "perMachine": true,
+      "upgradeCode": "{8D4F0B96-1A3E-4C7A-9F2D-65B832A1E407}",
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AssetHive",
+      "runAfterFinish": false,
+      "warningsAsErrors": true
+    }
+  }
+}

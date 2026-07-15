@@ -1,0 +1,62 @@
+# Node / Electron
+node_modules/
+dist/
+Output/
+out/
+release/
+.cache/
+.update/
+*.log
+AssetHiveUpdater.exe
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key
+*.pem
+
+# IDE / OS
+.idea/
+.vscode/
+.vs/
+*.suo
+*.user
+*.userprefs
+.DS_Store
+Thumbs.db
+
+# Native build artifacts
+*.pdb
+*.obj
+*.lib
+*.exp
+*.ilk
+*.sarif
+
+# Unreal test host outputs
+UE/HiveTest/.vs/
+UE/HiveTest/Binaries/
+UE/HiveTest/Content/
+UE/HiveTest/DerivedDataCache/
+UE/HiveTest/Intermediate/
+UE/HiveTest/Saved/
+UE/HiveTest/*.sln
+UE/HiveTest/Config/UnrealBuildTool/
+UE/HiveTest/Plugins/*
+!UE/HiveTest/Plugins/AssetHive/
+!UE/HiveTest/Plugins/AssetHive/**
+UE/HiveTest/Plugins/AssetHive/Binaries/
+UE/HiveTest/Plugins/AssetHive/Intermediate/
+
+# Precompiled plugin build outputs
+AssetHive-UE-Plugin/_build_tmp/
+AssetHive-UE-Plugin/AssetHive/Intermediate/
+
+# Application runtime data
+Log/
+Logs/
+import_*.json
+tmp_*.json

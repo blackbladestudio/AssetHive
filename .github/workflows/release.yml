@@ -1,0 +1,104 @@
+name: Release Windows MSI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+      CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
+    steps:
+      - name: Checkout clean source
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Validate tag and release guard
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $expectedTag = "v$version"
+          if ("${{ github.ref_name }}" -ne $expectedTag) {
+            throw "Tag '${{ github.ref_name }}' must equal '$expectedTag'"
+          }
+          gh release view $expectedTag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release '$expectedTag' already exists; publish a new version instead"
+          }
+          "ASSETHIVE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Configure optional code signing
+        shell: pwsh
+        run: |
+          if ($env:CERTIFICATE_BASE64) {
+            $certificatePath = Join-Path $env:RUNNER_TEMP "assethive-signing.pfx"
+            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:CERTIFICATE_BASE64))
+            "CSC_LINK=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "CSC_KEY_PASSWORD=$env:CERTIFICATE_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "ASSETHIVE_SIGNED=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            "ASSETHIVE_SIGNED=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Warning "No signing certificate configured; the MSI will be published unsigned."
+          }
+
+      - name: Build MSI
+        run: npm run package:msi
+
+      - name: Verify installer and create checksum
+        shell: pwsh
+        run: |
+          $expectedName = "AssetHive-$env:ASSETHIVE_VERSION-Windows.msi"
+          $msi = Get-ChildItem "Output/installer" -Filter "*.msi" -File
+          if ($msi.Count -ne 1 -or $msi[0].Name -ne $expectedName) {
+            throw "Expected exactly Output/installer/$expectedName"
+          }
+          if ($env:ASSETHIVE_SIGNED -eq "true") {
+            $signature = Get-AuthenticodeSignature -LiteralPath $msi[0].FullName
+            if ($signature.Status -ne "Valid") {
+              throw "MSI signature verification failed: $($signature.Status)"
+            }
+          }
+          $hash = (Get-FileHash -LiteralPath $msi[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $expectedName" | Set-Content -LiteralPath "$($msi[0].FullName).sha256" -Encoding ascii -NoNewline
+
+      - name: Create immutable GitHub Release
+        shell: pwsh
+        run: |
+          $msi = "Output/installer/AssetHive-$env:ASSETHIVE_VERSION-Windows.msi"
+          $checksum = "$msi.sha256"
+          $signingNote = if ($env:ASSETHIVE_SIGNED -eq "true") {
+            "The Windows installer is code signed."
+          } else {
+            "WARNING: This installer is unsigned and Windows SmartScreen may display a warning."
+          }
+          $notes = @"
+          AssetHive $env:ASSETHIVE_VERSION
+
+          $signingNote
+
+          Verify the installer with the attached SHA-256 file before installation.
+          "@
+          gh release create "${{ github.ref_name }}" $msi $checksum `
+            --repo "${{ github.repository }}" `
+            --verify-tag `
+            --title "AssetHive $env:ASSETHIVE_VERSION" `
+            --notes $notes
