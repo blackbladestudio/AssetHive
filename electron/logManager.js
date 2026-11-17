@@ -1,43 +1,34 @@
 const path = require("node:path");
-const fsSync = require("node:fs");
-const fs = require("node:fs/promises");
+const fs = require("node:fs");
 
 const LOG_MAX_BYTES = 4 * 1024 * 1024;
 const LOG_TRIM_TO_BYTES = 2 * 1024 * 1024;
 
 let app = null;
-let getSettings = () => ({});
-let logStream = null;
+let logFileDescriptor = null;
 let activeLogFilePath = "";
-let logTrimInProgress = false;
 let lastLogTrimCheckAt = 0;
 let crashHooksInstalled = false;
 
 function getLogFilePath() {
-  return path.join(app.getPath("userData"), "Log", "assethive.log");
-}
-
-function getFallbackLogFilePath() {
-  return path.join(app.getPath("temp"), "AssetHive", "Log", "assethive.log");
+  const basePath = app.isPackaged ? app.getPath("userData") : app.getAppPath();
+  return path.join(basePath, "Log", "assethive.log");
 }
 
 function getConfiguredLogFilePath() {
-  const settings = getSettings() || {};
-  const configured = String(settings.unrealLogPath || "").trim();
-  if (!configured) {
-    return getLogFilePath();
-  }
-  const resolved = path.resolve(configured);
-  const ext = path.extname(resolved).toLowerCase();
-  if (ext === ".log" || ext === ".txt") {
-    return resolved;
-  }
-  return path.join(resolved, "assethive.log");
+  return getLogFilePath();
 }
 
-function openLogStream(targetPath) {
-  fsSync.mkdirSync(path.dirname(targetPath), { recursive: true });
-  return fsSync.createWriteStream(targetPath, { flags: "a" });
+function openLogFile(targetPath) {
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  return fs.openSync(targetPath, "a");
+}
+
+function closeLogFile() {
+  if (logFileDescriptor !== null) {
+    try { fs.closeSync(logFileDescriptor); } catch {}
+    logFileDescriptor = null;
+  }
 }
 
 function toLogPayload(payload) {
@@ -51,83 +42,121 @@ function toLogPayload(payload) {
   }
 }
 
-function writeLog(level, message, payload) {
-  const line = `[${new Date().toISOString()}] [${level}] ${message}${toLogPayload(payload)}`;
-  if (logStream) {
-    logStream.write(`${line}\n`);
+function writeToStdout(line) {
+  try { process.stdout.write(`${line}\n`); } catch {}
+}
+
+// 日志行订阅：主进程用它把每一行转发给渲染进程的「输出日志」窗口。
+// 这里只做转发、不做缓冲（缓冲交给渲染层），并且订阅者异常一律吞掉 ——
+// 日志窗口是观测工具，任何情况下都不能影响写日志本身或主流程。
+const lineListeners = new Set();
+
+function onLogLine(listener) {
+  if (typeof listener !== "function") {
+    return () => {};
   }
-  process.stdout.write(`${line}\n`);
-  if (!logTrimInProgress) {
-    const now = Date.now();
-    if (!lastLogTrimCheckAt || now - lastLogTrimCheckAt > 60000) {
-      lastLogTrimCheckAt = now;
-      trimLogFileIfNeeded();
-    }
+  lineListeners.add(listener);
+  return () => lineListeners.delete(listener);
+}
+
+function notifyLogLine(line) {
+  for (const listener of lineListeners) {
+    try { listener(line); } catch { /* 订阅者异常不影响写日志 */ }
   }
 }
 
-async function trimLogFileIfNeeded() {
-  if (!activeLogFilePath || logTrimInProgress) {
-    return;
+// 清空日志文件：截断已打开的描述符，保持追加写入不中断（不删文件、不换路径）。
+function clearLogFile() {
+  if (logFileDescriptor === null || !activeLogFilePath) {
+    return false;
   }
   try {
-    const stats = await fs.stat(activeLogFilePath);
-    if (!stats || stats.size <= LOG_MAX_BYTES) {
+    fs.ftruncateSync(logFileDescriptor, 0);
+    return true;
+  } catch (error) {
+    writeToStdout(`[${new Date().toISOString()}] [WARN] log clear failed: ${error?.message || String(error)}`);
+    return false;
+  }
+}
+
+function writeLog(level, message, payload) {
+  const line = `[${new Date().toISOString()}] [${level}] ${message}${toLogPayload(payload)}`;
+  writeToStdout(line);
+  notifyLogLine(line);
+  if (logFileDescriptor === null) return;
+  try {
+    fs.writeSync(logFileDescriptor, `${line}\n`);
+  } catch (error) {
+    closeLogFile();
+    writeToStdout(`[${new Date().toISOString()}] [WARN] log file write failed: ${error?.message || String(error)}`);
+    const fallbackPath = path.join(app.getPath("userData"), "Log", "assethive.log");
+    if (activeLogFilePath !== fallbackPath) {
+      try {
+        logFileDescriptor = openLogFile(fallbackPath);
+        activeLogFilePath = fallbackPath;
+        fs.writeSync(logFileDescriptor, `${line}\n`);
+        writeToStdout(`[${new Date().toISOString()}] [INFO] log file switched to ${fallbackPath}`);
+      } catch (fallbackError) {
+        closeLogFile();
+        writeToStdout(`[${new Date().toISOString()}] [WARN] fallback log file unavailable: ${fallbackError?.message || String(fallbackError)}`);
+        return;
+      }
+    } else {
       return;
     }
+  }
+  const now = Date.now();
+  if (!lastLogTrimCheckAt || now - lastLogTrimCheckAt > 60000) {
+    lastLogTrimCheckAt = now;
+    trimLogFileIfNeeded();
+  }
+}
 
-    logTrimInProgress = true;
-    writeLog("INFO", "starting log trim (async)", { currentSize: stats.size });
-
-    if (logStream) {
-      logStream.end();
-      logStream = null;
-    }
-
-    const content = await fs.readFile(activeLogFilePath);
+function trimLogFileIfNeeded() {
+  if (logFileDescriptor === null || !activeLogFilePath) return;
+  try {
+    const stats = fs.fstatSync(logFileDescriptor);
+    if (stats.size <= LOG_MAX_BYTES) return;
+    const content = fs.readFileSync(activeLogFilePath);
     const start = Math.max(0, content.length - LOG_TRIM_TO_BYTES);
     let trimmed = content.subarray(start);
     const firstNewline = trimmed.indexOf(0x0a);
     if (firstNewline >= 0 && firstNewline + 1 < trimmed.length) {
       trimmed = trimmed.subarray(firstNewline + 1);
     }
-
-    await fs.writeFile(activeLogFilePath, trimmed);
-    logStream = fsSync.createWriteStream(activeLogFilePath, { flags: "a" });
-
+    closeLogFile();
+    fs.writeFileSync(activeLogFilePath, trimmed);
+    logFileDescriptor = openLogFile(activeLogFilePath);
     writeLog("INFO", "log trimmed successfully", {
       previousBytes: stats.size,
       newBytes: trimmed.length
     });
   } catch (error) {
-    process.stdout.write(`[${new Date().toISOString()}] [WARN] log trim failed: ${error?.message}\n`);
-    if (!logStream && activeLogFilePath) {
-      logStream = fsSync.createWriteStream(activeLogFilePath, { flags: "a" });
+    writeToStdout(`[${new Date().toISOString()}] [WARN] log trim failed: ${error?.message || String(error)}`);
+    if (logFileDescriptor === null) {
+      try { logFileDescriptor = openLogFile(activeLogFilePath); } catch {}
     }
-  } finally {
-    logTrimInProgress = false;
   }
 }
 
 function setupLogger() {
-  let logFilePath = getConfiguredLogFilePath();
-  let nextStream = null;
-  try {
-    nextStream = openLogStream(logFilePath);
-  } catch {
-    logFilePath = getFallbackLogFilePath();
-    nextStream = openLogStream(logFilePath);
-  }
-  if (logStream && logStream !== nextStream) {
+  const preferredPath = getConfiguredLogFilePath();
+  const fallbackPath = path.join(app.getPath("userData"), "Log", "assethive.log");
+  closeLogFile();
+  activeLogFilePath = "";
+  for (const candidate of new Set([preferredPath, fallbackPath])) {
     try {
-      logStream.end();
-    } catch {}
+      logFileDescriptor = openLogFile(candidate);
+      activeLogFilePath = candidate;
+      break;
+    } catch (error) {
+      writeToStdout(`[${new Date().toISOString()}] [WARN] log file unavailable: ${candidate}: ${error?.message || String(error)}`);
+    }
   }
-  logStream = nextStream;
-  activeLogFilePath = logFilePath;
-  trimLogFileIfNeeded();
+  lastLogTrimCheckAt = 0;
   writeLog("INFO", "log initialized", {
-    logFilePath,
+    logFilePath: activeLogFilePath || null,
+    appVersion: app.getVersion?.() || null,
     electron: process.versions.electron,
     node: process.versions.node,
     pid: process.pid
@@ -142,16 +171,18 @@ function setupLogger() {
         stack: error?.stack
       });
     });
-
     process.on("unhandledRejection", (reason) => {
-      writeLog("FATAL", "unhandledRejection", { reason: String(reason) });
+      writeLog("FATAL", "unhandledRejection", {
+        reason: String(reason),
+        stack: reason?.stack
+      });
     });
   }
 }
 
 function refreshLoggerPath() {
   const desiredPath = getConfiguredLogFilePath();
-  if (String(activeLogFilePath || "").toLowerCase() === String(desiredPath || "").toLowerCase()) {
+  if (String(activeLogFilePath || "").toLowerCase() === desiredPath.toLowerCase()) {
     return false;
   }
   setupLogger();
@@ -165,7 +196,6 @@ function getActiveLogFilePath() {
 
 function init(options) {
   app = options.app;
-  getSettings = options.getSettings || (() => ({}));
 }
 
 module.exports = {
@@ -176,5 +206,8 @@ module.exports = {
   trimLogFileIfNeeded,
   getConfiguredLogFilePath,
   getLogFilePath,
-  getActiveLogFilePath
+  getActiveLogFilePath,
+  onLogLine,
+  clearLogFile,
+  closeLogFile
 };

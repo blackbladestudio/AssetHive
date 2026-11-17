@@ -9,8 +9,6 @@ import type {
 export function useUIState() {
   const [modalAlert, setModalAlert] = useState<ModalAlertState>(null);
   const [status, setStatusText] = useState("");
-  const [detailPreviewFitScaled, setDetailPreviewFitScaled] = useState(false);
-  const [detailPreviewLoaded, setDetailPreviewLoaded] = useState(false);
   const [showScrollTopButton, setShowScrollTopButton] = useState(false);
   const [assetStageMetrics, setAssetStageMetrics] = useState<AssetStageMetrics>({
     scrollTop: 0,
@@ -27,17 +25,12 @@ export function useUIState() {
 
   // Plugin
   const [pluginInstalled, setPluginInstalled] = useState(false);
-  const [pluginCanInstall, setPluginCanInstall] = useState(false);
-  const [pluginInstallBusy, setPluginInstallBusy] = useState(false);
-  const [pluginInstallProgress, setPluginInstallProgress] = useState<number | null>(null);
   const [pluginStatusMessage, setPluginStatusMessage] = useState("");
   const [hasImportableProject, setHasImportableProject] = useState(false);
 
   return {
     modalAlert, setModalAlert,
     status, setStatusText,
-    detailPreviewFitScaled, setDetailPreviewFitScaled,
-    detailPreviewLoaded, setDetailPreviewLoaded,
     showScrollTopButton, setShowScrollTopButton,
     assetStageMetrics, setAssetStageMetrics,
     contextMenu, setContextMenu,
@@ -46,9 +39,6 @@ export function useUIState() {
     scanProgress, setScanProgress,
     scanHint, setScanHint,
     pluginInstalled, setPluginInstalled,
-    pluginCanInstall, setPluginCanInstall,
-    pluginInstallBusy, setPluginInstallBusy,
-    pluginInstallProgress, setPluginInstallProgress,
     pluginStatusMessage, setPluginStatusMessage,
     hasImportableProject, setHasImportableProject
   };

@@ -1,8 +1,39 @@
+const { removeAssetNameTags } = require("../../shared/assetNameTags.mjs");
+const { isDisplacementMetadata } = require("./displacementClassification");
+const { populatePreviewSize } = require("./previewSize");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
+const { readGzipJsonArray, gzipJsonArray } = require("./jsonArrayStream");
+const { createScanSeeds } = require("./scanRecordReuse");
+const { PROJECTION, getResidentMemoPath, compactScanRecord, compactScanMemoEntry, sameSourceStamp } = require("./residentScanMemo");
 const Fuse = require("fuse.js");
 const searchIndex = require("./searchIndex");
-const chokidar = require("chokidar");
+const { listRecycledAssets } = require("./libraryRecycle");
+const { listPermanentlyDeletedAssets } = require("./characterDeletion");
+const { watchLibrary } = require("./libraryWatchService");
+const { changedDirectories } = require("./libraryChanges");
+const { ASSET_METADATA_FILE_NAME, isFolderAssetMetaFileName, isSidecarAssetMetaFileName, getSidecarStemFromMetaFileName, writeAssetMetadata, updateAssetMetadataFile } = require("./assetMetadata");
+const { applyAnimationIdentityMetadata, readAnimationIdentitySidecar } = require("./animationIdentity");
+const { resolveAssetModelPath, normalizeAssetModelPaths } = require("./assetModelPaths");
+const {
+  applyPreservedAnimationPreview,
+  buildAnimationMetaFromModel,
+  isAnimationLibraryPath,
+  isAnimationModelMetaPath
+} = require("./customAssetLayout");
+const {
+  FOUR_K_THRESHOLD_PIXELS,
+  LARGE_OBJECT_LIMIT_METERS,
+  MAX_REPORTED_TEXTURES,
+  TEXTURE_ANALYSIS_VERSION,
+  analyzeAssetTextureUsage,
+  getReliableDimensions,
+  isModelAssetType,
+  isTextureAnalysisCurrent,
+  normalizeTextureAnalysis,
+  normalizeTextureFiles
+} = require("./textureAnalysis");
 
 let app = null;
 let nativeImage = null;
@@ -22,35 +53,25 @@ try {
 }
 
 const JSON_EXTENSIONS = new Set([".json", ".jason"]);
-const MODEL_EXTENSIONS = new Set([".fbx", ".obj", ".abc", ".gltf", ".glb"]);
+const MODEL_EXTENSIONS = new Set([".fbx", ".st9", ".obj", ".abc", ".gltf", ".glb"]);
 const TEXTURE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr", ".hdr", ".tga", ".webp", ".bmp"]);
-const PREVIEW_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".tif", ".tiff", ".tga", ".webp", ".bmp"]);
+const PREVIEW_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".tif", ".tiff", ".tga", ".webp", ".bmp", ".webm", ".mp4", ".gif"]);
 const NESTED_FILE_PROPAGATION_MAX_DEPTH = 3;
-const QUIXEL_META_JSON_MAX_BYTES = 8 * 1024 * 1024;
 const CUSTOM_META_JSON_MAX_BYTES = 64 * 1024 * 1024;
 const CUSTOM_LIBRARY_INDEX_DIR = ".assethive";
+// 扫描备忘（每资产元数据 mtime + 目录指纹 + 卡片记录）以前是一个未压缩的
+// custom-index.json：2 万资产的库会写出一百多 MB，每 5 分钟周期扫描都要在共享盘上
+// 整读整写一遍；文件一旦超过 128MB 读取上限就直接作废，于是每轮都退化成全量冷扫。
+// 现在改为 gzip 存放（约 1/10 体积），旧的 .json 仍只读兼容一次并迁移。
 const CUSTOM_LIBRARY_INDEX_FILE = "custom-index.json";
-const CUSTOM_LIBRARY_INDEX_MAX_BYTES = 128 * 1024 * 1024;
-const SKIP_DIRECTORY_NAMES = new Set([
-  "$recycle.bin",
-  "system volume information",
-  "windows",
-  "program files",
-  "program files (x86)",
-  "programdata",
-  "appdata",
-  "node_modules",
-  ".git",
-  ".svn",
-  ".assethive",
-  "plugins",
-  "support",
-  ".bridge",
-  "uassets"
-]);
-const SKIP_FILE_NAMES = new Set(["desktop.ini", "thumbs.db", "assetsdata.json", "arkhive_data.json", "index.json", "custom-index.json"]);
+const CUSTOM_LIBRARY_INDEX_FILE_GZ = "custom-index.json.gz";
+const CUSTOM_LIBRARY_INDEX_LEGACY_MAX_BYTES = 512 * 1024 * 1024;
+const CUSTOM_LIBRARY_INDEX_GZ_MAX_BYTES = 128 * 1024 * 1024;
+const SCAN_MEMO_VERSION = 2;
+const { SKIP_DIRECTORY_NAMES, SKIP_FILE_NAMES } = require("./libraryIgnore");
 const COLOR_BACKFILL_MAX_ASSETS_PER_SCAN = 24;
 const COLOR_BACKFILL_TIMEOUT_MS = 280;
+const TEXTURE_RESOLUTION_BACKFILL_MAX_ASSETS_PER_SCAN = 400;
 const COLOR_LABELS = [
   { name: "black", rgb: [24, 24, 24] },
   { name: "brown", rgb: [123, 82, 52] },
@@ -65,6 +86,25 @@ const COLOR_LABELS = [
   { name: "yellow", rgb: [210, 194, 78] }
 ];
 const COLOR_LABEL_SET = new Set(COLOR_LABELS.map((item) => item.name));
+// 共享盘上一次 stat 往往就要几毫秒；逐资产两三个串行往返会把 2 万资产的扫描拖到
+// 几分钟。多客户端共享库中默认每阶段 4 路，前台最多 8 路；环境变量只能进一步限流。
+const configuredScanConcurrency = Number(process.env.ASSETHIVE_SCAN_CONCURRENCY);
+const MAX_SCAN_CONCURRENCY = Math.max(1, Math.min(8,
+  Number.isFinite(configuredScanConcurrency) && configuredScanConcurrency > 0 ? Math.floor(configuredScanConcurrency) : 8));
+function resolveScanConcurrency(options) {
+  const requested = Number(options?.concurrency);
+  return Math.max(1, Math.min(MAX_SCAN_CONCURRENCY, Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : 4));
+}
+// 自定义库按批扫描并流式上报：批次越小首屏卡片出现越早，批次切换会损失一点
+// 并发吞吐，64 是兼顾首屏与吞吐的折中值。可用 ASSETHIVE_SCAN_CHUNK_SIZE 覆盖。
+const CUSTOM_SCAN_CHUNK_SIZE = Math.max(MAX_SCAN_CONCURRENCY, Math.min(512, Number(process.env.ASSETHIVE_SCAN_CHUNK_SIZE) || 64));
+const POLL_SHARD_COUNT = 6;
+
+function getPollShard(value) {
+  let hash = 0;
+  for (const char of normalizeComparePath(value)) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
+  return hash % POLL_SHARD_COUNT;
+}
 
 function normalizePath(filePath) {
   return filePath.replaceAll("\\", "/");
@@ -74,81 +114,12 @@ function normalizeComparePath(filePath) {
   return normalizePath(path.resolve(String(filePath || ""))).toLowerCase();
 }
 
-function isUnderRoot(rootPath, targetPath) {
-  const root = String(rootPath || "").trim();
-  const target = String(targetPath || "").trim();
-  if (!root || !target) {
-    return false;
-  }
-  const normalizedRoot = normalizeComparePath(root);
-  const normalizedTarget = normalizeComparePath(target);
-  if (normalizedTarget === normalizedRoot) {
-    return true;
-  }
-  return normalizedTarget.startsWith(`${normalizedRoot}/`);
-}
-
 function isQuixelLikeMeta(meta) {
   if (!meta || typeof meta !== "object") {
     return false;
   }
   const joined = JSON.stringify(meta).toLowerCase();
   return joined.includes("megascans") || joined.includes("quixel") || joined.includes("bridge");
-}
-
-function collectJsonDeepStrings(value, collector, depth = 0) {
-  if (depth > 10) {
-    return;
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed) {
-      collector.push(trimmed);
-    }
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      collectJsonDeepStrings(entry, collector, depth + 1);
-    }
-    return;
-  }
-  if (value && typeof value === "object") {
-    for (const entry of Object.values(value)) {
-      collectJsonDeepStrings(entry, collector, depth + 1);
-    }
-  }
-}
-
-function normalizeMegascanAssetDirFromToken(rawToken, megascanRoot) {
-  const token = String(rawToken || "").trim();
-  if (!token) {
-    return "";
-  }
-  const root = String(megascanRoot || "").trim();
-  if (!root) {
-    return "";
-  }
-  const resolvedRoot = path.resolve(root);
-  const downloadedRoot = path.join(resolvedRoot, "Downloaded");
-  const cleaned = token.replace(/\//g, path.sep);
-  const withoutQuotes = cleaned.replace(/^"|"$/g, "");
-  const maybePath = withoutQuotes.toLowerCase().endsWith(".json") ? path.dirname(withoutQuotes) : withoutQuotes;
-  const resolved = path.isAbsolute(maybePath)
-    ? path.resolve(maybePath)
-    : path.resolve(
-        maybePath.toLowerCase().startsWith(`downloaded${path.sep.toLowerCase()}`)
-          ? path.join(resolvedRoot, maybePath)
-          : path.join(downloadedRoot, maybePath)
-      );
-  if (!isUnderRoot(downloadedRoot, resolved)) {
-    return "";
-  }
-  const base = path.basename(resolved).trim();
-  if (!base || base.toLowerCase() === "downloaded") {
-    return "";
-  }
-  return resolved;
 }
 
 function withTimeout(taskPromise, timeoutMs) {
@@ -167,179 +138,350 @@ function withTimeout(taskPromise, timeoutMs) {
   });
 }
 
-async function collectMegascanAssetDirsFromAssetsData(megascanRoot) {
-  const root = String(megascanRoot || "").trim();
-  if (!root) {
+async function runWithConcurrency(items, limit, worker) {
+  if (!Array.isArray(items) || items.length === 0) {
     return [];
   }
-  const resolvedRoot = path.resolve(root);
-  const signalPath = path.join(resolvedRoot, "Downloaded", "assetsData.json");
-  const stats = await fs.stat(signalPath).catch(() => null);
-  if (!stats?.isFile()) {
-    return [];
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  let completed = 0;
+  let resolveAll = null;
+  const done = new Promise((resolve) => {
+    resolveAll = resolve;
+  });
+  const runNext = async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      try {
+        results[currentIndex] = await worker(items[currentIndex], currentIndex);
+      } catch (error) {
+        results[currentIndex] = { __scanError: error };
+      }
+      completed += 1;
+      if (completed >= items.length && resolveAll) {
+        resolveAll();
+      }
+    }
+  };
+  const workerCount = Math.max(1, Math.min(Number(limit) || 1, items.length));
+  for (let i = 0; i < workerCount; i += 1) {
+    runNext();
   }
+  await done;
+  return results;
+}
+
+// Retry transient SMB errors, but never turn a failed listing into an empty folder.
+async function scanRead(operation) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= 2 || !["EIO", "EBUSY", "EMFILE", "ENFILE", "ETIMEDOUT", "ECONNRESET", "UNKNOWN"].includes(error?.code)) throw error;
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 40 * (attempt + 1)));
+    }
+  }
+}
+
+async function* prefetchScanBatches(iterator) {
+  let pending = iterator.next();
   try {
-    const raw = await fs.readFile(signalPath, "utf-8");
-    const parsed = JSON.parse(raw);
-    const strings = [];
-    collectJsonDeepStrings(parsed, strings);
-    const dirs = new Set();
-    for (const entry of strings) {
-      const resolved = normalizeMegascanAssetDirFromToken(entry, resolvedRoot);
-      if (resolved) {
-        dirs.add(resolved);
-      }
+    while (true) {
+      const batch = await pending;
+      if (batch.done) return;
+      // Keep at most one listing batch ahead; overlap directory discovery with
+      // metadata reads without collecting the whole library into memory.
+      pending = iterator.next();
+      pending.catch(() => {});
+      yield batch.value;
     }
-    return [...dirs];
-  } catch {
-    return [];
+  } finally {
+    await pending.catch(() => {});
+    await iterator.return();
   }
 }
 
-async function collectMegascanAssetDirsFromFolderListing(megascanRoot) {
-  const root = String(megascanRoot || "").trim();
-  if (!root) {
-    return [];
-  }
-  const downloadedRoot = path.join(path.resolve(root), "Downloaded");
-  const stats = await fs.stat(downloadedRoot).catch(() => null);
-  if (!stats?.isDirectory()) {
-    return [];
-  }
-  const dirs = new Set();
-  const topEntries = await fs.readdir(downloadedRoot, { withFileTypes: true }).catch(() => []);
-  for (const entry of topEntries) {
-    if (!entry.isDirectory()) continue;
-    if (shouldSkipDirectory(entry.name)) continue;
-    const typeDir = path.join(downloadedRoot, entry.name);
-    const children = await fs.readdir(typeDir, { withFileTypes: true }).catch(() => []);
-    for (const child of children) {
-      if (!child.isDirectory()) continue;
-      if (shouldSkipDirectory(child.name)) continue;
-      dirs.add(path.join(typeDir, child.name));
-    }
-  }
-  return [...dirs];
-}
-
-async function collectMegascanAssetFiles(assetDir) {
-  const resolvedDir = path.resolve(assetDir);
-  const dirFiles = [];
-  const stack = [resolvedDir];
-  while (stack.length > 0) {
-    const currentDir = stack.pop();
-    if (!currentDir) {
-      continue;
-    }
-    const entries = await fs.readdir(currentDir, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      const fullPath = path.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
-        if (!shouldSkipDirectory(entry.name)) {
-          stack.push(fullPath);
-        }
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      const ext = path.extname(entry.name).toLowerCase();
-      if (!JSON_EXTENSIONS.has(ext) && !MODEL_EXTENSIONS.has(ext) && !TEXTURE_EXTENSIONS.has(ext)) {
-        continue;
-      }
-      dirFiles.push(fullPath);
-    }
-  }
-  return [...new Set(dirFiles)];
-}
-
-async function collectCustomAssetEntriesFromFolderListing(customRoot) {
+async function* collectCustomAssetEntriesFromFolderListing(customRoot, options = {}) {
   const root = String(customRoot || "").trim();
   if (!root) {
     return [];
   }
+  const onProgress = typeof options?.onProgress === "function" ? options.onProgress : null;
   const resolvedRoot = path.resolve(root);
-  const rootStats = await fs.stat(resolvedRoot).catch(() => null);
+  const rootStats = await scanRead(() => fs.stat(resolvedRoot));
   if (!rootStats?.isDirectory()) {
-    return [];
+    throw new Error(`资产库目录不可用: ${resolvedRoot}`);
   }
-  const stack = [resolvedRoot];
-  const results = [];
-  const metaNames = new Set(["asset_info.json", "asset_info.jason"]);
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!current) continue;
-    const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => []);
-    let metaPath = "";
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      const lower = entry.name.toLowerCase();
-      if (metaNames.has(lower)) {
-        metaPath = path.join(current, entry.name);
-        break;
+  let discoveredCount = 0;
+  const cachedFolders = new Map();
+  if (options.incrementalScan) {
+    for (const cached of options.cachedEntries || []) {
+      if (!cached?.record || !Number.isFinite(cached.metaSize)) continue;
+      const key = normalizeComparePath(path.dirname(cached.metaPath));
+      const folder = cachedFolders.get(key) || { entries: [], leaf: false };
+      folder.entries.push(cached);
+      folder.leaf ||= isFolderAssetMetaFileName(path.basename(cached.metaPath));
+      cachedFolders.set(key, folder);
+    }
+  }
+  let visitedDirs = 0;
+  const cachedDirectories = new Set((options.cachedEntries || []).map(entry => normalizeComparePath(path.dirname(entry.metaPath))));
+  const targets = Array.isArray(options.changedDirectories) ? changedDirectories(resolvedRoot, options.changedDirectories.map(target => {
+    let directory = path.resolve(resolvedRoot, target);
+    while (directory !== resolvedRoot) {
+      if (cachedDirectories.has(normalizeComparePath(directory))) return directory;
+      const parent = path.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+    return target;
+  })) : null;
+  let frontier = targets || [resolvedRoot];
+  if (targets) {
+    const targetSet = new Set(targets.map(normalizeComparePath));
+    const rootLength = normalizeComparePath(resolvedRoot).length;
+    const untouched = (options.cachedEntries || []).filter(entry => {
+      let directory = normalizeComparePath(path.dirname(entry.metaPath));
+      while (directory.length >= rootLength) {
+        if (targetSet.has(directory)) return false;
+        const parent = directory.slice(0, directory.lastIndexOf("/"));
+        if (parent === directory) break;
+        directory = parent;
       }
-    }
-    if (metaPath) {
-      results.push({ assetDir: current, metaPath });
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (shouldSkipDirectory(entry.name)) continue;
-      stack.push(path.join(current, entry.name));
+      return true;
+    });
+    for (let i = 0; i < untouched.length; i += CUSTOM_SCAN_CHUNK_SIZE) {
+      yield untouched.slice(i, i + CUSTOM_SCAN_CHUNK_SIZE).map(cached => ({ metaPath: cached.metaPath, assetDir: path.dirname(cached.metaPath), cachedOnly: cached }));
     }
   }
-  return results;
+  while (frontier.length > 0) {
+    const batch = frontier.splice(0, CUSTOM_SCAN_CHUNK_SIZE);
+    visitedDirs += batch.length;
+    // A cold scan of a large library on a network share can spend minutes in
+    // this walk. Report it so the UI never looks idle before the first record.
+    if (onProgress && (visitedDirs === 128 || visitedDirs % 1024 === 0)) {
+      onProgress({
+        phase: "collect",
+        processed: visitedDirs,
+        total: 0,
+        progress: Math.min(4, 1 + visitedDirs / 2048),
+        message: `遍历库目录 · 已发现 ${discoveredCount} 个资产`
+      });
+    }
+    const scanned = await runWithConcurrency(batch, resolveScanConcurrency(options), async (current) => {
+      const cachedFolder = cachedFolders.get(normalizeComparePath(current));
+      if (!targets && cachedFolder?.leaf && getPollShard(current) !== options.pollShard) {
+        // The parent listing confirms this folder still exists. Revisit only
+        // one shard of known assets per poll; new folders are always inspected.
+        return { cachedEntries: cachedFolder.entries, subDirs: [] };
+      }
+      const entries = await scanRead(() => fs.readdir(current, { withFileTypes: true })).catch(async error => {
+        if (targets && error.code === "ENOENT") {
+          // A disappearing SMB connection must not look like an asset deletion.
+          const availableRoot = await scanRead(() => fs.stat(resolvedRoot));
+          if (availableRoot.isDirectory()) return [];
+        }
+        throw error;
+      });
+      let folderMetaPath = "";
+      const sidecarMetaPaths = [];
+      const legacyMetaPaths = [];
+      const animationModelPaths = [];
+      const subDirs = [];
+      // 目录内容指纹：列出直接子项的名字即可判断“有没有增删改名”，
+      // 效果和再 stat 一次目录 mtime 相同，但省掉每资产一个共享盘往返。
+      const signatureParts = [];
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          signatureParts.push(`d:${entry.name.toLowerCase()}`);
+        } else if (entry.isFile()) {
+          signatureParts.push(`f:${entry.name.toLowerCase()}`);
+        }
+      }
+      const dirSignature = signatureParts.sort().join("\n");
+      for (const entry of entries) {
+        if (entry.isFile()) {
+          if (isFolderAssetMetaFileName(entry.name)) {
+            folderMetaPath = path.join(current, entry.name);
+          } else if (isSidecarAssetMetaFileName(entry.name)) {
+            sidecarMetaPaths.push(path.join(current, entry.name));
+          } else if (MODEL_EXTENSIONS.has(path.extname(entry.name).toLowerCase()) && isAnimationLibraryPath(current)) {
+            animationModelPaths.push(path.join(current, entry.name));
+          } else if (JSON_EXTENSIONS.has(path.extname(entry.name).toLowerCase()) && !SKIP_FILE_NAMES.has(entry.name.toLowerCase())) {
+            legacyMetaPaths.push(path.join(current, entry.name));
+          }
+        } else if (entry.isDirectory()) {
+          if (!shouldSkipDirectory(entry.name)) {
+            subDirs.push(path.join(current, entry.name));
+          }
+        }
+      }
+      if (folderMetaPath) {
+        return { metaPaths: [folderMetaPath, ...sidecarMetaPaths], subDirs: [], dirSignature, entries };
+      }
+      // Animation models are canonical; scanning must not delete old sidecars/previews.
+      return { metaPaths: isAnimationLibraryPath(current) ? animationModelPaths : [...sidecarMetaPaths, ...legacyMetaPaths], subDirs, dirSignature, entries };
+    });
+    const results = [];
+    for (const [itemIndex, item] of scanned.entries()) {
+      if (item.__scanError) {
+        options.onWarning?.({ path: batch[itemIndex], operation: "readdir", message: item.__scanError.message });
+        continue;
+      }
+      for (const cached of item.cachedEntries || []) {
+        results.push({ metaPath: cached.metaPath, assetDir: path.dirname(cached.metaPath), cachedOnly: cached });
+      }
+      for (const metaPath of item.metaPaths || []) {
+        results.push({ assetDir: path.dirname(metaPath), metaPath, dirSignature: item.dirSignature, entries: item.entries });
+      }
+      frontier.push(...item.subDirs);
+    }
+    discoveredCount += results.length;
+    if (results.length) yield results;
+  }
 }
 
-async function collectCustomAssetFiles(assetDir, meta) {
+async function collectCustomAssetFiles(assetDir, meta, metaPath = "", listedEntries = null) {
   const resolvedDir = path.resolve(assetDir);
   const dirFiles = [];
-  const entries = await fs.readdir(resolvedDir, { withFileTypes: true }).catch(() => []);
+  const entries = listedEntries || await scanRead(() => fs.readdir(resolvedDir, { withFileTypes: true }));
   const directoryNames = [];
+  // 目录列表已经告诉我们哪些文件存在，元数据里引用的贴图/模型无需再逐个
+  // stat。共享盘上这是每资产近十个往返，2 万资产的冷扫能因此少掉十几万次请求。
+  const directFileNames = new Set();
   for (const entry of entries) {
-    const fullPath = path.join(resolvedDir, entry.name);
     if (entry.isDirectory()) {
       directoryNames.push(entry.name);
       continue;
     }
     if (!entry.isFile()) continue;
-    if (SKIP_FILE_NAMES.has(entry.name.toLowerCase())) continue;
+    const lowerName = entry.name.toLowerCase();
+    directFileNames.add(lowerName);
+    if (SKIP_FILE_NAMES.has(lowerName)) continue;
     const ext = path.extname(entry.name).toLowerCase();
     if (!JSON_EXTENSIONS.has(ext) && !MODEL_EXTENSIONS.has(ext) && !TEXTURE_EXTENSIONS.has(ext)) {
       continue;
     }
-    dirFiles.push(fullPath);
+    dirFiles.push(path.join(resolvedDir, entry.name));
   }
 
   const previewDirCandidates = directoryNames.filter((name) => {
     const lower = String(name || "").trim().toLowerCase();
     return lower === "preview" || lower === "previews";
   });
+  const previewFileNames = new Set();
   for (const folderName of previewDirCandidates) {
     const folderPath = path.join(resolvedDir, folderName);
-    const previewEntries = await fs.readdir(folderPath, { withFileTypes: true }).catch(() => []);
+    const previewEntries = await scanRead(() => fs.readdir(folderPath, { withFileTypes: true }));
+    const folderLower = folderName.toLowerCase();
     for (const entry of previewEntries) {
       if (!entry.isFile()) continue;
+      previewFileNames.add(`${folderLower}/${entry.name.toLowerCase()}`);
       const ext = path.extname(entry.name).toLowerCase();
-      if (!TEXTURE_EXTENSIONS.has(ext)) continue;
+      if (!TEXTURE_EXTENSIONS.has(ext) && !PREVIEW_IMAGE_EXTENSIONS.has(ext)) continue;
       dirFiles.push(path.join(folderPath, entry.name));
     }
   }
 
   if (meta && typeof meta === "object") {
-    const referenced = [
+    const referenced = [...new Set([
       ...collectJsonFiles(meta, resolvedDir, "model"),
       ...collectJsonFiles(meta, resolvedDir, "texture")
-    ];
+    ])];
+    const nestedListings = new Map();
     for (const filePath of referenced) {
       const resolved = path.resolve(String(filePath || ""));
-      const stats = await fs.stat(resolved).catch(() => null);
-      if (!stats?.isFile()) continue;
-      dirFiles.push(resolved);
+      if (!resolved) continue;
+      const relative = normalizePath(path.relative(resolvedDir, resolved)).toLowerCase();
+      if (!relative || relative.startsWith("../") || path.isAbsolute(relative)) {
+        // 资产目录之外的文件仍按原逻辑 stat 确认存在。
+        const stats = await scanRead(() => fs.stat(resolved)).catch((error) => { if (error.code === "ENOENT") return null; throw error; });
+        if (stats?.isFile()) dirFiles.push(resolved);
+        continue;
+      }
+      if (directFileNames.has(relative)) {
+        dirFiles.push(resolved);
+        continue;
+      }
+      if (previewFileNames.has(relative)) {
+        dirFiles.push(resolved);
+        continue;
+      }
+      // Nested texture packs often reference dozens of files in one directory.
+      // Enumerate that directory once, instead of serial SMB stat calls per map.
+      if (!relative.includes("/")) continue;
+      const parent = path.dirname(resolved);
+      const key = normalizeComparePath(parent);
+      if (!nestedListings.has(key)) {
+        const listing = await scanRead(() => fs.readdir(parent, { withFileTypes: true }))
+          .catch((error) => { if (error.code === "ENOENT") return []; throw error; });
+        nestedListings.set(key, new Set(listing.filter((item) => item.isFile()).map((item) => item.name.toLowerCase())));
+      }
+      if (nestedListings.get(key).has(path.basename(resolved).toLowerCase())) dirFiles.push(resolved);
     }
   }
 
-  return [...new Set(dirFiles)];
+  // Legacy JSON packages also allowed media in unreferenced subdirectories.
+  // Preserve their old three-level discovery depth when standard metadata is absent.
+  const metaName = path.basename(String(metaPath || ""));
+  if (metaName && !isFolderAssetMetaFileName(metaName) && !isSidecarAssetMetaFileName(metaName) && !isAnimationModelMetaPath(metaPath)) {
+    let nestedDirs = directoryNames.filter((name) => !shouldSkipDirectory(name) && !/^previews?$/i.test(name))
+      .map((name) => path.join(resolvedDir, name));
+    for (let depth = 1; depth < NESTED_FILE_PROPAGATION_MAX_DEPTH && nestedDirs.length; depth += 1) {
+      const nextDirs = [];
+      for (const dir of nestedDirs) {
+        const nestedEntries = await scanRead(() => fs.readdir(dir, { withFileTypes: true }));
+        for (const entry of nestedEntries) {
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isDirectory() && !shouldSkipDirectory(entry.name)) nextDirs.push(fullPath);
+          else if (entry.isFile() && (MODEL_EXTENSIONS.has(path.extname(entry.name).toLowerCase()) || TEXTURE_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))) dirFiles.push(fullPath);
+        }
+      }
+      nestedDirs = nextDirs;
+    }
+  }
+  const uniqueFiles = [...new Set(dirFiles)];
+  if (isAnimationModelMetaPath(metaPath)) {
+    const resolvedMeta = path.resolve(String(metaPath || ""));
+    return uniqueFiles.filter((filePath) => path.resolve(filePath).toLowerCase() === resolvedMeta.toLowerCase());
+  }
+  const sidecarStem = getSidecarStemFromMetaFileName(path.basename(String(metaPath || "")));
+  if (!sidecarStem) {
+    return uniqueFiles;
+  }
+  const allowed = new Set();
+  const addAllowed = (filePath) => {
+    const resolved = path.resolve(String(filePath || ""));
+    if (resolved) allowed.add(normalizeComparePath(resolved));
+  };
+  if (metaPath) addAllowed(metaPath);
+  if (meta && typeof meta === "object") {
+    for (const filePath of [
+      ...collectJsonFiles(meta, resolvedDir, "model"),
+      ...collectJsonFiles(meta, resolvedDir, "texture")
+    ]) {
+      addAllowed(filePath);
+    }
+    const previewUris = [
+      meta.previewImage,
+      meta.detailImage,
+      ...(Array.isArray(meta.previews?.images) ? meta.previews.images.map((item) => item?.uri) : [])
+    ];
+    for (const value of previewUris) {
+      const previewUri = String(value || "").trim();
+      if (previewUri) addAllowed(path.isAbsolute(previewUri) ? previewUri : path.join(resolvedDir, previewUri));
+    }
+  }
+  const stemLower = sidecarStem.toLowerCase();
+  return uniqueFiles.filter((filePath) => {
+    if (allowed.has(normalizeComparePath(filePath))) return true;
+    const baseName = path.basename(filePath);
+    const stem = path.basename(filePath, path.extname(filePath)).toLowerCase();
+    return stem === stemLower
+      || stem.startsWith(`${stemLower}_preview`)
+      || baseName.toLowerCase() === `${stemLower}.asset_info.json`;
+  });
 }
 
 function shouldSkipDirectory(dirName) {
@@ -355,23 +497,27 @@ function normalizeAssetType(value) {
   if (!lower) {
     return "";
   }
-  if (lower === "3dasset" || lower === "asset3d") {
+  if (lower === "3dasset" || lower === "3dassets" || lower === "asset3d") {
     return "3d";
   }
-  if (lower === "3dplants" || lower === "plant3d") {
+  if (lower === "3dplants" || lower === "plant3d" || lower === "foliage") {
     return "3dplant";
   }
-  if (lower === "imperfections") {
+  if (lower === "displacements") return "displacement";
+  if (lower === "brush") {
+    return "";
+  }
+  if (lower === "imperfections" || lower === "surfaceimperfection") {
     return "imperfection";
   }
   if (lower === "atlases") {
     return "atlas";
   }
-  if (lower === "displacements") {
-    return "displacement";
-  }
   if (lower === "decals") {
     return "decal";
+  }
+  if (lower === "surfaces") {
+    return "surface";
   }
   return lower;
 }
@@ -384,17 +530,38 @@ function normalizeTheme(value) {
 }
 
 function mapFolderTypeToAssetType(folderType) {
-  if (folderType === "atlas") {
-    return "decal";
+  if (folderType === "foliage") {
+    return "3dplant";
   }
   return folderType;
 }
 
+function getTopCategoryForAssetType(assetType) {
+  if (assetType === "animation") {
+    return "animation";
+  }
+  if (["suit", "monster", "npc", "weapon"].includes(assetType)) {
+    return "character";
+  }
+  return ["3d", "3dplant", "surface", "decal", "atlas", "imperfection", "displacement", "hdri"].includes(assetType) ? "environment" : "";
+}
+
+function getSubTypeFromPath(assetDir) {
+  const segments = normalizePath(assetDir).split("/").filter(Boolean);
+  const lower = segments.map((segment) => normalizeAssetType(segment));
+  const typeIndex = lower.findIndex((segment) => ["3d", "3dplant", "surface", "decal", "atlas", "imperfection", "displacement", "hdri"].includes(segment));
+  if (typeIndex <= 0 || lower[typeIndex - 1] !== "environment" || typeIndex + 1 >= segments.length) {
+    return "";
+  }
+  const candidate = String(segments[typeIndex + 1] || "").trim();
+  return candidate && !candidate.includes(".") ? candidate : "";
+}
+
 function getAssetTypeFromPath(assetDir, source = "") {
   const segments = normalizePath(assetDir).toLowerCase().split("/").filter(Boolean);
-  const known = new Set(["3d", "3dplant", "surface", "decal", "atlas", "imperfection", "displacement", "brush"]);
+  const known = new Set(["3d", "3dassets", "3dplant", "foliage", "surface", "surfaces", "decal", "decals", "atlas", "imperfection", "displacement", "hdri", "animation"]);
   const parentFolder = segments.length >= 2 ? normalizeAssetType(segments[segments.length - 2]) : "";
-  if ((source === "quixel" || source === "custom") && known.has(parentFolder)) {
+  if (source === "custom" && known.has(parentFolder)) {
     return mapFolderTypeToAssetType(parentFolder);
   }
   for (const segment of segments) {
@@ -407,6 +574,7 @@ function getAssetTypeFromPath(assetDir, source = "") {
 }
 
 function getAssetType(meta, assetDir = "", source = "") {
+  if (isDisplacementMetadata(meta, { legacy: true })) return "displacement";
   const fromPath = getAssetTypeFromPath(assetDir, source);
   if (fromPath) {
     return fromPath;
@@ -416,6 +584,24 @@ function getAssetType(meta, assetDir = "", source = "") {
     return mapFolderTypeToAssetType(fromJson);
   }
   return "";
+}
+
+function getStandardAssetTags(meta, assetDir, assetType) {
+  const fromJson = Array.isArray(meta?.standardAssetTags)
+    ? meta.standardAssetTags.map((tag) => String(tag || "").trim()).filter(Boolean)
+    : [];
+  if (fromJson.length > 0) {
+    return fromJson;
+  }
+  const legacy = String(meta?.subType || "").trim();
+  if (legacy) {
+    return [legacy];
+  }
+  if (assetType === "3d" || assetType === "3dplant") {
+    const fromPath = getSubTypeFromPath(assetDir);
+    return fromPath ? [fromPath] : [];
+  }
+  return [];
 }
 
 function isInUAssetsPath(filePath) {
@@ -432,41 +618,137 @@ async function readDirSafe(dir) {
 
 async function readJsonSafe(filePath, options = {}) {
   const maxBytes = Number(options?.maxBytes || 0);
+  const knownBytes = Number(options?.knownBytes);
   try {
     if (maxBytes > 0) {
-      const stats = await fs.stat(filePath).catch(() => null);
-      if (stats && stats.size > maxBytes) {
+      // 调用方刚刚 stat 过这个文件时直接把大小传进来，省掉共享盘上重复的一次
+      // stat（2 万资产的库每轮冷扫就是 2 万次往返）。
+      const size = Number.isFinite(knownBytes) ? knownBytes : Number((await fs.stat(filePath).catch(() => null))?.size);
+      if (Number.isFinite(size) && size > maxBytes) {
         return null;
       }
     }
-    const raw = await fs.readFile(filePath, "utf-8");
-    return JSON.parse(raw);
-  } catch {
+    const raw = await scanRead(() => fs.readFile(filePath, "utf-8"));
+    return JSON.parse(raw.replace(/^\uFEFF/, ""));
+  } catch (error) {
+    if (options.strict) throw error;
     return null;
   }
 }
 
-function getCustomLibraryIndexPath(customRoot) {
-  const root = String(customRoot || "").trim();
+function getLibraryIndexFilePath(rootPath, fileName) {
+  const root = String(rootPath || "").trim();
   if (!root) {
     return "";
   }
-  return path.join(path.resolve(root), CUSTOM_LIBRARY_INDEX_DIR, CUSTOM_LIBRARY_INDEX_FILE);
+  return path.join(path.resolve(root), CUSTOM_LIBRARY_INDEX_DIR, fileName);
 }
 
-async function writeJsonAtomic(filePath, data) {
+function getCustomLibraryIndexPath(customRoot) {
+  return getLibraryIndexFilePath(customRoot, CUSTOM_LIBRARY_INDEX_FILE);
+}
+
+function getCustomLibraryIndexGzPath(customRoot) {
+  return getLibraryIndexFilePath(customRoot, CUSTOM_LIBRARY_INDEX_FILE_GZ);
+}
+
+function getCustomLibraryIndexPaths(customRoot) {
+  return [getCustomLibraryIndexPath(customRoot), getCustomLibraryIndexGzPath(customRoot)].filter(Boolean);
+}
+
+// 备忘的“内容指纹”：只有元数据 mtime、目录文件名集合或记录 ID 变化时才值得
+// 重写。共享盘上少写一个一百多 MB 的文件，比任何微优化都更省时间。
+function buildScanMemoSignature(entries) {
+  const parts = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry !== "object") continue;
+    const metaPath = String(entry.metaPath || "").trim();
+    if (!metaPath) continue;
+    parts.push([
+      normalizeComparePath(metaPath),
+      Number(entry.metaMtimeMs) || 0,
+      Number(entry.metaSize) || 0,
+      String(entry.dirSignature || ""),
+      String(entry.record?.id || "")
+    ].join("|"));
+  }
+  parts.sort();
+  return crypto.createHash("sha1").update(parts.join("\n")).digest("hex");
+}
+
+async function readCustomScanMemo(customRoot, options = {}) {
+  const localPath = String(options.scanMemoPath || "").trim();
+  const resident = options.residentMemo === true;
+  const sourceStats = resident && localPath ? await fs.stat(localPath).catch(() => null) : null;
+  const sourceStamp = sourceStats?.isFile() ? { size: sourceStats.size, mtimeMs: sourceStats.mtimeMs } : null;
+  const readOptions = { maxBytes: CUSTOM_LIBRARY_INDEX_LEGACY_MAX_BYTES,
+    ...(resident ? { mapItem: compactScanMemoEntry } : {}) };
+  if (localPath) {
+    for (const candidate of resident ? [getResidentMemoPath(localPath), localPath] : [localPath]) {
+      try {
+        const stats = await fs.stat(candidate);
+        if (stats.isFile() && stats.size > 0 && stats.size <= CUSTOM_LIBRARY_INDEX_GZ_MAX_BYTES) {
+          const parsed = await readGzipJsonArray(candidate, readOptions);
+          if (parsed.version === SCAN_MEMO_VERSION && normalizeComparePath(parsed.root) === normalizeComparePath(customRoot)
+            && Array.isArray(parsed.assets)) {
+            if (resident && candidate !== localPath
+              && (parsed.projection !== PROJECTION || !sameSourceStamp(parsed.sourceStamp, sourceStamp))) continue;
+            return { path: candidate, entries: parsed.assets, sourceStamp, version: parsed.version, legacy: false, signature: buildScanMemoSignature(parsed.assets) };
+          }
+        }
+      } catch { /* Missing/corrupt local state may use a legacy read-only hint. */ }
+    }
+  }
+  const gzPath = getCustomLibraryIndexGzPath(customRoot);
+  const gzStats = gzPath ? await fs.stat(gzPath).catch(() => null) : null;
+  if (gzPath && gzStats?.isFile() && gzStats.size > 0 && gzStats.size <= CUSTOM_LIBRARY_INDEX_GZ_MAX_BYTES) {
+    try {
+      const parsed = await readGzipJsonArray(gzPath, readOptions);
+      const entries = Array.isArray(parsed?.assets) ? parsed.assets : [];
+      return { path: gzPath, entries, sourceStamp, version: Number(parsed?.version) || 1, legacy: false, signature: buildScanMemoSignature(entries) };
+    } catch {
+      // 损坏的 gz 备忘按缺失处理，回退到旧 JSON 或全量扫描。
+    }
+  }
+  const legacyPath = getCustomLibraryIndexPath(customRoot);
+  const legacy = legacyPath
+    ? await readJsonSafe(legacyPath, { maxBytes: CUSTOM_LIBRARY_INDEX_LEGACY_MAX_BYTES })
+    : null;
+  const entries = Array.isArray(legacy?.assets) ? (resident ? legacy.assets.map(compactScanMemoEntry) : legacy.assets) : [];
+  return { path: legacyPath, entries, sourceStamp, version: Number(legacy?.version) || 1, legacy: true, signature: buildScanMemoSignature(entries) };
+}
+
+async function writeCustomScanMemo(customRoot, entries, options = {}) {
+  const targets = new Set();
+  if (options.scanMemoPath) targets.add(path.resolve(options.residentMemo ? getResidentMemoPath(options.scanMemoPath) : options.scanMemoPath));
+  // Shared legacy memo publication is reserved for explicit maintenance.
+  if (options.maintenance && options.writeSharedMemo) targets.add(getCustomLibraryIndexGzPath(customRoot));
+  if (!targets.size) return false;
+  const compressed = await gzipJsonArray({
+    version: SCAN_MEMO_VERSION,
+    generatedAt: new Date().toISOString(),
+    root: path.resolve(customRoot),
+    ...(options.residentMemo ? { projection: PROJECTION, sourceStamp: options.sourceStamp ?? null } : {})
+  }, Array.isArray(entries) ? entries : []);
+  let saved = false;
+  for (const target of targets) saved = (await writeBufferAtomic(target, compressed)) || saved;
+  return saved;
+}
+
+async function writeBufferAtomic(filePath, buffer) {
   const target = String(filePath || "").trim();
   if (!target) return false;
   const dir = path.dirname(target);
+  const tmpPath = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
     await fs.mkdir(dir, { recursive: true });
-    const tmpPath = `${target}.tmp`;
-    await fs.writeFile(tmpPath, JSON.stringify(data));
-    await fs.rm(target, { force: true }).catch(() => {});
+    await fs.writeFile(tmpPath, buffer);
     await fs.rename(tmpPath, target);
     return true;
   } catch {
     return false;
+  } finally {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
   }
 }
 
@@ -477,6 +759,13 @@ function extractTags(meta, folderName, assetDir = "", source = "") {
   }
   if (Array.isArray(meta?.tags)) {
     for (const tag of meta.tags) {
+      if (typeof tag === "string" && tag.trim()) {
+        tags.add(tag.toLowerCase());
+      }
+    }
+  }
+  if (Array.isArray(meta?.zionTags)) {
+    for (const tag of meta.zionTags) {
       if (typeof tag === "string" && tag.trim()) {
         tags.add(tag.toLowerCase());
       }
@@ -515,7 +804,7 @@ function extractTags(meta, folderName, assetDir = "", source = "") {
       }
     }
   }
-  return [...tags];
+  return removeAssetNameTags([...tags], meta);
 }
 
 function extractThemes(meta) {
@@ -534,6 +823,14 @@ function extractThemes(meta) {
   }
   if (Array.isArray(meta?.semanticTags?.theme)) {
     meta.semanticTags.theme.forEach(addTheme);
+  }
+  if (normalizeAssetType(meta?.assetType || meta?.asset_type) === "imperfection"
+    && meta?.sourceClassification?.assetType === "imperfection") {
+    const options = require("./megascansCategory").CATEGORY_OPTIONS.imperfection;
+    for (const key of Object.keys(meta.sourceClassification.assetCategories?.imperfection || {})) {
+      const category = options.find(value => normalizeTheme(value) === normalizeTheme(key));
+      if (category) addTheme(category);
+    }
   }
   return [...themes];
 }
@@ -710,18 +1007,13 @@ async function backfillColorTagsMeta(metaPath, meta, colorTags) {
   if (uniqueTags.length === 0) {
     return;
   }
-  const semanticTags = meta.semanticTags && typeof meta.semanticTags === "object" && !Array.isArray(meta.semanticTags)
-    ? meta.semanticTags
-    : {};
-  semanticTags.color = uniqueTags;
-  const nextMeta = {
-    ...meta,
+  const nextMeta = await updateAssetMetadataFile(metaPath, (current) => ({
+    ...current,
     colorTags: uniqueTags,
-    semanticTags
-  };
-  await fs.writeFile(metaPath, JSON.stringify(nextMeta, null, 2), "utf8");
+    semanticTags: { ...current.semanticTags, color: uniqueTags }
+  }));
   meta.colorTags = uniqueTags;
-  meta.semanticTags = semanticTags;
+  meta.semanticTags = nextMeta.semanticTags;
 }
 
 function hasAssetLikeMeta(meta) {
@@ -754,9 +1046,9 @@ function resolveMetaFilePath(assetDir, value) {
 
 function collectJsonFiles(meta, assetDir, kind) {
   const extensions = kind === "model" ? MODEL_EXTENSIONS : TEXTURE_EXTENSIONS;
-  const unique = new Set();
+  const unique = new Map();
   const pushIfValid = (value) => {
-    const normalized = resolveMetaFilePath(assetDir, value);
+    const normalized = kind === "model" ? resolveAssetModelPath(assetDir, value) : resolveMetaFilePath(assetDir, value);
     if (!normalized) {
       return;
     }
@@ -764,7 +1056,7 @@ function collectJsonFiles(meta, assetDir, kind) {
     if (!extensions.has(ext)) {
       return;
     }
-    unique.add(normalized);
+    unique.set(kind === "model" ? normalized.toLowerCase() : normalized, normalized);
   };
   if (kind === "model" && meta?.modelSlots && typeof meta.modelSlots === "object" && !Array.isArray(meta.modelSlots)) {
     for (const filePath of Object.values(meta.modelSlots)) {
@@ -788,7 +1080,7 @@ function collectJsonFiles(meta, assetDir, kind) {
       pushIfValid(item.path || item.uri);
     }
   }
-  return [...unique];
+  return [...unique.values()];
 }
 
 function parseDimensionValue(input) {
@@ -862,7 +1154,7 @@ function extractDimensions(meta) {
 
 function getFallbackDimensions(assetType) {
   const normalizedType = String(assetType || "").toLowerCase();
-  if (normalizedType === "3d" || normalizedType === "3dplant") {
+  if (isModelAssetType(normalizedType)) {
     return { x: 1, y: 1, z: 1 };
   }
   return null;
@@ -872,15 +1164,150 @@ async function backfillDimensionsMeta(metaPath, meta, dimensions) {
   if (!metaPath || !meta || !dimensions) {
     return;
   }
-  const scanInformation = meta.scanInformation && typeof meta.scanInformation === "object" && !Array.isArray(meta.scanInformation)
-    ? meta.scanInformation
-    : {};
-  scanInformation.dimensions = dimensions;
-  const nextMeta = {
-    ...meta,
-    scanInformation
+  const nextMeta = await updateAssetMetadataFile(metaPath, (current) => ({
+    ...current,
+    scanInformation: { ...current.scanInformation, dimensions }
+  }));
+  meta.scanInformation = nextMeta.scanInformation;
+}
+
+// 元数据里的贴图槽已经记录了每张贴图的宽高（导入时测量并持久化）。冷扫时没有
+// 备忘可复用，以前仍会为每张贴图读一次图片头（2 万资产的库就是十几万次共享盘
+// 读），这里直接用元数据推导同一份分析结果，只在确实缺尺寸时才回退到读图片。
+function buildKnownTextureDimensions(meta) {
+  const known = new Map();
+  const addEntry = (item) => {
+    if (!item || typeof item !== "object") return;
+    const width = Math.max(0, Number(item.width) || 0);
+    const height = Math.max(0, Number(item.height) || 0);
+    if (width <= 0 || height <= 0) return;
+    const name = path.basename(String(item.uri || item.path || "").trim()).toLowerCase();
+    if (!name || known.has(name)) return;
+    known.set(name, { width, height });
   };
-  await fs.writeFile(metaPath, JSON.stringify(nextMeta, null, 2), "utf8");
+  for (const item of Array.isArray(meta?.textureEntries) ? meta.textureEntries : []) addEntry(item);
+  for (const item of Array.isArray(meta?.components) ? meta.components : []) {
+    if (String(item?.type || "").trim().toLowerCase() === "model") continue;
+    addEntry(item);
+  }
+  return known;
+}
+
+function deriveTextureAnalysisFromMeta(record, dimensions, dimensionsSource) {
+  const textureFiles = normalizeTextureFiles(record?.textureFiles);
+  if (textureFiles.length === 0) return null;
+  const known = buildKnownTextureDimensions(record?.meta);
+  const inspected = [];
+  for (const filePath of textureFiles) {
+    const dims = known.get(path.basename(filePath).toLowerCase());
+    if (!dims) return null;
+    inspected.push({ filePath, width: dims.width, height: dims.height });
+  }
+  const fourKTextures = inspected.filter((item) =>
+    item.width >= FOUR_K_THRESHOLD_PIXELS || item.height >= FOUR_K_THRESHOLD_PIXELS
+  );
+  const maxTextureDimension = inspected.reduce((maximum, item) => Math.max(maximum, item.width, item.height), 0);
+  return {
+    version: TEXTURE_ANALYSIS_VERSION,
+    status: "analyzed",
+    smallAsset: true,
+    uses4KTexture: fourKTextures.length > 0,
+    requiresReview: fourKTextures.length > 0,
+    dimensions,
+    dimensionsSource: String(dimensionsSource || ""),
+    maxDimensionMeters: dimensions ? Math.max(dimensions.x, dimensions.y, dimensions.z) : null,
+    sizeThresholdMeters: LARGE_OBJECT_LIMIT_METERS,
+    textureThresholdPixels: FOUR_K_THRESHOLD_PIXELS,
+    maxTextureDimension,
+    textureCount: textureFiles.length,
+    inspectedTextureCount: inspected.length,
+    unreadableTextureCount: 0,
+    fourKTextureCount: fourKTextures.length,
+    fourKTextureFiles: fourKTextures
+      .slice()
+      .sort((a, b) => Math.max(b.width, b.height) - Math.max(a.width, a.height))
+      .map((item) => path.basename(item.filePath))
+      .slice(0, MAX_REPORTED_TEXTURES)
+  };
+}
+
+// 除 analyzedAt 外内容一致就认为没变化：避免“只是时间戳不同”导致每次冷扫
+// 都把资产元数据重写一遍。
+function stripTextureAnalysisTimestamp(analysis) {
+  if (!analysis || typeof analysis !== "object") return null;
+  const { analyzedAt, ...rest } = analysis;
+  return rest;
+}
+
+function isSameTextureAnalysis(left, right) {
+  return JSON.stringify(stripTextureAnalysisTimestamp(left)) === JSON.stringify(stripTextureAnalysisTimestamp(right));
+}
+
+const DERIVED_TEXTURE_ANALYSIS_KEYS = [
+  "status",
+  "smallAsset",
+  "uses4KTexture",
+  "requiresReview",
+  "dimensions",
+  "maxDimensionMeters",
+  "sizeThresholdMeters",
+  "textureThresholdPixels",
+  "maxTextureDimension",
+  "textureCount",
+  "inspectedTextureCount",
+  "unreadableTextureCount",
+  "fourKTextureCount",
+  "fourKTextureFiles"
+];
+
+function matchesDerivedTextureAnalysis(existing, derived) {
+  if (!existing || !derived) return false;
+  for (const key of DERIVED_TEXTURE_ANALYSIS_KEYS) {
+    if (JSON.stringify(existing[key] ?? null) !== JSON.stringify(derived[key] ?? null)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function populateTextureAnalysis(record) {
+  if (!record || !isModelAssetType(record.assetType)) {
+    return record;
+  }
+  const existing = normalizeTextureAnalysis(record.textureAnalysis || record.meta?.textureAnalysis);
+  const scanInformation = record.meta?.scanInformation && typeof record.meta.scanInformation === "object"
+    ? record.meta.scanInformation
+    : {};
+  const dimensions = getReliableDimensions(scanInformation.dimensions, scanInformation.dimensionsSource);
+  const derived = deriveTextureAnalysisFromMeta(record, dimensions, scanInformation.dimensionsSource);
+  if (existing && matchesDerivedTextureAnalysis(existing, derived)) {
+    // 已持久化的分析与元数据里的贴图尺寸自洽，直接复用，不读任何贴图。
+    record.textureAnalysis = existing;
+    record.meta = record.meta && typeof record.meta === "object" ? record.meta : {};
+    record.meta.textureAnalysis = existing;
+    return record;
+  }
+  const next = await analyzeAssetTextureUsage({
+    dimensions,
+    dimensionsSource: scanInformation.dimensionsSource,
+    textureFiles: record.textureFiles,
+    previousAnalysis: existing
+  });
+  if (!existing || !isSameTextureAnalysis(existing, next)) {
+    record.textureAnalysis = next;
+    record.meta = record.meta && typeof record.meta === "object" ? record.meta : {};
+    record.meta.textureAnalysis = next;
+    record.shouldBackfillTextureAnalysis = true;
+  }
+  return record;
+}
+
+async function backfillTextureAnalysisMeta(metaPath, meta, textureAnalysis) {
+  const normalized = normalizeTextureAnalysis(textureAnalysis);
+  if (!metaPath || !meta || !normalized) {
+    return;
+  }
+  await updateAssetMetadataFile(metaPath, (current) => ({ ...current, textureAnalysis: normalized }));
 }
 
 async function collectFiles(root, options = {}) {
@@ -971,60 +1398,8 @@ async function collectFiles(root, options = {}) {
   };
 }
 
-function findPreviewImages(files, meta, assetDir, options = {}) {
-  const source = String(options?.source || "").trim().toLowerCase();
-  const assetType = String(options?.assetType || "").trim().toLowerCase();
-  const assetId = String(options?.assetId || "").trim();
-  if (source === "quixel") {
-    return findMegascanPreviewImages(files, assetDir, assetId, assetType);
-  }
+function findPreviewImages(files, meta, assetDir) {
   return findCustomPreviewImages(files, meta, assetDir);
-}
-
-function findMegascanPreviewImages(files, assetDir, assetId, assetType) {
-  const textureFiles = files.filter((file) => PREVIEW_IMAGE_EXTENSIONS.has(path.extname(file).toLowerCase()));
-  const resolvedAssetDir = path.resolve(assetDir).toLowerCase();
-  const normalizedId = String(assetId || "").trim().toLowerCase();
-  const folderBase = path.basename(String(assetDir || "")).trim();
-  const folderBaseLower = folderBase.toLowerCase();
-  const lastUnderscoreToken = folderBaseLower.includes("_") ? folderBaseLower.split("_").pop() : "";
-  const lastUnderscoreId = /^[a-z0-9]{4,20}$/i.test(lastUnderscoreToken || "") ? lastUnderscoreToken : "";
-  const sanitizedFolderToken = folderBaseLower
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-
-  const prefixCandidates = [
-    normalizedId,
-    lastUnderscoreId,
-    folderBaseLower,
-    sanitizedFolderToken
-  ]
-    .map((value) => String(value || "").trim().toLowerCase())
-    .filter(Boolean);
-
-  if (prefixCandidates.length === 0) {
-    return { previewImage: null, detailImage: null };
-  }
-
-  const pickByExtPriority = (candidates) => {
-    const priority = new Map([[".png", 5], [".jpg", 4], [".jpeg", 3], [".webp", 2], [".bmp", 1]]);
-    return [...candidates]
-      .map((filePath) => ({ filePath, score: priority.get(path.extname(filePath).toLowerCase()) || 0 }))
-      .sort((a, b) => b.score - a.score)[0]?.filePath || null;
-  };
-
-  const rootFiles = textureFiles.filter((filePath) => path.resolve(path.dirname(filePath)).toLowerCase() === resolvedAssetDir);
-  let previewImage = null;
-  for (const prefix of prefixCandidates) {
-    const candidates = rootFiles.filter((filePath) => path.basename(filePath).toLowerCase().startsWith(`${prefix}_preview.`));
-    const picked = pickByExtPriority(candidates);
-    if (picked) {
-      previewImage = picked;
-      break;
-    }
-  }
-
-  return { previewImage, detailImage: previewImage };
 }
 
 function findCustomPreviewImages(files, meta, assetDir) {
@@ -1042,7 +1417,66 @@ function findCustomPreviewImages(files, meta, assetDir) {
     return token.includes("/previews/") || token.includes("/preview/");
   };
 
+  // 一张已经进入纹理槽的贴图不能作为预览图；相对 uri 用文件名兜底，
+  // 避免 metadata 里的相对路径与扫描到的绝对路径不一致时漏判。
+  const textureSlotPathKeys = new Set();
+  const textureSlotBaseKeys = new Set();
+  const addTextureSlotPath = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) return;
+    const absolute = path.isAbsolute(raw) ? raw : path.join(assetDir || "", raw);
+    textureSlotPathKeys.add(path.resolve(absolute).toLowerCase());
+    const base = path.basename(raw).toLowerCase();
+    if (base) textureSlotBaseKeys.add(base);
+  };
+  const addTextureSlotEntries = (value) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      for (const item of value) addTextureSlotEntries(item);
+      return;
+    }
+    if (typeof value === "string") {
+      addTextureSlotPath(value);
+      return;
+    }
+    if (typeof value !== "object") return;
+    addTextureSlotPath(value.uri);
+    addTextureSlotPath(value.filePath);
+    addTextureSlotPath(value.path);
+    addTextureSlotPath(value.source);
+  };
+  const addTextureSlotMap = (value) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      addTextureSlotEntries(value);
+      return;
+    }
+    if (typeof value === "object") {
+      for (const nested of Object.values(value)) addTextureSlotEntries(nested);
+    }
+  };
+  addTextureSlotEntries(meta?.textureEntries);
+  addTextureSlotMap(meta?.textureSlots);
+  addTextureSlotEntries(meta?.textureFiles);
+  if (Array.isArray(meta?.components)) {
+    for (const component of meta.components) {
+      if (String(component?.type || "").toLowerCase() === "texture") addTextureSlotEntries(component);
+    }
+  }
+  const isTextureSlotPath = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) return false;
+    const absolute = path.isAbsolute(raw) ? raw : path.join(assetDir || "", raw);
+    if (textureSlotPathKeys.has(path.resolve(absolute).toLowerCase())) return true;
+    const base = path.basename(raw).toLowerCase();
+    return Boolean(base && textureSlotBaseKeys.has(base));
+  };
+
   const resolveByMetaUri = (uriValue) => {
+    const rawUri = String(uriValue || "").trim();
+    if (path.isAbsolute(rawUri) && !isAnimationLibraryPath(rawUri)) {
+      return isTextureSlotPath(rawUri) ? null : rawUri;
+    }
     const token = normalizeFileToken(uriValue);
     if (!token) {
       return null;
@@ -1051,11 +1485,13 @@ function findCustomPreviewImages(files, meta, assetDir) {
       return null;
     }
     const baseName = path.basename(token);
-    const exactByUri = textureFiles.find((filePath) => normalizeFileToken(filePath).endsWith(token));
+    const exactByUri = textureFiles.find((filePath) => !isTextureSlotPath(filePath)
+      && normalizeFileToken(filePath).endsWith(token));
     if (exactByUri) {
       return exactByUri;
     }
-    const exactByBase = textureFiles.find((filePath) => path.basename(filePath).toLowerCase() === baseName);
+    const exactByBase = textureFiles.find((filePath) => !isTextureSlotPath(filePath)
+      && path.basename(filePath).toLowerCase() === baseName);
     if (exactByBase) {
       return exactByBase;
     }
@@ -1068,7 +1504,7 @@ function findCustomPreviewImages(files, meta, assetDir) {
 
     if (name.includes("normal") || name.includes("roughness") || name.includes("metalness") || name.includes("ao") || name.includes("displacement")) return -100;
     if (name.includes("billboard") || name.includes("lod")) return -50;
-    if (name.endsWith("_preview.png")) score += 50;
+    if (name.endsWith("_preview.png") || name.endsWith("_preview.webm") || name.endsWith("_preview.mp4") || name.endsWith("_preview.gif")) score += 50;
     if (name.includes("popup")) score += 40;
     if (name.includes("thumb")) score += 30;
     if (name.includes("preview")) score += 20;
@@ -1082,22 +1518,33 @@ function findCustomPreviewImages(files, meta, assetDir) {
   const scoreCardPreview = (filePath) => {
     const name = path.basename(filePath).toLowerCase();
     let score = scoreDetailPreview(filePath);
-    if (name.endsWith("_preview.png") || name.endsWith("_preview.jpg") || name.endsWith("_preview.jpeg")) score += 80;
+    if (name.endsWith("_preview.png") || name.endsWith("_preview.jpg") || name.endsWith("_preview.jpeg")
+      || name.endsWith("_preview.webm") || name.endsWith("_preview.mp4") || name.endsWith("_preview.gif")) score += 80;
     if (name.includes("_sp.") || name.includes("sidepanel")) score -= 40;
     return score;
   };
 
-  const previewsFolderFiles = textureFiles.filter((filePath) => isPreviewFolderFile(filePath));
+  const previewsFolderFiles = textureFiles.filter((filePath) => isPreviewFolderFile(filePath) && !isTextureSlotPath(filePath));
 
   let metaPreview = null;
+  const previewImages = [];
   if (meta?.previews?.images && Array.isArray(meta.previews.images)) {
     for (const img of meta.previews.images) {
       if (!img?.uri) continue;
-      metaPreview = resolveByMetaUri(img.uri);
-      if (metaPreview) break;
+      const resolved = resolveByMetaUri(img.uri);
+      if (!resolved) continue;
+      const tags = Array.isArray(img.tags) ? img.tags.map((tag) => String(tag || "").trim()).filter(Boolean) : [];
+      previewImages.push({ path: resolved, tags });
     }
+    metaPreview = previewImages.find((item) => item.tags.includes("cover"))?.path
+      || previewImages.find((item) => item.tags.includes("view:front"))?.path
+      || previewImages[0]?.path
+      || null;
   }
   metaPreview = metaPreview || resolveByMetaUri(meta?.previewImage) || resolveByMetaUri(meta?.detailImage);
+  if (metaPreview && isTextureSlotPath(metaPreview)) {
+    metaPreview = null;
+  }
   if (metaPreview) {
     previewImage = metaPreview;
   } else if (previewsFolderFiles.length > 0) {
@@ -1105,7 +1552,139 @@ function findCustomPreviewImages(files, meta, assetDir) {
   }
 
   const detailImage = previewImage ? previewImage : null;
-  return { previewImage, detailImage };
+  if (previewImage && previewImages.length === 0) previewImages.push({ path: previewImage, tags: ["preview"] });
+  return { previewImage, detailImage, previewImages };
+}
+
+function formatTextureResolutionLabel(pixels) {
+  const normalized = Math.max(0, Math.round(Number(pixels) || 0));
+  if (normalized >= 8192) return Math.round(normalized / 1024) + "K";
+  if (normalized >= 4096) return "4K";
+  if (normalized >= 2048) return "2K";
+  if (normalized >= 1024) return "1K";
+  return normalized > 0 ? normalized + "px" : "";
+}
+
+async function readTextureDimensions(filePath) {
+  const resolved = String(filePath || "").trim();
+  if (!resolved) return null;
+  if (sharp) {
+    try {
+      const metadata = await sharp(resolved, { failOn: "none" }).metadata();
+      const width = Math.max(0, Number(metadata?.width) || 0);
+      const height = Math.max(0, Number(metadata?.height) || 0);
+      if (width > 0 && height > 0) return { width, height };
+    } catch {
+      // fall through to nativeImage
+    }
+  }
+  if (nativeImage) {
+    try {
+      const image = nativeImage.createFromPath(resolved);
+      if (image && !image.isEmpty()) {
+        const size = image.getSize();
+        if (size && size.width > 0 && size.height > 0) return { width: size.width, height: size.height };
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+async function backfillTextureResolutionMeta(metaPath, meta, record) {
+  if (!metaPath || !meta || typeof meta !== "object" || Array.isArray(meta)) return false;
+  const entries = Array.isArray(meta.textureEntries) ? meta.textureEntries : [];
+  if (entries.length === 0) return false;
+
+  const pending = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!entry || typeof entry !== "object") continue;
+    const width = Number(entry.width) || 0;
+    const hasResolution = typeof entry.resolution === "string" && entry.resolution.trim();
+    if (width <= 0 && !hasResolution) pending.push(index);
+  }
+  if (pending.length === 0) return false;
+
+  const textureFiles = Array.isArray(meta.textureFiles) ? meta.textureFiles : [];
+  const byUri = new Map();
+  for (const filePath of textureFiles) {
+    const uri = path.basename(String(filePath || "")).toLowerCase();
+    if (uri) byUri.set(uri, filePath);
+  }
+
+  const resolved = await Promise.all(pending.map(async (index) => {
+    const entry = entries[index];
+    const uri = String(entry?.uri || entry?.path || "").trim().toLowerCase();
+    const filePath = uri ? (byUri.get(uri) || "") : "";
+    if (!filePath) return { index, dims: null };
+    return { index, dims: await readTextureDimensions(filePath) };
+  }));
+
+  const dimsByIndex = new Map();
+  const dimsByUri = new Map();
+  for (const { index, dims } of resolved) {
+    if (!dims) continue;
+    dimsByIndex.set(index, dims);
+    const uri = String(entries[index]?.uri || entries[index]?.path || "").trim().toLowerCase();
+    if (uri) dimsByUri.set(uri, dims);
+  }
+  if (dimsByIndex.size === 0) return false;
+
+  const nextMeta = await updateAssetMetadataFile(metaPath, (current) => ({
+    ...current,
+    textureEntries: (Array.isArray(current.textureEntries) ? current.textureEntries : []).map((entry) => {
+      const dims = dimsByUri.get(String(entry?.uri || entry?.path || "").trim().toLowerCase());
+      if (!dims) return entry;
+      const label = formatTextureResolutionLabel(Math.max(dims.width, dims.height));
+      if (!label) return entry;
+      return { ...entry, width: dims.width, height: dims.height, resolution: label };
+    })
+  }));
+  meta.textureEntries = nextMeta.textureEntries;
+
+  if (record && record.meta && typeof record.meta === "object" && !Array.isArray(record.meta)) {
+    const applyDims = (item) => {
+      if (!item || typeof item !== "object") return item;
+      const uri = String(item.uri || item.path || "").trim().toLowerCase();
+      const dims = dimsByUri.get(uri);
+      if (!dims) return item;
+      const label = formatTextureResolutionLabel(Math.max(dims.width, dims.height));
+      if (!label) return item;
+      return { ...item, width: dims.width, height: dims.height, resolution: label };
+    };
+    if (Array.isArray(record.meta.textureEntries)) {
+      record.meta.textureEntries = record.meta.textureEntries.map(applyDims);
+    }
+    if (Array.isArray(record.meta.components)) {
+      record.meta.components = record.meta.components.map(applyDims);
+    }
+  }
+  return true;
+}
+
+function copyTextureResolutionFields(source, target) {
+  if (!source || typeof source !== "object" || !target || typeof target !== "object") {
+    return target;
+  }
+  const stringFields = new Set(["resolution", "sourceResolution"]);
+  const numericFields = new Set(["width", "height", "sourceWidth", "sourceHeight"]);
+  for (const key of [...stringFields, ...numericFields, "compressed"]) {
+    if (!(key in source)) continue;
+    const value = source[key];
+    if (key === "compressed") {
+      if (typeof value === "boolean") target[key] = value;
+      continue;
+    }
+    if (stringFields.has(key)) {
+      if (typeof value === "string" && value.trim()) target[key] = value.trim();
+      continue;
+    }
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) target[key] = Math.round(numeric);
+  }
+  return target;
 }
 
 function buildLightMeta(meta) {
@@ -1113,13 +1692,76 @@ function buildLightMeta(meta) {
     return {};
   }
   const light = {};
+  if (meta.materialNames && typeof meta.materialNames === "object" && !Array.isArray(meta.materialNames)) light.materialNames = meta.materialNames;
   if (typeof meta.name === "string") light.name = meta.name;
   if (typeof meta.assetName === "string") light.assetName = meta.assetName;
   if (typeof meta.assetID === "string") light.assetID = meta.assetID;
   if (typeof meta.id === "string") light.id = meta.id;
+  if (typeof meta.topCategory === "string") light.topCategory = meta.topCategory;
   if (typeof meta.assetType === "string") light.assetType = meta.assetType;
   if (typeof meta.asset_type === "string") light.asset_type = meta.asset_type;
+  if (Array.isArray(meta.standardAssetTags)) light.standardAssetTags = meta.standardAssetTags.filter((tag) => typeof tag === "string" && tag.trim());
+  if (Array.isArray(meta.zionTags)) light.zionTags = meta.zionTags.filter((tag) => typeof tag === "string" && tag.trim());
+  if (meta.nativePlantWind && typeof meta.nativePlantWind === "object") light.nativePlantWind = meta.nativePlantWind;
+  if (Number.isFinite(Number(meta.baseTiling)) && Number(meta.baseTiling) > 0) light.baseTiling = Number(meta.baseTiling);
+  const textureAnalysis = normalizeTextureAnalysis(meta.textureAnalysis);
+  if (textureAnalysis) light.textureAnalysis = textureAnalysis;
+  if (typeof meta.hasCollision === "boolean") light.hasCollision = meta.hasCollision;
+  if (typeof meta.subType === "string") light.subType = meta.subType;
   if (typeof meta.category === "string") light.category = meta.category;
+  if (typeof meta.animationAffiliation === "string") light.animationAffiliation = meta.animationAffiliation;
+  if (meta.character && typeof meta.character === "object" && !Array.isArray(meta.character)) {
+    light.characterDisplaySchema = 1;
+    if (meta.characterComponents && typeof meta.characterComponents === "object") light.characterComponents = meta.characterComponents;
+    if (Array.isArray(meta.characterPackageHistory)) light.characterPackageHistory = meta.characterPackageHistory.map(({ id, createdAt }) => ({ id, createdAt }));
+    light.character = Object.fromEntries(
+      ["family", "gender", "bodyCode", "suitClass", "suitName", "name", "displayNameZh", "displayNameEn", "ueNameSyncPending", "entityKey", "relatedAssetId", "serial", "variant", "maturity", "confirmed"]
+        .filter((key) => typeof meta.character[key] === "string" || typeof meta.character[key] === "boolean")
+        .map((key) => [key, meta.character[key]])
+    );
+    if (Array.isArray(meta.character.formIds)) light.character.formIds = meta.character.formIds.filter((id) => typeof id === "string");
+  }
+  if (meta.characterManifest && typeof meta.characterManifest === "object" && !Array.isArray(meta.characterManifest)) {
+    const manifest = meta.characterManifest;
+    light.characterManifest = {
+      schemaVersion: String(manifest.schemaVersion || "1.0"),
+      family: String(manifest.family || ""),
+      completeness: String(manifest.completeness || ""),
+      maturity: String(manifest.maturity || ""),
+      confirmed: manifest.confirmed === true,
+      fileCount: Math.max(0, Number(manifest.fileCount) || 0),
+      metrics: manifest.metrics && typeof manifest.metrics === "object" ? manifest.metrics : undefined,
+          files: Array.isArray(manifest.files)
+        ? manifest.files.filter((item) => item && typeof item === "object").map((item) => ({
+            originalName: String(item.originalName || ""),
+            normalizedName: String(item.normalizedName || ""),
+            storedPath: String(item.storedPath || ""),
+            sha256: String(item.sha256 || ""),
+            role: String(item.role || "other"),
+            formId: String(item.formId || ""),
+            unresolvedFormToken: String(item.unresolvedFormToken || ""),
+            componentRole: String(item.componentRole || ""),
+            componentName: String(item.componentName || ""),
+            sharedAcrossForms: item.sharedAcrossForms === true,
+            rigNeedsUpdate: item.rigNeedsUpdate === true,
+            rigReviewPending: item.rigReviewPending === true,
+            rigReviewDecision: String(item.rigReviewDecision || ""),
+            materialName: String(item.materialName || ""),
+            textureGroup: String(item.textureGroup || ""),
+            textureType: String(item.textureType || ""),
+            size: Math.max(0, Number(item.size) || 0),
+            triangleCount: item.triangleCount === null ? null : (Number.isFinite(Number(item.triangleCount)) ? Math.max(0, Math.floor(Number(item.triangleCount))) : undefined)
+          }))
+        : []
+    };
+  }
+  if (meta.characterMetrics && typeof meta.characterMetrics === "object" && !Array.isArray(meta.characterMetrics)) {
+    light.characterMetrics = meta.characterMetrics;
+  }
+  if (typeof meta.characterImportGroupId === "string") light.characterImportGroupId = meta.characterImportGroupId;
+  if (typeof meta.packageStatus === "string") light.packageStatus = meta.packageStatus;
+  if (typeof meta.previewSkeletonPath === "string") light.previewSkeletonPath = meta.previewSkeletonPath;
+  if (typeof meta.previewSkeletalMeshPath === "string") light.previewSkeletalMeshPath = meta.previewSkeletalMeshPath;
   if (typeof meta.previewImage === "string") light.previewImage = meta.previewImage;
   if (typeof meta.detailImage === "string") light.detailImage = meta.detailImage;
   if (meta.previews && typeof meta.previews === "object" && !Array.isArray(meta.previews)) {
@@ -1145,12 +1787,23 @@ function buildLightMeta(meta) {
         if (typeof item.uri === "string") next.uri = item.uri;
         if (typeof item.path === "string") next.path = item.path;
         if (Number.isFinite(Number(item.areaIndex))) next.areaIndex = Math.max(1, Number(item.areaIndex) || 1);
+        if (typeof item.materialRole === "string" && item.materialRole.trim()) next.materialRole = item.materialRole.trim();
         if (typeof item.normalMapFormat === "string") next.normalMapFormat = item.normalMapFormat;
+        copyTextureResolutionFields(item, next);
         return next;
       })
       .filter((item) => Object.keys(item).length > 0);
   }
   if (Array.isArray(meta.tags)) light.tags = meta.tags.filter((tag) => typeof tag === "string");
+  if (meta.identity && typeof meta.identity === "object" && !Array.isArray(meta.identity)) {
+    light.identity = meta.identity;
+  }
+  if (Number.isFinite(Number(meta.revision)) && Number(meta.revision) > 0) {
+    light.revision = Math.floor(Number(meta.revision));
+  }
+  if (Array.isArray(meta.importHistory)) {
+    light.importHistory = meta.importHistory.filter((item) => item && typeof item === "object" && !Array.isArray(item)).slice(-20);
+  }
   const colorTags = collectColorTagsFromMeta(meta);
   if (colorTags.length > 0) {
     light.colorTags = colorTags;
@@ -1159,6 +1812,40 @@ function buildLightMeta(meta) {
     light.modelSlots = Object.fromEntries(
       Object.entries(meta.modelSlots).filter(([, value]) => typeof value === "string" && value.trim())
     );
+  }
+  if (Array.isArray(meta.modelVariants)) {
+    light.modelVariants = meta.modelVariants
+      .filter((item) => item && typeof item === "object")
+      .map((item) => {
+        const next = {};
+        if (typeof item.file === "string") next.file = item.file;
+        if (typeof item.path === "string") next.path = item.path;
+        if (typeof item.uri === "string") next.uri = item.uri;
+        if (typeof item.variantKey === "string" && item.variantKey.trim()) next.variantKey = item.variantKey.trim();
+        if (Number.isFinite(Number(item.variantNumber)) && Number(item.variantNumber) > 0) {
+          next.variantNumber = Math.floor(Number(item.variantNumber));
+        }
+        return next;
+      })
+      .filter((item) => Object.keys(item).length > 0);
+  }
+  if (Array.isArray(meta.modelLods)) {
+    light.modelLods = meta.modelLods
+      .filter((item) => item && typeof item === "object")
+      .map((item) => {
+        const next = {};
+        if (typeof item.file === "string") next.file = item.file;
+        if (typeof item.path === "string") next.path = item.path;
+        if (typeof item.uri === "string") next.uri = item.uri;
+        if (typeof item.slot === "string" && item.slot.trim()) next.slot = item.slot.trim();
+        if (Number.isFinite(Number(item.lod)) && Number(item.lod) >= 0) next.lod = Math.floor(Number(item.lod));
+        if (typeof item.variantKey === "string" && item.variantKey.trim()) next.variantKey = item.variantKey.trim();
+        if (Number.isFinite(Number(item.variantNumber)) && Number(item.variantNumber) > 0) {
+          next.variantNumber = Math.floor(Number(item.variantNumber));
+        }
+        return next;
+      })
+      .filter((item) => Object.keys(item).length > 0);
   }
   if (Array.isArray(meta.components)) {
     light.components = meta.components
@@ -1170,7 +1857,12 @@ function buildLightMeta(meta) {
         if (typeof item.uri === "string") next.uri = item.uri;
         if (typeof item.path === "string") next.path = item.path;
         if (Number.isFinite(Number(item.areaIndex))) next.areaIndex = Math.max(1, Number(item.areaIndex) || 1);
+        if (typeof item.variantKey === "string" && item.variantKey.trim()) next.variantKey = item.variantKey.trim();
+        if (Number.isFinite(Number(item.variantNumber)) && Number(item.variantNumber) > 0) {
+          next.variantNumber = Math.floor(Number(item.variantNumber));
+        }
         if (typeof item.normalMapFormat === "string") next.normalMapFormat = item.normalMapFormat;
+        copyTextureResolutionFields(item, next);
         return next;
       })
       .filter((item) => Object.keys(item).length > 0);
@@ -1196,6 +1888,8 @@ function buildLightMeta(meta) {
     const z = Number(rawDimensions.z);
     if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
       light.scanInformation = { dimensions: { x, y, z } };
+      const dimensionsSource = String(meta?.scanInformation?.dimensionsSource || '').trim();
+      if (dimensionsSource) light.scanInformation.dimensionsSource = dimensionsSource;
     }
   }
 
@@ -1219,17 +1913,14 @@ function buildLightMeta(meta) {
   return light;
 }
 
-function createAssetRecord(assetDir, metaPath, meta, files, forcedSource) {
+function createAssetRecord(assetDir, metaPath, meta, files, forcedSource, includeCharacterDetails = false) {
+  meta = normalizeAssetModelPaths(meta, assetDir);
   const rawAssetId =
     (typeof meta?.assetID === "string" && meta.assetID.trim()) ? meta.assetID :
     (typeof meta?.id === "string" && meta.id.trim()) ? meta.id :
     normalizePath(assetDir);
-  const previewKeyId =
-    (typeof meta?.assetID === "string" && meta.assetID.trim()) ? meta.assetID.trim() :
-    (typeof meta?.id === "string" && meta.id.trim()) ? meta.id.trim() :
-    path.basename(String(metaPath || ""), path.extname(String(metaPath || "")));
   const displayName = meta?.name || meta?.assetName || path.basename(assetDir);
-  const source = forcedSource || (isQuixelLikeMeta(meta) || /megascans|quixel/i.test(assetDir) ? "quixel" : "custom");
+  const source = String(forcedSource || "custom");
   const scannedModelFiles = files.filter((file) => MODEL_EXTENSIONS.has(path.extname(file).toLowerCase())).map(normalizePath);
   const scannedTextureFiles = files.filter((file) => TEXTURE_EXTENSIONS.has(path.extname(file).toLowerCase())).map(normalizePath);
   const modelFilesFromJson = source === "custom" ? collectJsonFiles(meta, assetDir, "model") : scannedModelFiles;
@@ -1254,12 +1945,20 @@ function createAssetRecord(assetDir, metaPath, meta, files, forcedSource) {
   }
   
   const assetType = getAssetType(meta, assetDir, source);
-  const { previewImage, detailImage } = findPreviewImages(files, meta, assetDir, { source, assetType, assetId: source === "quixel" ? String(previewKeyId) : String(rawAssetId) });
+  const topCategory = String(meta?.topCategory || getTopCategoryForAssetType(assetType)).trim();
+  const standardAssetTags = getStandardAssetTags(meta, assetDir, assetType);
+  const baseTiling = Number.isFinite(Number(meta?.baseTiling)) && Number(meta?.baseTiling) > 0 ? Number(meta.baseTiling) : undefined;
+  const { previewImage, detailImage, previewImages } = findPreviewImages(files, meta, assetDir);
   const themes = extractThemes(meta);
   
-  const extractedDimensions = (assetType === "3d" || assetType === "3dplant") ? extractDimensions(meta) : null;
+  const extractedDimensions = isModelAssetType(assetType) ? extractDimensions(meta) : null;
   const dimensions = extractedDimensions || getFallbackDimensions(assetType);
   const lightMeta = buildLightMeta(meta);
+  if (includeCharacterDetails && ['suit', 'monster', 'npc', 'weapon'].includes(assetType)) {
+    for (const key of ['enginePath', 'characterUnrealExports', 'characterUpdateHistory', 'previews', 'previewImage', 'detailImage']) {
+      if (meta[key] !== undefined) lightMeta[key] = meta[key];
+    }
+  }
   if (dimensions) {
     lightMeta.scanInformation = lightMeta.scanInformation && typeof lightMeta.scanInformation === "object" ? lightMeta.scanInformation : {};
     lightMeta.scanInformation.dimensions = dimensions;
@@ -1275,15 +1974,28 @@ function createAssetRecord(assetDir, metaPath, meta, files, forcedSource) {
     path: assetDir,
     metaPath,
     meta: lightMeta,
+    topCategory,
+    standardAssetTags,
+    zionTags: Array.isArray(meta?.zionTags) ? meta.zionTags.map((tag) => String(tag || "").trim()).filter(Boolean) : [],
+    // Zion 资产导出目标二级目录（Objects 之后的部分），存在资产元数据里，
+    // 由导出面板的按钮弹层写入；这里读进索引供界面与导出使用。
+    zionExportSubfolder: String(meta?.zionExportSubfolder || "").trim() || undefined,
+    animationAffiliation: String(meta?.animationAffiliation || lightMeta.animationAffiliation || "").trim() || undefined,
+    baseTiling,
     assetType,
+    hasCollision: typeof meta?.hasCollision === "boolean" ? meta.hasCollision : undefined,
+    textureAnalysis: normalizeTextureAnalysis(meta?.textureAnalysis) || undefined,
     themes,
     colorTags: collectColorTagsFromMeta(meta),
     tags: extractTags(meta, path.basename(path.dirname(assetDir)), assetDir, source),
     modelFiles: finalModelFiles,
+    previewSkeletonPath: String(meta?.previewSkeletonPath || lightMeta.previewSkeletonPath || "").trim() || undefined,
+    previewSkeletalMeshPath: String(meta?.previewSkeletalMeshPath || lightMeta.previewSkeletalMeshPath || "").trim() || undefined,
     textureFiles: finalTextureFiles,
     preview: previewImage ? normalizePath(previewImage) : null,
     previewImage: previewImage ? normalizePath(previewImage) : null,
     detailImage: detailImage ? normalizePath(detailImage) : null,
+    previewImages: previewImages.map((item) => ({ path: normalizePath(item.path), tags: item.tags })),
     createdAt: meta?.createdAt || null,
     shouldBackfillDimensions: Boolean(!extractedDimensions && dimensions)
   };
@@ -1292,196 +2004,317 @@ function createAssetRecord(assetDir, metaPath, meta, files, forcedSource) {
 async function scanPath(rootPath, source, options = {}) {
   if (!rootPath) return [];
   const index = [];
-  const maxMetaBytes = source === "custom" ? CUSTOM_META_JSON_MAX_BYTES : QUIXEL_META_JSON_MAX_BYTES;
+  const maxMetaBytes = CUSTOM_META_JSON_MAX_BYTES;
   const onProgress = typeof options?.onProgress === "function" ? options.onProgress : null;
   const onRecord = typeof options?.onRecord === "function" ? options.onRecord : null;
-  if (source === "quixel") {
-    const normalizedRootPath = path.resolve(String(rootPath || ""));
-    const megascanRoot = path.basename(normalizedRootPath).toLowerCase() === "downloaded"
-      ? path.dirname(normalizedRootPath)
-      : normalizedRootPath;
-    if (onProgress) {
-      onProgress({ source, phase: "collect", processed: 0, total: 0, progress: 0 });
-    }
-    const fromAssetsData = await collectMegascanAssetDirsFromAssetsData(megascanRoot);
-    const fromListing = await collectMegascanAssetDirsFromFolderListing(megascanRoot);
-    const merged = [...new Set([...fromAssetsData, ...fromListing].map((value) => path.resolve(value)))];
-    const totalDirs = merged.length;
-    if (onProgress) {
-      onProgress({ source, phase: "scan", processed: 0, total: totalDirs, progress: totalDirs > 0 ? 5 : 100 });
-    }
-    let processedDirs = 0;
-    for (const assetDir of merged) {
-      processedDirs += 1;
-      if (processedDirs % 6 === 0) {
-        await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
-      }
-      if (isInUAssetsPath(assetDir)) {
-        continue;
-      }
-      const dirEntries = await fs.readdir(assetDir, { withFileTypes: true }).catch(() => []);
-      const jsonFiles = dirEntries
-        .filter((entry) => entry.isFile())
-        .map((entry) => entry.name)
-        .filter((name) => path.extname(name).toLowerCase() === ".json")
-        .filter((name) => !SKIP_FILE_NAMES.has(name.toLowerCase()))
-        .map((name) => path.join(assetDir, name));
-      let metaPath = "";
-      let meta = null;
-      for (const candidate of jsonFiles) {
-        if (isInUAssetsPath(candidate)) continue;
-        const parsed = await readJsonSafe(candidate, { maxBytes: maxMetaBytes });
-        if (!parsed) continue;
-        if (!hasAssetLikeMeta(parsed)) continue;
-        metaPath = candidate;
-        meta = parsed;
-        break;
-      }
-      if (!meta || !metaPath) {
-        if (onProgress && (processedDirs % 16 === 0 || processedDirs === totalDirs)) {
-          const progress = totalDirs > 0 ? 5 + (processedDirs / totalDirs) * 95 : 100;
-          onProgress({ source, phase: "scan", processed: processedDirs, total: totalDirs, progress });
-        }
-        continue;
-      }
-      const dirFiles = await collectMegascanAssetFiles(assetDir);
-      const record = createAssetRecord(assetDir, metaPath, meta, dirFiles, source);
-      if (record) {
-        delete record.shouldBackfillDimensions;
-        index.push(record);
-        if (onRecord) {
-          onRecord(record);
-        }
-      }
-      if (onProgress && (processedDirs % 8 === 0 || processedDirs === totalDirs)) {
-        const progress = totalDirs > 0 ? 5 + (processedDirs / totalDirs) * 95 : 100;
-        onProgress({ source, phase: "scan", processed: processedDirs, total: totalDirs, progress });
-      }
-    }
-    return index;
-  }
-
+  const maintenance = options.maintenance === true;
+  const concurrency = resolveScanConcurrency(options);
+  const backfillFailed = (metaPath, error) => {
+    options.onWarning?.({ path: metaPath, operation: "metadata-write", code: error?.code, message: error?.message || String(error) });
+    return false;
+  };
   if (source === "custom") {
     const customRoot = path.resolve(String(rootPath || ""));
+    const recycledIds = new Set([...(await listRecycledAssets(customRoot)), ...(await listPermanentlyDeletedAssets(customRoot))].map(item => item.assetId));
     if (onProgress) {
       onProgress({ source, phase: "collect", processed: 0, total: 0, progress: 0 });
     }
-    const customIndexPath = getCustomLibraryIndexPath(customRoot);
-    const cachedIndex = customIndexPath
-      ? await readJsonSafe(customIndexPath, { maxBytes: CUSTOM_LIBRARY_INDEX_MAX_BYTES })
-      : null;
-    const cachedEntries = Array.isArray(cachedIndex?.assets) ? cachedIndex.assets : [];
+    const memoReadStartedAt = Date.now();
+    const memo = options?.preloadedMemo || await readCustomScanMemo(customRoot, options);
+    const memoReadMs = options?.preloadedMemo ? Number(options?.memoReadMs) || 0 : Date.now() - memoReadStartedAt;
+    // Rebuild records cached under a former merged asset classification.
+    // This also removes them from incremental polling's unchanged-folder hints.
+    const needsClassificationRefresh = entry => {
+      const record = entry?.record;
+      const currentType = record && getAssetType(record.meta, record.path, source);
+      return record && ["atlas", "imperfection", "displacement"].includes(currentType) && record.assetType !== currentType;
+    };
+    const cachedEntries = memo.entries.filter(entry => !recycledIds.has(entry.record?.id));
+    const walkCachedEntries = cachedEntries.filter(entry => !needsClassificationRefresh(entry));
+    const classificationChanged = walkCachedEntries.length !== cachedEntries.length;
     const cachedPairs = [];
+    const cachedByModelPath = new Map();
     for (const entry of cachedEntries) {
       if (!entry || typeof entry !== "object") continue;
       const metaPath = String(entry.metaPath || "").trim();
       if (!metaPath) continue;
       cachedPairs.push([normalizeComparePath(metaPath), entry]);
+      const record = entry.record;
+      for (const modelPath of Array.isArray(record?.modelFiles) ? record.modelFiles : []) {
+        const normalizedModel = normalizeComparePath(modelPath);
+        if (normalizedModel && !cachedByModelPath.has(normalizedModel)) {
+          cachedByModelPath.set(normalizedModel, entry);
+        }
+      }
     }
     const cachedByMetaPath = new Map(cachedPairs);
-    let discovered = await collectCustomAssetEntriesFromFolderListing(customRoot);
-    if (discovered.length === 0 && cachedByMetaPath.size > 0) {
-      discovered = [...cachedByMetaPath.values()]
-        .map((entry) => {
-          const metaPath = String(entry?.metaPath || "").trim();
-          const recordPath = String(entry?.record?.path || "").trim();
-          const assetDir = recordPath || (metaPath ? path.dirname(metaPath) : "");
-          return { metaPath, assetDir };
-        })
-        .filter((entry) => entry.metaPath && entry.assetDir);
-    }
-    if (discovered.length > 0) {
-      const totalDirs = discovered.length;
+    const failedPaths = new Set();
+    const warn = (warning) => {
+      failedPaths.add(normalizeComparePath(warning.path));
+      options.onWarning?.(warning);
+    };
+    let walkMs = 0;
+    {
+      let totalDirs = 0;
       if (onProgress) {
         onProgress({ source, phase: "scan", processed: 0, total: totalDirs, progress: 5 });
       }
-      let processedDirs = 0;
-      const nextIndexEntries = [];
-      for (const entry of discovered) {
-        processedDirs += 1;
-        if (processedDirs % 8 === 0) {
-          await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+      const isDev = !app?.isPackaged && typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
+      const timeoutScale = isDev ? 5 : 1;
+      let textureResolutionBackfilledCount = 0;
+      const scanStats = { cacheHits: 0, reused: 0, rebuilt: 0, skipped: 0, metaWrites: 0 };
+      // 目录是否变化：优先比较遍历时拿到的文件名集合（零 I/O）；旧备忘没有
+      // 目录指纹时退回目录 mtime 比较，并会在本轮之后写入指纹。
+      const resolveDirChange = async (entry, cached, assetDir) => {
+        // 没有备忘记录时无所谓“变没变”，不需要为冷扫再多打一次目录 stat。
+        if (!cached || typeof cached !== "object" || !cached.record) {
+          return { unchanged: false, dirMtimeMs: 0 };
+        }
+        const cachedSignature = typeof cached?.dirSignature === "string" ? cached.dirSignature : "";
+        const currentSignature = typeof entry?.dirSignature === "string" ? entry.dirSignature : "";
+        if (cachedSignature && currentSignature) {
+          return { unchanged: cachedSignature === currentSignature, dirMtimeMs: 0 };
+        }
+        const dirStats = await fs.stat(assetDir).catch(() => null);
+        const dirMtimeMs = Number(dirStats?.mtimeMs) || 0;
+        const cachedDirMtimeMs = Number(cached?.dirMtimeMs) || 0;
+        return {
+          unchanged: Boolean(cachedDirMtimeMs > 0 && dirMtimeMs > 0 && dirMtimeMs <= cachedDirMtimeMs),
+          dirMtimeMs
+        };
+      };
+      const processEntry = async (entry) => {
+        const staleCharacterDisplay = record => ["suit", "monster", "npc", "weapon"].includes(String(record?.assetType || "").toLowerCase()) && record?.meta?.characterDisplaySchema !== 1;
+        if (entry.cachedOnly && staleCharacterDisplay(entry.cachedOnly.record)) {
+          entry = { ...entry.cachedOnly, metaPath: entry.metaPath, assetDir: entry.assetDir, cachedOnly: undefined };
+        }
+        if (entry.cachedOnly) {
+          scanStats.reused += 1;
+          return { kind: "cached", ...entry.cachedOnly };
         }
         const metaPath = String(entry?.metaPath || "").trim();
         const assetDir = String(entry?.assetDir || "").trim();
-        if (!metaPath || !assetDir) {
-          continue;
+        if (!metaPath || !assetDir || isInUAssetsPath(metaPath)) {
+          return { kind: "skip" };
         }
-        if (isInUAssetsPath(metaPath)) {
-          continue;
-        }
-        const metaStats = await fs.stat(metaPath).catch(() => null);
+        const metaStats = await scanRead(() => fs.stat(metaPath));
         if (!metaStats?.isFile()) {
-          continue;
+          return { kind: "skip" };
         }
-        const cached = cachedByMetaPath.get(normalizeComparePath(metaPath));
+        const cached = cachedByMetaPath.get(normalizeComparePath(metaPath))
+          || (isAnimationModelMetaPath(metaPath) ? cachedByModelPath.get(normalizeComparePath(metaPath)) : null);
         const cachedRecord = cached?.record;
+        const persistedAnimationIdentity = isAnimationModelMetaPath(metaPath)
+          ? await readAnimationIdentitySidecar(metaPath)
+          : null;
         const cachedMetaMtimeMs = Number(cached?.metaMtimeMs) || 0;
-        
-        // Disable timeout warning spam in development
-        const isDev = !app?.isPackaged && typeof process !== 'undefined' && process.env.NODE_ENV !== 'production';
-        const timeoutScale = isDev ? 5 : 1; // Give it 5x more time in dev before logging
-        
-        if (cachedRecord && cachedMetaMtimeMs >= Number(metaStats.mtimeMs)) {
-          index.push(cachedRecord);
-          nextIndexEntries.push({ metaPath, metaMtimeMs: cachedMetaMtimeMs, record: cachedRecord });
-          if (onRecord) {
-            onRecord(cachedRecord);
-          }
-          if (onProgress && (processedDirs % 8 === 0 || processedDirs === totalDirs)) {
-            const progress = totalDirs > 0 ? 5 + (processedDirs / totalDirs) * 95 : 100;
-            onProgress({ source, phase: "scan", processed: processedDirs, total: totalDirs, progress });
-          }
-          continue;
+        const dirState = await resolveDirChange(entry, cached, assetDir);
+        const dirSignature = typeof entry?.dirSignature === "string" ? entry.dirSignature : "";
+        const cachedCharacterMetaCurrent = !["suit", "monster", "npc", "weapon"].includes(String(cachedRecord?.assetType || "").toLowerCase())
+          || Boolean(cachedRecord?.meta?.character && cachedRecord?.meta?.characterManifest && !staleCharacterDisplay(cachedRecord));
+        const canReuseCache = Boolean(
+          !options.refreshMetadata && !Array.isArray(options.changedDirectories) &&
+          cachedRecord &&
+          cachedCharacterMetaCurrent &&
+          !needsClassificationRefresh(cached) &&
+          cachedMetaMtimeMs === Number(metaStats.mtimeMs) &&
+          Number(cached?.metaSize) === Number(metaStats.size) &&
+          dirState.unchanged &&
+          (!isModelAssetType(cachedRecord?.assetType) || isTextureAnalysisCurrent(cachedRecord?.textureAnalysis) || isAnimationModelMetaPath(metaPath))
+        );
+        if (canReuseCache) {
+          scanStats.cacheHits += 1;
+          return {
+            kind: "cached",
+            metaPath: isAnimationModelMetaPath(metaPath) ? metaPath : String(cached?.metaPath || metaPath),
+            assetDir,
+            metaMtimeMs: Number(metaStats.mtimeMs) || 0,
+            metaSize: Number(metaStats.size),
+            dirSignature,
+            record: isAnimationModelMetaPath(metaPath)
+              ? {
+                  ...cachedRecord,
+                  path: assetDir,
+                  metaPath,
+                  modelFiles: [normalizePath(metaPath)],
+                  meta: applyAnimationIdentityMetadata(cachedRecord.meta || {}, persistedAnimationIdentity)
+                }
+              : cachedRecord
+          };
         }
-        const progress = totalDirs > 0 ? 5 + (processedDirs / totalDirs) * 95 : 100;
-        if (onProgress && (processedDirs <= 3 || processedDirs % 80 === 0)) {
-          onProgress({ source, phase: "scan", processed: processedDirs, total: totalDirs, progress, message: assetDir });
-        }
-        const startedAt = Date.now();
-        const meta = await withTimeout(readJsonSafe(metaPath, { maxBytes: maxMetaBytes }), 8000 * timeoutScale);
+        scanStats.rebuilt += 1;
+        const meta = isAnimationModelMetaPath(metaPath)
+          ? applyAnimationIdentityMetadata(buildAnimationMetaFromModel(metaPath, cachedRecord || {}), persistedAnimationIdentity)
+          : await readJsonSafe(metaPath, { maxBytes: maxMetaBytes, knownBytes: Number(metaStats.size), strict: true });
         if (!meta) {
-          if (onProgress && Date.now() - startedAt >= 8000 * timeoutScale) {
-            onProgress({ source, phase: "scan", processed: processedDirs, total: totalDirs, progress, message: `timeout meta ${metaPath}` });
-          }
-          continue;
+          scanStats.skipped += 1;
+          throw new Error(`无法读取资产元数据: ${metaPath}`);
         }
-        const dirFiles = await withTimeout(collectCustomAssetFiles(assetDir, meta), 12000 * timeoutScale);
+        if (!hasAssetLikeMeta(meta)) {
+          if (cachedRecord || isFolderAssetMetaFileName(path.basename(metaPath))) throw new Error(`资产元数据不完整: ${metaPath}`);
+          return { kind: "skip" };
+        }
+        const dirFiles = isAnimationModelMetaPath(metaPath)
+          ? [path.resolve(metaPath)]
+          : await collectCustomAssetFiles(assetDir, meta, metaPath, entry.entries);
         if (!dirFiles) {
-          if (onProgress && Date.now() - startedAt >= 12000 * timeoutScale) {
-            onProgress({ source, phase: "scan", processed: processedDirs, total: totalDirs, progress, message: `timeout files ${assetDir}` });
-          }
-          continue;
+          scanStats.skipped += 1;
+          return { kind: "skip" };
         }
-        const record = createAssetRecord(assetDir, metaPath, meta, dirFiles, source);
-        if (record) {
-          if (record.shouldBackfillDimensions && record?.meta?.scanInformation?.dimensions) {
-            const written = await withTimeout(backfillDimensionsMeta(metaPath, meta, record.meta.scanInformation.dimensions), 8000 * timeoutScale);
-            if (written === null && onProgress) {
-              onProgress({ source, phase: "scan", processed: processedDirs, total: totalDirs, progress, message: `timeout write ${metaPath}` });
+        const record = await populatePreviewSize(createAssetRecord(assetDir, metaPath, meta, dirFiles, source));
+        if (!record) {
+          scanStats.skipped += 1;
+          if (cachedRecord || isFolderAssetMetaFileName(path.basename(metaPath))) throw new Error(`资产没有可读取的模型或贴图: ${metaPath}`);
+          return { kind: "skip" };
+        }
+        if (isAnimationModelMetaPath(metaPath)) {
+          applyPreservedAnimationPreview(record, cachedRecord || {});
+        }
+        let metaWritten = false;
+        if (maintenance && record.shouldBackfillDimensions && record?.meta?.scanInformation?.dimensions && !isAnimationModelMetaPath(metaPath)) {
+          metaWritten = await backfillDimensionsMeta(metaPath, meta, record.meta.scanInformation.dimensions).then(() => true).catch((error) => backfillFailed(metaPath, error));
+        }
+        delete record.shouldBackfillDimensions;
+
+        if (!isAnimationModelMetaPath(metaPath)) {
+          // 先回填贴图分辨率：随后贴图分析可以直接用元数据里的宽高，不必再读图片。
+          if (maintenance && textureResolutionBackfilledCount < TEXTURE_RESOLUTION_BACKFILL_MAX_ASSETS_PER_SCAN) {
+            const didBackfill = await withTimeout(
+              backfillTextureResolutionMeta(metaPath, meta, record),
+              10000 * timeoutScale
+            ).catch((error) => backfillFailed(metaPath, error));
+            if (didBackfill === true) {
+              textureResolutionBackfilledCount += 1;
+              metaWritten = true;
             }
           }
-          delete record.shouldBackfillDimensions;
-          index.push(record);
-          nextIndexEntries.push({ metaPath, metaMtimeMs: Number(metaStats.mtimeMs) || 0, record });
-          if (onRecord) {
-            onRecord(record);
+          await withTimeout(populateTextureAnalysis(record), 12000 * timeoutScale).catch(() => {});
+          if (maintenance && record.shouldBackfillTextureAnalysis) {
+            const written = await backfillTextureAnalysisMeta(metaPath, meta, record.textureAnalysis).then(() => true).catch((error) => backfillFailed(metaPath, error));
+            metaWritten ||= written;
           }
         }
-        const elapsedMs = Date.now() - startedAt;
-        if (onProgress && elapsedMs >= 2500 * timeoutScale) {
-          onProgress({ source, phase: "scan", processed: processedDirs, total: totalDirs, progress, message: `slow ${elapsedMs}ms ${assetDir}` });
+        delete record.shouldBackfillTextureAnalysis;
+        let metaMtimeMs = Number(metaStats.mtimeMs) || 0;
+        let metaSize = Number(metaStats.size);
+        if (metaWritten) {
+          // 回填改写了 asset_info.json，备忘必须记录改写后的 mtime，否则下一轮
+          // 扫描会认为元数据又变了，2 万资产的库会因此永远命中不了缓存。
+          scanStats.metaWrites += 1;
+          const refreshedStats = await fs.stat(metaPath).catch(() => null);
+          if (refreshedStats?.isFile()) {
+            metaMtimeMs = Number(refreshedStats.mtimeMs) || metaMtimeMs;
+            metaSize = Number(refreshedStats.size);
+          }
         }
-        if (onProgress && (processedDirs % 8 === 0 || processedDirs === totalDirs)) {
-          onProgress({ source, phase: "scan", processed: processedDirs, total: totalDirs, progress });
+        return {
+          kind: "record",
+          metaPath,
+          assetDir,
+          metaMtimeMs,
+          metaSize,
+          dirSignature,
+          record
+        };
+      };
+
+      let processedDirs = 0;
+      const nextIndexEntries = [];
+      // 每批扫描完成就推送记录，而不是等全库扫完再一次性推送。首次安装扫描
+      // 上千个网络共享资产时，用户必须能在扫描过程中就看到卡片逐渐出现。
+      const discovered = collectCustomAssetEntriesFromFolderListing(customRoot, {
+        onProgress, onWarning: warn, cachedEntries: walkCachedEntries,
+        concurrency,
+        incrementalScan: Boolean(options.incrementalScan) && !options.refreshMetadata,
+        changedDirectories: !memo.legacy && !classificationChanged && !options.refreshMetadata ? options.changedDirectories : null,
+        pollShard: Math.abs(Math.trunc(Number(options.pollShard) || 0)) % POLL_SHARD_COUNT
+      });
+      let walkStartedAt = Date.now();
+      for await (const chunk of prefetchScanBatches(discovered)) {
+        walkMs += Date.now() - walkStartedAt;
+        totalDirs += chunk.length;
+        const scanResults = await runWithConcurrency(chunk, concurrency, async (entry) => {
+          try {
+            const result = await processEntry(entry);
+            if (result?.record && options.residentMemo) result.record = compactScanRecord(result.record);
+            if (result?.record && recycledIds.has(result.record.id)) return { kind: "skip" };
+            // Publish each completed asset immediately; one slow file must not
+            // hold back the other cards in its batch.
+            if (result?.record && onRecord) onRecord(result.record);
+            return result;
+          } catch (error) {
+            warn({ path: entry.metaPath, operation: "asset", message: error.message });
+            return { kind: "skip" };
+          }
+        });
+        for (const scanResult of scanResults) {
+          processedDirs += 1;
+          if (!scanResult || scanResult.kind === "skip" || !scanResult.record) {
+            continue;
+          }
+          const { metaPath, metaMtimeMs, metaSize, dirSignature, record } = scanResult;
+          index.push(record);
+          nextIndexEntries.push({ metaPath, metaMtimeMs, metaSize, dirSignature: dirSignature || undefined, record });
         }
+        if (onProgress) {
+          const progress = 5 + 85 * processedDirs / Math.max(processedDirs + CUSTOM_SCAN_CHUNK_SIZE, cachedEntries.length);
+          const message = options.incrementalScan
+            ? `增量检查 · 缓存复用 ${scanStats.reused} · 已检查 ${processedDirs - scanStats.reused}`
+            : `已读取 ${processedDirs} 个资产，继续发现资产…`;
+          onProgress({ source, phase: "scan", processed: processedDirs, total: 0, progress, message });
+        }
+        walkStartedAt = Date.now();
       }
-      if (customIndexPath) {
-        await writeJsonAtomic(customIndexPath, {
-          version: 1,
-          generatedAt: new Date().toISOString(),
-          root: customRoot,
-          assets: nextIndexEntries
+      walkMs += Date.now() - walkStartedAt;
+      // Only confirmed deletions disappear. A failed subtree/read retains its
+      // last good card and memo, and will be retried on the next scan.
+      const seenPaths = new Set(nextIndexEntries.map((entry) => normalizeComparePath(entry.metaPath)));
+      for (const cached of cachedEntries) {
+        const key = normalizeComparePath(cached.metaPath);
+        if (seenPaths.has(key) || !cached.record) continue;
+        let parent = key;
+        while (parent && !failedPaths.has(parent)) {
+          const next = normalizeComparePath(path.dirname(parent));
+          if (next === parent) { parent = ""; break; }
+          parent = next;
+        }
+        if (!parent) continue;
+        nextIndexEntries.push(cached);
+        index.push(cached.record);
+        onRecord?.(cached.record);
+      }
+      // 没有变化就不重写备忘：2 万资产的库在共享盘上就是省掉一百多 MB 的写。
+      const memoWriteStartedAt = Date.now();
+      const nextSignature = buildScanMemoSignature(nextIndexEntries);
+      let memoWritten = false;
+      const memoNeedsWrite = memo.legacy || classificationChanged || options.refreshMetadata || options.changedDirectories?.length > 0 || nextSignature !== memo.signature
+        || (options.scanMemoPath && (!memo.path || path.resolve(memo.path) !== path.resolve(options.residentMemo ? getResidentMemoPath(options.scanMemoPath) : options.scanMemoPath)));
+      if (memoNeedsWrite) {
+        memoWritten = await writeCustomScanMemo(customRoot, nextIndexEntries, {
+          ...options, sourceStamp: memo.sourceStamp, writeSharedMemo: options.writeSharedMemo && failedPaths.size === 0
+        }).catch(() => false);
+      }
+      const memoWriteMs = Date.now() - memoWriteStartedAt;
+      if (memoNeedsWrite && options.scanMemoPath && !memoWritten) {
+        warn({ path: customRoot, operation: "scan-memo-write", message: "本机扫描备忘保存失败，将重试本轮变更" });
+      }
+      if (typeof options?.onTiming === "function") {
+        options.onTiming({
+          source: "custom",
+          total: totalDirs,
+          collectMs: walkMs,
+          memoReadMs,
+          memoWriteMs,
+          memoWritten,
+          maintenance,
+          concurrency,
+          cacheHits: scanStats.cacheHits,
+          reused: scanStats.reused,
+          mode: options.incrementalScan ? "incremental-poll" : "reconcile",
+          rebuilt: scanStats.rebuilt,
+          skipped: scanStats.skipped,
+          metaWrites: scanStats.metaWrites,
+          failed: failedPaths.size
         });
       }
       return index;
@@ -1519,7 +2352,7 @@ async function scanPath(rootPath, source, options = {}) {
     const directFiles = filesByDirectory.get(assetDir) || [];
     const nestedFiles = nestedFilesByDirectory.get(assetDir) || [];
     const dirFiles = [...new Set([...directFiles, ...nestedFiles])];
-    if (source === "custom") {
+    if (maintenance && source === "custom") {
       const existingColorTags = collectColorTagsFromMeta(meta);
       if (existingColorTags.length === 0 && colorBackfilledCount < COLOR_BACKFILL_MAX_ASSETS_PER_SCAN) {
         // Skip slow image processing in dev environment to speed up scanning
@@ -1535,18 +2368,24 @@ async function scanPath(rootPath, source, options = {}) {
             timeoutMs: COLOR_BACKFILL_TIMEOUT_MS
           });
           if (inferredColorTags.length > 0) {
-            await backfillColorTagsMeta(metaPath, meta, inferredColorTags).catch(() => {});
+            await backfillColorTagsMeta(metaPath, meta, inferredColorTags).catch((error) => backfillFailed(metaPath, error));
             colorBackfilledCount += 1;
           }
         }
       }
     }
-    const record = createAssetRecord(assetDir, metaPath, meta, dirFiles, source);
+    const record = await populatePreviewSize(createAssetRecord(assetDir, metaPath, meta, dirFiles, source));
     if (record) {
-      if (record.shouldBackfillDimensions && record?.meta?.scanInformation?.dimensions) {
-        await backfillDimensionsMeta(metaPath, meta, record.meta.scanInformation.dimensions).catch(() => {});
+      if (maintenance && record.shouldBackfillDimensions && record?.meta?.scanInformation?.dimensions) {
+        await backfillDimensionsMeta(metaPath, meta, record.meta.scanInformation.dimensions).catch((error) => backfillFailed(metaPath, error));
       }
       delete record.shouldBackfillDimensions;
+
+      await populateTextureAnalysis(record).catch(() => {});
+      if (maintenance && record.shouldBackfillTextureAnalysis) {
+        await backfillTextureAnalysisMeta(metaPath, meta, record.textureAnalysis).catch((error) => backfillFailed(metaPath, error));
+      }
+      delete record.shouldBackfillTextureAnalysis;
       index.push(record);
       if (onRecord) {
         onRecord(record);
@@ -1561,77 +2400,108 @@ async function scanPath(rootPath, source, options = {}) {
 }
 
 const { Worker } = require("node:worker_threads");
+const activeScanWorkers = new Set();
+let scanWorkerGeneration = 0;
 
-async function scanLibraryInWorker(megascanPath, customPath, options = {}) {
+function stopLibraryScans() {
+  scanWorkerGeneration++;
+  for (const worker of activeScanWorkers) {
+    worker.unref();
+    void worker.terminate().catch(() => {});
+  }
+  activeScanWorkers.clear();
+}
+
+async function scanLibraryInWorker(customPath, options = {}) {
+  const generation = scanWorkerGeneration;
+  const { residentBase = [], ...workerOptions } = options;
+  const reuseSeeds = options.residentIndex ? await createScanSeeds(residentBase) : [];
+  if (generation !== scanWorkerGeneration) throw new Error("Scan canceled during preparation");
   return new Promise((resolve, reject) => {
     const onProgress = typeof options?.onProgress === "function" ? options.onProgress : null;
     const onRecord = typeof options?.onRecord === "function" ? options.onRecord : null;
-    
+    const onTiming = typeof options?.onTiming === "function" ? options.onTiming : null;
+    const onWarning = typeof options?.onWarning === "function" ? options.onWarning : null;
+
     const worker = new Worker(path.join(__dirname, "scanWorker.js"), {
-      workerData: { megascanPath, customPath, options: { ...options, onProgress: null, onRecord: null } }
+      workerData: { customPath, reuseSeeds, options: { ...workerOptions, onProgress: null, onRecord: null, onTiming: null, onWarning: null } }
     });
+    // 扫描 worker 不能拖住应用退出：窗口关闭后进程应立即结束，
+    // 否则会残留主进程 + GPU/网络子进程并占用单实例锁。
+    worker.unref();
+    activeScanWorkers.add(worker);
+    const streamedRecords = new Map();
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      activeScanWorkers.delete(worker);
+      if (error) reject(error);
+      else resolve(result);
+    };
 
     worker.on("message", (message) => {
       if (message.type === "progress" && onProgress) {
         onProgress(message.payload);
-      } else if (message.type === "record" && onRecord) {
-        onRecord(message.payload);
+      } else if (message.type === "record") {
+        if (options.residentIndex) streamedRecords.set(message.token, message.payload);
+        onRecord?.(message.payload);
+      } else if (message.type === "timing" && onTiming) {
+        onTiming(message.payload);
+      } else if (message.type === "warning" && onWarning) {
+        onWarning(message.payload);
       } else if (message.type === "done") {
-        resolve(message.payload);
+        finish(null, message.tokens ? message.tokens.map(token => token < 0 ? residentBase[-token - 1] : streamedRecords.get(token)) : message.payload);
+        streamedRecords.clear();
       } else if (message.type === "error") {
-        reject(new Error(message.payload));
+        finish(new Error(message.payload));
       }
     });
 
-    worker.on("error", reject);
+    worker.on("error", (error) => finish(error));
     worker.on("exit", (code) => {
-      if (code !== 0) {
-        reject(new Error(`Worker stopped with exit code ${code}`));
-      }
+      finish(new Error(`Worker stopped with exit code ${code}`));
     });
   });
 }
 
-async function scanLibrary(megascanPath, customPath, options = {}) {
+async function scanLibrary(customPath, options = {}) {
   const forceFullScan = Boolean(options?.forceFullScan);
   const cacheOnly = Boolean(options?.cacheOnly);
   const onProgress = typeof options?.onProgress === "function" ? options.onProgress : null;
   const onRecord = typeof options?.onRecord === "function" ? options.onRecord : null;
-  
+  let scanMemoPath = String(options.scanMemoPath || "").trim();
+  if (scanMemoPath && customPath) {
+    scanMemoPath = path.resolve(scanMemoPath);
+    const relative = path.relative(path.resolve(customPath), scanMemoPath);
+    if (!relative || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))) {
+      throw new Error("Local scan memo must be outside the asset library");
+    }
+  }
+
   if (cacheOnly && !forceFullScan) {
     return [];
   }
-  
+
   if (onProgress) {
     onProgress({ phase: "start", source: "all", progress: 0, message: "准备扫描..." });
   }
 
-  // 1. 预估阶段：快速统计资产数量，用于计算平滑进度
-  if (onProgress) {
-    onProgress({ phase: "collect", source: "all", progress: 0, message: "正在收集文件信息..." });
-  }
-
-  const scannedMegascan = megascanPath
-    ? await scanPath(megascanPath, "quixel", {
-        onProgress: (payload) => {
-          if (!onProgress) return;
-          // 动态进度：Megascan 占据前 45%
-          const stageProgress = Math.max(0, Math.min(100, Number(payload?.progress) || 0));
-          onProgress({ ...payload, progress: stageProgress * 0.45, message: `扫描 Megascan: ${payload.processed || 0}` });
-        },
-        onRecord
-      })
-    : [];
-
   const scannedCustom = customPath
     ? await scanPath(customPath, "custom", {
-        onProgress: (payload) => {
-          if (!onProgress) return;
-          // 动态进度：Custom 占据 45% - 90%
-          const stageProgress = Math.max(0, Math.min(100, Number(payload?.progress) || 0));
-          onProgress({ ...payload, progress: 45 + stageProgress * 0.45, message: `扫描自定义库: ${payload.processed || 0}` });
-        },
-        onRecord
+        onProgress,
+        onRecord,
+        refreshMetadata: Boolean(options?.refreshMetadata),
+        changedDirectories: options.changedDirectories,
+        maintenance: options?.maintenance === true,
+        writeSharedMemo: options?.writeSharedMemo === true,
+        scanMemoPath,
+        residentMemo: Boolean(options.residentIndex && !options.maintenance),
+        concurrency: options?.concurrency,
+        incrementalScan: Boolean(options?.incrementalScan),
+        pollShard: options?.pollShard,
+        onTiming: options?.onTiming,
+        onWarning: options?.onWarning
       })
     : [];
 
@@ -1639,15 +2509,14 @@ async function scanLibrary(megascanPath, customPath, options = {}) {
     onProgress({ phase: "dedup", source: "all", progress: 95, message: "正在合并资产列表..." });
   }
 
-  const combined = [...scannedMegascan, ...scannedCustom];
   const dedup = new Map();
-  for (const asset of combined) {
+  for (const asset of scannedCustom) {
     if (!dedup.has(asset.id)) {
       dedup.set(asset.id, asset);
     }
   }
   const result = [...dedup.values()];
-  
+
   if (onProgress) {
     onProgress({ phase: "done", source: "all", progress: 100, processed: result.length, total: result.length, message: "扫描完成" });
   }
@@ -1703,13 +2572,15 @@ function searchAssets(index, query) {
       if (hasTagFilter) {
         let ok = true;
         for (const tag of requiredTags) {
-          if (!asset.tags || !asset.tags.includes(tag)) { ok = false; break; }
+          if (!asset.tags || !asset.tags.some(value => String(value).toLowerCase() === tag)) { ok = false; break; }
         }
         if (!ok) continue;
       }
       if (hasTypeFilter && !requiredAssetTypes.includes(asset.assetType)) continue;
       if (hasThemeFilter) {
-        const assetThemes = asset.themes;
+        const assetThemes = asset.assetType === "imperfection"
+          ? (asset.themes?.length ? asset.themes : [normalizeTheme(asset.meta?.category || "")])
+          : asset.themes;
         const assetTags = asset.tags;
         let matched = 0;
         const seen = new Set();
@@ -1721,7 +2592,7 @@ function searchAssets(index, query) {
             }
           }
         }
-        if (matched < requiredThemes.length && Array.isArray(assetTags)) {
+        if (asset.assetType !== "imperfection" && matched < requiredThemes.length && Array.isArray(assetTags)) {
           for (const t of assetTags) {
             const norm = normalizeTheme(t);
             if (themeFilterSet.has(norm) && !seen.has(norm)) {
@@ -1768,144 +2639,26 @@ function searchAssets(index, query) {
   return result;
 }
 
-let watcher = null;
-let debounceTimer = null;
-
-function watchLibrary(libraryPaths, onKeyChange, options = {}) {
-  if (watcher) {
-    watcher.close();
-  }
-  const WATCHABLE_EXTENSIONS = new Set([".json", ".jason"]);
-  const WATCHABLE_PREVIEW_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".bmp"]);
-  const megascanRoot = String(options?.megascanRoot || "").trim();
-  const normalizedMegascanRoot = megascanRoot ? path.resolve(megascanRoot).toLowerCase() : "";
-  const normalizedMegascanRootWithSep = normalizedMegascanRoot ? `${normalizedMegascanRoot}${path.sep.toLowerCase()}` : "";
-  const explicitWatchSet = new Set(
-    (Array.isArray(options?.explicitWatchFiles) ? options.explicitWatchFiles : [])
-      .map((value) => String(value || "").trim())
-      .filter(Boolean)
-      .map((value) => path.resolve(value).toLowerCase())
-  );
-  const normalizedRoots = new Set(
-    (Array.isArray(libraryPaths) ? libraryPaths : [])
-      .map((value) => String(value || "").trim())
-      .filter(Boolean)
-      .map((value) => path.resolve(value).toLowerCase())
-  );
-  const shouldIgnoreWatchEventPath = (entryPath) => {
-    const raw = String(entryPath || "").trim();
-    if (!raw) {
-      return true;
-    }
-    const resolvedLower = path.resolve(raw).toLowerCase();
-    const isUnderMegascan = normalizedMegascanRoot
-      ? (resolvedLower === normalizedMegascanRoot || resolvedLower.startsWith(normalizedMegascanRootWithSep))
-      : false;
-    if (explicitWatchSet.has(resolvedLower)) {
-      return false;
-    }
-    const baseName = path.basename(raw).toLowerCase();
-    if (SKIP_FILE_NAMES.has(baseName)) {
-      return true;
-    }
-    const ext = path.extname(raw).toLowerCase();
-    if (!WATCHABLE_EXTENSIONS.has(ext)) {
-      if (!WATCHABLE_PREVIEW_IMAGE_EXTENSIONS.has(ext)) {
-        return true;
-      }
-      const token = normalizePath(raw).toLowerCase();
-      if (token.includes("/preview/") || token.includes("/previews/")) {
-        return false;
-      }
-      if (isUnderMegascan) {
-        const name = path.basename(raw).toLowerCase();
-        if (!name.includes("preview")) {
-          return true;
-        }
-        return false;
-      }
-      return true;
-    }
-    if (normalizedRoots.has(resolvedLower)) {
-      return true;
-    }
-    return false;
-  };
-
-  watcher = chokidar.watch(libraryPaths, {
-    ignored: (entryPath, stats) => {
-      const resolvedLower = path.resolve(String(entryPath || "")).toLowerCase();
-      if (explicitWatchSet.has(resolvedLower)) {
-        return false;
-      }
-      const baseName = String(entryPath || "").split(/[\\/]/).pop().toLowerCase();
-      if (stats?.isDirectory() && SKIP_DIRECTORY_NAMES.has(baseName)) {
-        return true;
-      }
-      if (!stats?.isDirectory() && SKIP_FILE_NAMES.has(baseName)) {
-        return true;
-      }
-      return false;
-    },
-    persistent: true,
-    ignoreInitial: true,
-    depth: Math.max(1, Number(options?.depth) || 4),
-    useFsEvents: false, // Prevents excessive native bridge overhead in some dev environments
-    disableGlobbing: true // We only pass raw paths
-  });
-
-  const debounceMs = Math.max(200, Number(options?.debounceMs) || 1200);
-  const pending = new Map();
-  const debouncedScan = () => {
-    if (debounceTimer) globalThis.clearTimeout(debounceTimer);
-    debounceTimer = globalThis.setTimeout(() => {
-      const changes = [...pending.values()];
-      pending.clear();
-      onKeyChange({ changes });
-    }, debounceMs);
-  };
-
-  const onWatchEvent = (eventType, entryPath) => {
-    if (shouldIgnoreWatchEventPath(entryPath)) {
-      return;
-    }
-    const resolved = path.resolve(String(entryPath || "")).toLowerCase();
-    pending.set(resolved, { event: String(eventType || ""), path: String(entryPath || "") });
-    debouncedScan();
-  };
-  watcher.on("add", (entryPath) => onWatchEvent("add", entryPath));
-  watcher.on("unlink", (entryPath) => onWatchEvent("unlink", entryPath));
-  watcher.on("change", (entryPath) => onWatchEvent("change", entryPath));
-  watcher.on("unlinkDir", (entryPath) => {
-    const baseName = String(entryPath || "").split(/[\\/]/).pop().toLowerCase();
-    if (SKIP_DIRECTORY_NAMES.has(baseName)) {
-      return;
-    }
-    const resolved = path.resolve(String(entryPath || "")).toLowerCase();
-    pending.set(resolved, { event: "unlinkDir", path: String(entryPath || "") });
-    debouncedScan();
-  });
-}
-
 async function updateAssetMetadata(assetPath, newMetadata) {
   try {
-    const jsonPath = path.join(assetPath, "asset_info.json");
-    // Check if exists
+    const directory = String(assetPath || "").trim();
+    if (!directory) {
+      return false;
+    }
+    const entries = await fs.readdir(directory).catch(() => []);
+    const preferredMeta = entries.find((name) => isFolderAssetMetaFileName(name))
+      || entries.find((name) => isSidecarAssetMetaFileName(name))
+      || ASSET_METADATA_FILE_NAME;
+    const jsonPath = path.join(directory, preferredMeta);
     try {
       await fs.access(jsonPath);
     } catch {
-      // If not exists, maybe it's a different file name?
-      // For custom assets we standardized on asset_info.json
       return false;
     }
 
     const content = await fs.readFile(jsonPath, "utf-8");
     const json = JSON.parse(content);
-    
-    // Merge updates
-    const updated = { ...json, ...newMetadata };
-    
-    await fs.writeFile(jsonPath, JSON.stringify(updated, null, 2));
+    await writeAssetMetadata(directory, { ...json, ...newMetadata }, { updatedAt: new Date().toISOString(), fileName: path.basename(jsonPath) });
     return true;
   } catch (e) {
     console.error("Failed to update asset metadata:", e);
@@ -1918,45 +2671,24 @@ async function getAssetDetails(assetDir, source = "custom") {
     const stat = await fs.stat(assetDir);
     if (!stat.isDirectory()) return null;
 
-    if (String(source || "").trim().toLowerCase() === "quixel") {
-      const entries = await fs.readdir(assetDir, { withFileTypes: true });
-      const fileNames = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
-      const metaFiles = fileNames.filter((f) => path.extname(f).toLowerCase() === ".json" && !f.toLowerCase().includes("index.json") && !f.toLowerCase().includes("hivedata.json") && !f.toLowerCase().includes("hivecache.json"));
-      if (metaFiles.length === 0) return null;
-      const metaPath = path.join(assetDir, metaFiles[0]);
-      const maxMetaBytes = QUIXEL_META_JSON_MAX_BYTES;
-      const meta = await readJsonSafe(metaPath, { maxBytes: maxMetaBytes });
-      if (!meta) return null;
-      const dirFiles = await collectMegascanAssetFiles(assetDir);
-      return createAssetRecord(assetDir, metaPath, meta, dirFiles, source);
-    }
-
     const entries = await fs.readdir(assetDir, { withFileTypes: true });
     const fileNames = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
-    const directoryNames = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
     const metaFiles = fileNames.filter((f) => path.extname(f).toLowerCase() === ".json" && !f.toLowerCase().includes("index.json") && !f.toLowerCase().includes("hivedata.json") && !f.toLowerCase().includes("hivecache.json"));
     if (metaFiles.length === 0) return null;
 
-    // Use the first JSON file as meta (most likely the correct one)
-    const metaPath = path.join(assetDir, metaFiles[0]);
-    const maxMetaBytes = source === "custom" ? CUSTOM_META_JSON_MAX_BYTES : QUIXEL_META_JSON_MAX_BYTES;
+    const sidecarMetas = metaFiles.filter((name) => isSidecarAssetMetaFileName(name));
+    const preferredMeta = metaFiles.find((name) => isFolderAssetMetaFileName(name))
+      || (sidecarMetas.length === 1 ? sidecarMetas[0] : "")
+      || metaFiles.find((name) => name.toLowerCase() === "asset_info.jason")
+      || (sidecarMetas.length === 0 ? metaFiles[0] : "");
+    if (!preferredMeta) return null;
+    const metaPath = path.join(assetDir, preferredMeta);
+    const maxMetaBytes = CUSTOM_META_JSON_MAX_BYTES;
     const meta = await readJsonSafe(metaPath, { maxBytes: maxMetaBytes });
     if (!meta) return null;
 
-    const dirFiles = fileNames.map((f) => path.join(assetDir, f));
-    const previewDirCandidates = directoryNames.filter((name) => {
-      const lower = String(name || "").trim().toLowerCase();
-      return lower === "preview" || lower === "previews";
-    });
-    for (const folderName of previewDirCandidates) {
-      const folderPath = path.join(assetDir, folderName);
-      const previewEntries = await fs.readdir(folderPath, { withFileTypes: true }).catch(() => []);
-      for (const entry of previewEntries) {
-        if (!entry.isFile()) continue;
-        dirFiles.push(path.join(folderPath, entry.name));
-      }
-    }
-    return createAssetRecord(assetDir, metaPath, meta, dirFiles, source);
+    const dirFiles = await collectCustomAssetFiles(assetDir, meta, metaPath);
+    return populatePreviewSize(createAssetRecord(assetDir, metaPath, meta, dirFiles, source, true));
   } catch (e) {
     console.error("Failed to get asset details:", e);
     return null;
@@ -1974,21 +2706,21 @@ async function getAssetDetailsByMetaPath(metaPath, source = "custom") {
       return null;
     }
     const assetDir = path.dirname(resolvedMetaPath);
-    const maxMetaBytes = source === "custom" ? CUSTOM_META_JSON_MAX_BYTES : QUIXEL_META_JSON_MAX_BYTES;
+    if (isAnimationModelMetaPath(resolvedMetaPath)) {
+      const meta = applyAnimationIdentityMetadata(
+        buildAnimationMetaFromModel(resolvedMetaPath),
+        await readAnimationIdentitySidecar(resolvedMetaPath)
+      );
+      const record = populatePreviewSize(createAssetRecord(assetDir, resolvedMetaPath, meta, [path.resolve(resolvedMetaPath)], source));
+      return applyPreservedAnimationPreview(record, {});
+    }
+    const maxMetaBytes = CUSTOM_META_JSON_MAX_BYTES;
     const meta = await readJsonSafe(resolvedMetaPath, { maxBytes: maxMetaBytes });
     if (!meta) {
       return null;
     }
-    if (String(source || "").trim().toLowerCase() === "quixel") {
-      const dirFiles = await collectMegascanAssetFiles(assetDir);
-      return createAssetRecord(assetDir, resolvedMetaPath, meta, dirFiles, source);
-    }
-    const collected = await collectFiles(assetDir);
-    const { filesByDirectory, nestedFilesByDirectory } = collected;
-    const directFiles = filesByDirectory.get(assetDir) || [];
-    const nestedFiles = nestedFilesByDirectory.get(assetDir) || [];
-    const dirFiles = [...new Set([...directFiles, ...nestedFiles])];
-    return createAssetRecord(assetDir, resolvedMetaPath, meta, dirFiles, source);
+    const dirFiles = await collectCustomAssetFiles(assetDir, meta, resolvedMetaPath);
+    return populatePreviewSize(createAssetRecord(assetDir, resolvedMetaPath, meta, dirFiles, source, true));
   } catch {
     return null;
   }
@@ -1997,6 +2729,7 @@ async function getAssetDetailsByMetaPath(metaPath, source = "custom") {
 module.exports = {
   scanLibrary,
   scanLibraryInWorker,
+  stopLibraryScans,
   searchAssets,
   getAssetDetails,
   getAssetDetailsByMetaPath,
@@ -2005,6 +2738,9 @@ module.exports = {
   updateAssetMetadata,
   inferColorTagsFromTextureFiles,
   collectColorTagsFromMeta,
+  getCustomLibraryIndexPath,
+  getCustomLibraryIndexGzPath,
+  getCustomLibraryIndexPaths,
   rebuildSearchIndex: searchIndex.setIndex,
   invalidateSearchIndex: searchIndex.invalidate,
   notifySearchIndexMutation: searchIndex.notifyMutation

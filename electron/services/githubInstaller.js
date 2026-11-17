@@ -606,7 +606,7 @@ async function installPluginToEngine(repo, editorPath, onProgress) {
       engineRoot = path.resolve(path.dirname(editorPath), "..", "..", "..");
   }
   
-  const pluginsDir = path.join(engineRoot, "Engine", "Plugins", "Marketplace");
+  const pluginsDir = path.join(engineRoot, "Engine", "Plugins");
   
   const release = await fetchPluginPackage(repo, { engineVersion: extractEngineVersion(editorPath) });
   
@@ -634,6 +634,19 @@ async function installPluginToEngine(repo, editorPath, onProgress) {
       await fs.cp(pluginRoot, targetDir, { recursive: true });
   } catch (e) {
       throw new Error(`Copy to plugins folder failed: ${e.message}`);
+  }
+
+  // Remove the previous engine installation only after the new copy succeeds.
+  // Restrict cleanup to known plugin directories with their own descriptor.
+  for (const name of ["AssetHive", "ArkHiveImport"]) {
+    const legacyDir = path.join(pluginsDir, "Marketplace", name);
+    const descriptor = await fs.stat(path.join(legacyDir, `${name}.uplugin`)).catch(() => null);
+    if (!descriptor?.isFile()) continue;
+    try {
+      await fs.rm(legacyDir, { recursive: true, force: true });
+    } catch (e) {
+      throw new Error(`新插件已复制到 ${targetDir}，但旧插件清理失败：${legacyDir}。请关闭 Unreal 后重试。${e.message}`);
+    }
   }
   
   // Cleanup

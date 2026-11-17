@@ -1,0 +1,14 @@
+export function heroPartKind(fields: { variant?: string } | undefined): string;
+export function inferHeroPart(values: string[]): { gender: string; bodyCode: string; variant: string; serial: string } | null;
+export function heroPartName(fields: { gender?: string; bodyCode?: string; variant?: string; serial?: string }): string;
+export function heroPartModelKind(fields: { variant?: string } | undefined, source: string): "groom" | "cards" | "mesh" | "";
+export function isHeroCache(path: string): boolean;
+export function heroSuitPart(path: string): string;
+export function partitionHeroSuitFiles(files?: string[], fields?: { variant?: string }, options?: { includeWeapons?: boolean }): { accepted: string[]; excluded: string[] };
+export function heroModelStem(assetName: string, source: string, fields?: { variant?: string }, meshKind?: "staticMesh" | "skeletalMesh"): string;
+export function cleanSuitName(value: string): string;
+export function auditHeroPackage(files: string[], fields?: { gender?: string; bodyCode?: string; variant?: string; serial?: string }, options?: { partial?: boolean; modelAnalyses?: Record<string, { meshKind?: string }> }): string[];
+export function heroPackageModelFiles(files?: string[]): string[];
+export function heroPackageNeedsScopeReview(files?: string[], confirmed?: boolean): boolean;
+export function inferHeroPackageFileScopes(files?: string[]): Record<string, "suit" | "weapon">;
+export function splitHeroPackageByScope(files?: string[], scopes?: Record<string, "suit" | "weapon">): { suit: string[]; weapon: string[]; unassigned: string[]; excluded: string[] };

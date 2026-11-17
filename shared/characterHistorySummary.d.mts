@@ -1,0 +1,5 @@
+export function characterHistorySummary(entry: { label?: string; note?: string; changes?: Array<{ name?: string; status?: string; action?: string; after?: string; sourcePath?: string; message?: string }>; files?: Array<{ name?: string; status?: string; action?: string; sourcePath?: string; message?: string }> }): string;
+export function characterHistoryAction(label: string, language?: string): string;
+export function characterImportSourceFolders(meta?: { characterManifest?: { files?: Array<{ originalPath?: string; sourcePath?: string }> }; characterUpdateHistory?: Array<{ label?: string; sourcePaths?: string[]; files?: Array<{ sourcePath?: string }> }> }): string[];
+export function characterHistoryGroupAction(entries: Array<{ label: string; automaticPreview?: boolean }>, language?: string): string;
+export function groupCharacterHistoryEntries<T extends { id: string; at: string; note: string; label?: string; automaticPreview?: boolean }>(entries: T[]): Array<{ id: string; at: string; entries: T[] }>;

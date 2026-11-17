@@ -1,3 +1,7 @@
+const { normalizeAssetTag } = require("../electron/services/assetTags");
+const { createAssetMetadata, writeAssetMetadataSync } = require("../electron/services/assetMetadata");
+const { runImageTask } = require("../electron/services/imageTasks");
+const { detectTextureTypeFromFileName } = require("../electron/services/textureTypes");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -157,6 +161,40 @@ function readJsonFileOrNull(filePath) {
   }
 }
 
+function uniqueStringList(values) {
+  const unique = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = String(value || "").trim();
+    if (!normalized) continue;
+    unique.add(normalized);
+  }
+  return [...unique];
+}
+
+function loadSourceAssetMeta(fileRecords) {
+  const jsonCandidates = (Array.isArray(fileRecords) ? fileRecords : [])
+    .filter((item) => path.extname(String(item?.name || "")).toLowerCase() === ".json")
+    .sort((a, b) => String(a?.name || "").localeCompare(String(b?.name || "")));
+  for (const record of jsonCandidates) {
+    const parsed = readJsonFileOrNull(record.fullPath);
+    if (!parsed || typeof parsed !== "object") continue;
+    const id = String(parsed.id || parsed.assetID || "").trim();
+    const name = String(parsed.name || "").trim();
+    const assetType = String(parsed.asset_type || parsed.assetType || "").trim().toLowerCase();
+    if (!id && !name && !assetType) continue;
+    return {
+      id,
+      name,
+      assetType,
+      tags: uniqueStringList(parsed.tags),
+      categories: uniqueStringList(parsed.categories),
+      source: String(parsed.source || "").trim(),
+      previewPath: String(parsed.previews || parsed.previewImage || "").trim()
+    };
+  }
+  return null;
+}
+
 function resolveAssetHiveCustomLibraryPathFromSettings() {
   const candidates = [];
   const appData = String(process.env.APPDATA || "").trim();
@@ -204,13 +242,110 @@ function sanitizeToken(value) {
     .replace(/^_+|_+$/g, "");
 }
 
+function makeAssetIdentity(assetType, assetName, destinationRoot) {
+  const typeToken = sanitizeToken(assetType) || "asset";
+  const assetNameToken = sanitizeToken(assetName) || "asset";
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const uniqueId = makeUniqueId();
+    const assetFolderName = `${typeToken}_${assetNameToken}_${uniqueId}`;
+    const destinationDir = path.join(destinationRoot, assetFolderName);
+    if (!fs.existsSync(destinationDir)) {
+      return { uniqueId, assetFolderName, destinationDir };
+    }
+  }
+  throw new Error("生成资产唯一ID失败，请重试");
+}
+
 function normalizeImportedAssetName(rawName) {
   const source = String(rawName || "").trim();
   if (!source) return source;
-  return source
+  let normalized = source
+    .replace(/^AD_/i, "")
+    .replace(/(?:_\d{1,3})?_(?:\d+)K$/i, "")
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    normalized = source;
+  }
+  return normalized
     .replace(/yanshikuai/ig, "Natue_Rock")
     .replace(/yan_shi_kuai/ig, "Natue_Rock")
     .replace(/岩石块/g, "Natue_Rock");
+}
+
+function isAdAssetName(value) {
+  return /^AD_/i.test(String(value || "").trim());
+}
+
+function isAxtAssetName(value) {
+  return /^AXT_/i.test(String(value || "").trim());
+}
+
+function detectSourceKind(sourceMeta, sourceAssetName) {
+  const vendorSource = String(sourceMeta?.source || "").trim().toLowerCase();
+  const metaName = String(sourceMeta?.name || "").trim();
+  const sourceName = String(sourceAssetName || "").trim();
+  if (vendorSource === "aixterior" || isAxtAssetName(metaName) || isAxtAssetName(sourceName)) {
+    return "axt";
+  }
+  if (vendorSource === "anydrafts" || isAdAssetName(metaName) || isAdAssetName(sourceName)) {
+    return "ad";
+  }
+  return "";
+}
+
+function findPreferredPreviewRecord(fileRecords, sourceMeta) {
+  const records = Array.isArray(fileRecords) ? fileRecords : [];
+  const previewPathBase = path.basename(String(sourceMeta?.previewPath || "").trim()).toLowerCase();
+  const candidates = records.filter((item) => {
+    const ext = path.extname(String(item?.name || "")).toLowerCase();
+    if (!TEXTURE_EXTENSIONS.has(ext) || ext === ".exr") return false;
+    return true;
+  });
+  const rankPreview = (record) => {
+    const lower = String(record?.name || "").toLowerCase();
+    if (previewPathBase && lower === previewPathBase) return 1000;
+    if (/_preview(?=\.[^.]+$)/i.test(lower)) return 900;
+    if (/_previewclay(?=\.[^.]+$)/i.test(lower)) return 700;
+    if (/_thumb(?=\.[^.]+$)/i.test(lower) || /thumbnail/i.test(lower)) return 500;
+    return 0;
+  };
+  const ranked = candidates
+    .map((record) => ({ record, score: rankPreview(record) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if ((b.record?.size || 0) !== (a.record?.size || 0)) return (b.record?.size || 0) - (a.record?.size || 0);
+      return String(a.record?.name || "").localeCompare(String(b.record?.name || ""));
+    });
+  if (ranked.length > 0) {
+    return ranked[0].record;
+  }
+  return null;
+}
+
+function deriveAxtAssetNameFromPreview(fileRecords, sourceMeta) {
+  const previewRecord = findPreferredPreviewRecord(fileRecords, sourceMeta);
+  if (!previewRecord) return "";
+  const baseName = path.basename(String(previewRecord.name || ""), path.extname(String(previewRecord.name || "")));
+  const match = baseName.match(/^(.+?)_[^_]+_preview(?:clay)?$/i);
+  if (match && String(match[1] || "").trim()) {
+    return String(match[1]).trim().replace(/_/g, " ");
+  }
+  const fallback = baseName.replace(/_preview(?:clay)?$/i, "").trim();
+  return fallback.replace(/_/g, " ").trim();
+}
+
+function resolveImportedAssetName(sourceMeta, sourceAssetName, fileRecords) {
+  const sourceKind = detectSourceKind(sourceMeta, sourceAssetName);
+  if (sourceKind === "axt") {
+    const previewDerived = deriveAxtAssetNameFromPreview(fileRecords, sourceMeta);
+    if (previewDerived) {
+      return previewDerived;
+    }
+  }
+  return normalizeImportedAssetName(sourceMeta?.name || sourceAssetName);
 }
 
 function makeCustomModelBaseName(slot, assetName, assetId) {
@@ -237,20 +372,8 @@ function normalizePath(filePath) {
 }
 
 function identifyTextureSlot(filename) {
-  const name = filename.toLowerCase();
-  if (name.includes("albedo") || name.includes("diffuse") || name.includes("basecolor") || name.includes("base_color") || name.includes("color")) return "Albedo";
-  if (name.includes("normal") || name.includes("nrm") || name.includes("nor")) return "Normal";
-  if (name.includes("displacement") || name.includes("disp") || name.includes("height")) return "Displacement";
-  if (name.includes("roughness") || name.includes("rough") || name.includes("rgh")) return "Roughness";
-  if (name.includes("ao") || name.includes("ambientocclusion") || name.includes("occlusion")) return "AO";
-  if (name.includes("specular") || name.includes("spec")) return "Specular";
-  if (name.includes("metalness") || name.includes("metallic") || name.includes("metal")) return "Metalness";
-  if (name.includes("opacity") || name.includes("alpha")) return "Opacity";
-  if (name.includes("mask")) return "Mask";
-  if (name.includes("fuzz")) return "Fuzz";
-  return "";
+  return detectTextureTypeFromFileName(filename);
 }
-
 function detectTextureAreaIndex(filename) {
   const lower = String(filename || "").toLowerCase();
   const udimMatch = lower.match(/(?:^|[_\-.])(1\d{3})(?=[_\-.]|$)/);
@@ -304,33 +427,29 @@ function buildTextureEntries(textureRecords, normalMapFormat) {
       const bExt = path.extname(String(b?.name || "")).toLowerCase();
       const score = (ext) => {
         if (ext === ".png") return 6;
-        if (ext === ".jpg" || ext === ".jpeg") return 5;
-        if (ext === ".tif" || ext === ".tiff") return 4;
-        if (ext === ".bmp") return 3;
-        if (ext === ".webp") return 2;
-        if (ext === ".exr") return 1;
+        if (ext === ".exr") return 5;
+        if (ext === ".jpg" || ext === ".jpeg") return 4;
+        if (ext === ".tif" || ext === ".tiff") return 3;
+        if (ext === ".bmp") return 2;
+        if (ext === ".webp") return 1;
         return 0;
       };
       return score(bExt) - score(aExt);
     });
     const usedSlotInArea = new Set();
-    const usedDisplacementFormatInArea = new Set();
     const unknown = [];
     for (const file of areaFiles) {
       const slot = identifyTextureSlot(file.name);
+      const ext = path.extname(String(file?.name || "")).toLowerCase();
       if (!slot) {
-        unknown.push(file);
+        if (ext !== ".exr") unknown.push(file);
         continue;
       }
       const slotKey = slot.toLowerCase();
-      if (slot === "Displacement") {
-        const ext = path.extname(String(file?.name || "")).toLowerCase();
-        const displacementFormat = ext === ".exr" ? "exr" : "nonexr";
-        if (usedDisplacementFormatInArea.has(displacementFormat)) {
-          continue;
-        }
-        usedDisplacementFormatInArea.add(displacementFormat);
-      } else if (usedSlotInArea.has(slotKey)) {
+      if (ext === ".exr" && slot !== "Displacement") {
+        continue;
+      }
+      if (usedSlotInArea.has(slotKey)) {
         continue;
       }
       usedSlotInArea.add(slotKey);
@@ -513,6 +632,21 @@ function resolve7zBinary(options) {
     const resolved = path.resolve(explicit);
     if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
       return resolved;
+    }
+  }
+  const bundledCandidates = [
+    path.join(__dirname, "7-Zip", "7z.exe"),
+    path.join(__dirname, "7-Zip", "7za.exe"),
+    path.join(__dirname, "7z.exe")
+  ];
+  for (const candidate of bundledCandidates) {
+    try {
+      const resolved = path.resolve(candidate);
+      if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+        return resolved;
+      }
+    } catch {
+      continue;
     }
   }
   const pathEnv = String(process.env.PATH || "").trim();
@@ -735,24 +869,39 @@ async function importFromFileRecords(fileRecords, sourceAssetName, options, stat
   const areaIds = textureData.areaIds;
 
   if (textureFiles.length > 0 || modelFiles.length > 0) {
-    const assetName = normalizeImportedAssetName(sourceAssetName);
-    const previewImage = pickSmallestJpg(textureRecords) || "";
+    const sourceMeta = loadSourceAssetMeta(fileRecords);
+    const sourceKind = detectSourceKind(sourceMeta, sourceAssetName);
+    const assetName = resolveImportedAssetName(sourceMeta, sourceAssetName, fileRecords);
+    const preferredPreviewRecord = findPreferredPreviewRecord(fileRecords, sourceMeta);
+    const previewImage = preferredPreviewRecord?.name || pickSmallestJpg(textureRecords) || "";
     const hasModel = Boolean(selectedModel);
-    const normalizedAssetType = hasModel ? "3d" : "surface";
+    const normalizedAssetType = hasModel
+      ? (ASSET_TYPE_OPTIONS.includes(sourceMeta?.assetType) ? sourceMeta.assetType : "3d")
+      : "surface";
+    const sourceTags = Array.isArray(sourceMeta?.tags) ? sourceMeta.tags : [];
+    const mergedTags = uniqueStringList([
+      ...(options.tags || []),
+      ...(sourceKind === "ad" ? ["AD"] : []),
+      ...(sourceKind === "axt" ? ["AXT"] : []),
+      ...sourceTags
+    ].map(normalizeAssetTag));
+    const sourceCategories = Array.isArray(sourceMeta?.categories) ? sourceMeta.categories : [];
+    const inferredCategory = sanitizeToken(sourceCategories[0] || "");
+    const normalizedCategory = String(options.category || inferredCategory || (hasModel ? "3dassets" : "custom")).trim()
+      || (hasModel ? "3dassets" : "custom");
     const existingKeyList = buildExistingAssetKey(normalizedAssetType, assetName);
     if (options?.skipExisting && options?.existingAssetKeys instanceof Set && existingKeyList.some((key) => options.existingAssetKeys.has(key))) {
       stats.skipped = Number(stats.skipped || 0) + 1;
       console.log(`[跳过] 已存在: ${assetName} (${normalizedAssetType})`);
       return;
     }
-    const id = makeUniqueId();
     const libraryPath = path.resolve(options.libraryPath || DEFAULT_LIBRARY_PATH);
-    const normalizedCategory = String(options.category || (hasModel ? "3dassets" : "custom")).trim() || (hasModel ? "3dassets" : "custom");
     const destinationRoot = path.join(libraryPath, normalizedAssetType);
     fs.mkdirSync(destinationRoot, { recursive: true });
-    const folderBase = `${normalizedAssetType}_${sanitizeToken(assetName) || "asset"}_${id}`;
-    const destinationDirName = ensureUniqueFolder(destinationRoot, folderBase);
-    const destinationDir = path.join(destinationRoot, destinationDirName);
+    const assetIdentity = makeAssetIdentity(normalizedAssetType, assetName, destinationRoot);
+    const id = assetIdentity.uniqueId;
+    const destinationDirName = assetIdentity.assetFolderName;
+    const destinationDir = assetIdentity.destinationDir;
     fs.mkdirSync(destinationDir, { recursive: true });
     const previewDir = path.join(destinationDir, "Preview");
     fs.mkdirSync(previewDir, { recursive: true });
@@ -772,12 +921,24 @@ async function importFromFileRecords(fileRecords, sourceAssetName, options, stat
       const sourcePath = String(item.sourcePath || "").trim();
       if (!sourcePath || copiedTextureBySourcePath.has(sourcePath)) continue;
       const ext = path.extname(sourcePath).toLowerCase();
-      const desiredName = `${makeCustomTextureBaseName(item.textureType, item.areaIndex, assetName, id)}${ext}`;
-      const finalTextureName = fs.existsSync(path.join(destinationDir, desiredName))
-        ? copyWithUniqueName(sourcePath, destinationDir)
-        : (fs.copyFileSync(sourcePath, path.join(destinationDir, desiredName)), desiredName);
+      const desiredBaseName = makeCustomTextureBaseName(item.textureType, item.areaIndex, assetName, id);
+      let finalTextureName = "";
+      if (ext === ".exr") {
+        const outputPath = path.join(destinationDir, `${desiredBaseName}.png`);
+        await runImageTask("exrToPng", [sourcePath, outputPath, { normalize: true }]);
+        if (!fs.existsSync(outputPath)) {
+          throw new Error(`Displacement EXR 转换为 PNG 失败: ${path.basename(sourcePath)}`);
+        }
+        finalTextureName = path.basename(outputPath);
+      } else {
+        const desiredName = `${desiredBaseName}${ext}`;
+        finalTextureName = fs.existsSync(path.join(destinationDir, desiredName))
+          ? copyWithUniqueName(sourcePath, destinationDir)
+          : (fs.copyFileSync(sourcePath, path.join(destinationDir, desiredName)), desiredName);
+      }
       copiedTextureBySourcePath.set(sourcePath, finalTextureName);
     }
+
     let copiedPreviewName = "";
     if (previewImage) {
       const previewRecord = textureRecords.find((item) => item.name === previewImage) || null;
@@ -833,14 +994,16 @@ async function importFromFileRecords(fileRecords, sourceAssetName, options, stat
     const colorTags = options?.inferColorTags
       ? await withTimeout(inferColorTagsFromTextureFiles(rewrittenTextureFiles, { maxColorTags: options.maxColorTags, maxCandidateImages: options.maxCandidateImages, sampleSize: options.colorTagSampleSize }), Number(options.colorTagTimeoutMs) || 900, [])
       : [];
-    const assetInfo = {
+    const assetInfo = createAssetMetadata({
       assetID: id,
       name: assetName,
       assetType: normalizedAssetType,
       asset_type: normalizedAssetType,
+      topCategory: String(sourceMeta?.topCategory || "").trim(),
+      standardAssetTags: Array.isArray(sourceMeta?.standardAssetTags) ? sourceMeta.standardAssetTags : [],
       category: normalizedCategory,
-      tags: options.tags || [],
-      categories: [normalizedAssetType, String(normalizedCategory).toLowerCase()],
+      tags: mergedTags,
+      categories: uniqueStringList([normalizedAssetType, String(normalizedCategory).toLowerCase(), ...sourceCategories.map((item) => String(item || "").toLowerCase())]),
       normalMapFormat,
       normalMapFormats,
       modelSlots: rewrittenModelSlots,
@@ -864,36 +1027,31 @@ async function importFromFileRecords(fileRecords, sourceAssetName, options, stat
             relativeSize: "2x1"
           }
         : { images: [], relativeSize: "2x1" },
-      json: {
-        contentLength: 0,
-        uri: `${id}.json`
-      },
       scanInformation: {
         dimensions: hasModel ? { x: 1, y: 1, z: 1 } : { x: 2, y: 0.02, z: 2 }
       },
       source: "custom",
+      vendorSource: String(sourceMeta?.source || "").trim(),
       createdAt: new Date().toISOString(),
       slug: destinationDirName,
       semanticTags: {
         name: assetName,
         asset_type: normalizedAssetType,
-        contains: [normalizedAssetType, String(normalizedCategory).toLowerCase(), ...(options.tags || [])],
-        theme: [String(normalizedCategory)],
+        contains: uniqueStringList([normalizedAssetType, String(normalizedCategory).toLowerCase(), ...mergedTags, ...sourceCategories.map((item) => String(item || "").toLowerCase())]),
+        theme: uniqueStringList([String(normalizedCategory), ...sourceCategories]),
         descriptive: [],
         state: [],
-        subject_matter: String(normalizedCategory),
+        subject_matter: sourceCategories[0] || String(normalizedCategory),
         environment: []
       }
-    };
+    }, { now: new Date().toISOString() });
     if (Array.isArray(colorTags) && colorTags.length > 0) {
       assetInfo.colorTags = colorTags;
       assetInfo.semanticTags.color = colorTags[0];
       assetInfo.semanticTags.colors = colorTags;
     }
-    const jsonPath = path.join(destinationDir, `${id}.json`);
-    fs.writeFileSync(jsonPath, JSON.stringify(assetInfo, null, 2), "utf-8");
-    assetInfo.json.contentLength = fs.statSync(jsonPath).size;
-    fs.writeFileSync(jsonPath, JSON.stringify(assetInfo, null, 2), "utf-8");
+    const metadataWrite = writeAssetMetadataSync(destinationDir, assetInfo);
+    const jsonPath = metadataWrite.metaPath;
     stats.count += 1;
     if (options?.skipExisting && options?.existingAssetKeys instanceof Set) {
       for (const key of existingKeyList) {
@@ -1056,7 +1214,7 @@ async function start() {
         "  --library <path>              目标库路径(默认读取 AssetHive 设置里的 customLibraryPath)",
         "  --category <name>             写入到 json 的 category 字段(例如 nature/custom)",
         "  --tags <a,b,c>                统一 tags(逗号分隔)",
-        "  --normal <dx|opengl>          Normal 格式(默认 opengl)",
+        "  --normal <dx|opengl>          Normal 格式(默认 dx)",
         "  --jobs <n>                    并发解压/导入 zip 的数量(默认 2)",
         "  --extractor <auto|7z|powershell> 解压器(默认 auto，优先 7z)",
         "  --7zPath <path>               7z.exe 路径(可选，不填则尝试自动发现)",
@@ -1064,10 +1222,11 @@ async function start() {
         "  --previewMax <n>              Preview 最大边长(默认 1024)",
         "  --inferColorTags <0|1>        推断颜色标签(默认 1，基于 Albedo)",
         "  --colorTagTimeoutMs <n>       颜色推断超时(默认 900ms)",
+        "  --nonInteractive <0|1>       禁用命令行交互，缺省字段尽量自动推断",
         "  --resume                      断点续导：跳过已存在(按 资产类型+资产名 判定)",
         "",
         "示例:",
-        "  scripts\\batch_import_assets.bat --path \"C:\\Assets\\Source\" --library \"D:\\AssetHiveLibrary\" --category nature --tags \"PBR Max,Moss,Ground\" --normal opengl --jobs 4 --extractor 7z --resume",
+        "  scripts\\batch_import_assets.bat --path \"F:\\Files\\Downloads\\森林植被_299\" --category nature --tags \"PBRMAX,Moss,Ground\" --normal opengl --jobs 4 --extractor 7z --resume",
         ""
       ].join("\n")
     );
@@ -1079,7 +1238,7 @@ async function start() {
   let category = String(args.category || "").trim();
   let libraryPath = String(args.library || args.customLibraryPath || resolveAssetHiveCustomLibraryPathFromSettings() || DEFAULT_LIBRARY_PATH).trim();
   let tags = String(args.tags || "").split(",").map((item) => item.trim()).filter(Boolean);
-  let normalMapFormat = normalizeNormalMapFormat(args.normal || args.normalMapFormat || "opengl");
+  let normalMapFormat = normalizeNormalMapFormat(args.normal || args.normalMapFormat || "dx");
   const skipExisting = parseBool(args.resume) || parseBool(args.skipExisting);
   const jobs = Math.max(1, Math.min(16, Number(args.jobs || args.concurrency || 2) || 2));
   const extractor = String(args.extractor || "auto").trim();
@@ -1092,17 +1251,18 @@ async function start() {
   const maxColorTags = Math.max(1, Math.min(6, Number(args.maxColorTags || 4) || 4));
   const maxCandidateImages = Math.max(1, Math.min(6, Number(args.maxCandidateImages || 2) || 2));
   const colorTagSampleSize = Math.max(16, Math.min(128, Number(args.colorTagSampleSize || 48) || 48));
+  const nonInteractive = parseBool(args.nonInteractive);
 
   if (!targetDir) targetDir = String(await question("请输入要扫描的根目录路径: ")).trim().replace(/^"|"$/g, "");
-  if (!assetType) assetType = await chooseByNumber("请选择资产分类", ASSET_TYPE_OPTIONS, "surface");
-  if (!category) category = await chooseByNumber("请选择子分类/主题", CATEGORY_OPTIONS, "custom");
+  if (!assetType && !nonInteractive) assetType = await chooseByNumber("请选择资产分类", ASSET_TYPE_OPTIONS, "surface");
+  if (!category && !nonInteractive) category = await chooseByNumber("请选择子分类/主题", CATEGORY_OPTIONS, "custom");
   if (!libraryPath) libraryPath = String(await question("请输入目标库路径(可留空读取 AssetHive 设置): ")).trim().replace(/^"|"$/g, "");
   if (!libraryPath) libraryPath = resolveAssetHiveCustomLibraryPathFromSettings();
-  if (tags.length === 0) {
+  if (tags.length === 0 && !nonInteractive) {
     tags = String(await question("请输入统一 Tag (逗号分隔，可空): ")).split(",").map((item) => item.trim()).filter(Boolean);
   }
-  if (!args.normal && !args.normalMapFormat) {
-    normalMapFormat = normalizeNormalMapFormat(await question("Normal 类型 (dx/opengl，默认 opengl): "));
+  if (!args.normal && !args.normalMapFormat && !nonInteractive) {
+    normalMapFormat = normalizeNormalMapFormat(await question("Normal 类型 (dx/opengl，默认 dx): "));
   }
 
   if (!targetDir || !fs.existsSync(targetDir)) {

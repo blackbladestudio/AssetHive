@@ -1,5 +1,5 @@
 import React, { Component, ErrorInfo, ReactNode } from "react";
-const appBrandIconPath = new URL("../../LOGO/Icon_V2_256.png", import.meta.url).href;
+const appBrandIconPath = new URL("../../images/Icon_V2_256.png", import.meta.url).href;
 
 interface Props {
   children: ReactNode;
@@ -8,6 +8,14 @@ interface Props {
 interface State {
   hasError: boolean;
   error: Error | null;
+}
+
+function isEnglishUi() {
+  try {
+    return window.localStorage.getItem("assethive.uiLanguage") === "en";
+  } catch {
+    return false;
+  }
 }
 
 export class ErrorBoundary extends Component<Props, State> {
@@ -26,6 +34,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   public render() {
     if (this.state.hasError) {
+      const en = isEnglishUi();
       return (
         <div style={{ position: "relative", height: "100vh", background: "#121212", color: "#fff" }}>
           <button
@@ -37,7 +46,7 @@ export class ErrorBoundary extends Component<Props, State> {
                 window.close();
               }
             }}
-            title="Close"
+            title={en ? "Close" : "关闭"}
             style={{
               position: "absolute",
               top: 8,
@@ -61,7 +70,7 @@ export class ErrorBoundary extends Component<Props, State> {
           </button>
           <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, padding: 24 }}>
             <img src={appBrandIconPath} alt="AssetHive" style={{ width: 82, height: 82, objectFit: "contain", opacity: 0.95 }} />
-            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: ".04em" }}>Something went wrong</h2>
+            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, letterSpacing: ".04em" }}>{en ? "Something went wrong" : "出错了"}</h2>
             <p style={{ margin: 0, color: "#ff5252", maxWidth: 600, textAlign: "center" }}>{this.state.error?.message}</p>
             <button
               onClick={() => window.location.reload()}
@@ -77,7 +86,7 @@ export class ErrorBoundary extends Component<Props, State> {
                 fontSize: 12
               }}
             >
-              Reload Application
+              {en ? "Reload Application" : "重新加载应用"}
             </button>
           </div>
         </div>

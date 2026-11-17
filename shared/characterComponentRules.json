@@ -1,0 +1,4 @@
+{
+  "suit": { "maxSlots": 4 },
+  "monster": { "maxSlots": null }
+}

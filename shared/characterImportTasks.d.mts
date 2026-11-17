@@ -1,0 +1,1 @@
+export function finishCharacterImportTasks<T extends { form: { queueId?: string }; tagInput: string }>(drafts: T[], current: T, completedIds: string[], appended?: T[]): { drafts: T[]; activeIndex: number };

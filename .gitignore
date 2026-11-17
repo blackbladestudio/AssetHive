@@ -60,3 +60,10 @@ Log/
 Logs/
 import_*.json
 tmp_*.json
+
+# Local build and verification files
+/.tmp/
+/tools/
+/.wix/
+__pycache__/
+*.pyc

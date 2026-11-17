@@ -11,11 +11,7 @@ try {
 }
 
 // 配置参数
-const TARGET_LIBRARY = String(process.argv[2] || "").trim();
-if (!TARGET_LIBRARY) {
-  console.error("Usage: node compress_library_previews.js <library-path>");
-  process.exit(2);
-}
+const TARGET_LIBRARY = process.argv[2] || "F:\\ArkLibrayData";
 const MAX_WIDTH = 1024;
 const MAX_HEIGHT = 1024;
 const JPEG_QUALITY = 72;

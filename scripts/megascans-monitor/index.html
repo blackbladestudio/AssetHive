@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' file:; connect-src 'none'; object-src 'none'; base-uri 'none'">
+<title>Megascans 下载与入库进度</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header><div><span class="eyebrow">ASSETHIVE / MEGASCANS</span><h1>下载与入库进度</h1></div><div class="actions"><button id="login" disabled>Bridge 登录</button><button id="start" disabled>开始 / 继续</button><button id="pause" disabled>暂停</button><button id="open-library">打开资源库</button><button id="refresh">刷新</button></div></header>
+<main>
+<section class="panel"><div class="heading"><h2>下载与导入选择</h2><span id="login-status" class="muted small" role="status"></span></div>
+<fieldset id="type-selection" disabled><legend>选择资产分类</legend><div class="type-options">
+<label><input type="checkbox" name="asset-type" value="3d" checked>3D Assets</label>
+<label><input type="checkbox" name="asset-type" value="3dplant">3D Plants</label>
+<label><input type="checkbox" name="asset-type" value="surface" checked>Surface</label>
+<label><input type="checkbox" name="asset-type" value="decal" checked>Decal / Atlas</label>
+<label><input type="checkbox" name="asset-type" value="hdri">HDRI</label>
+</div></fieldset>
+<div class="mode-selection"><label for="mode">处理方式</label><select id="mode" disabled><option value="import">下载并导入 AssetHive</option><option value="archive">仅下载原始资源并归档</option></select></div>
+<p id="selection-info" class="muted small">仅处理勾选分类；选择将在开始后保存，后续继续沿用。已有未完成缓存时，需保留其分类直到当前资产处理完成。</p>
+</section>
+<section class="panel"><div class="heading"><h2>全库进度</h2><span id="status" class="badge">读取记录中</span></div>
+<p class="muted small">所选分类按 3D Assets → 3D Plants → Surface → Decal / Atlas → HDRI 排序。单项下载持续失败时记录并暂存，继续下一项；整体断网自动重试，登录失效自动尝试用 Epic 已保存会话续登，需要验证时显示窗口。下载时暂停在当前资产完成后生效，重试或登录等待时可直接暂停。</p>
+<div class="stats"><div><strong id="completed">—</strong><span>已完成</span></div><div><strong id="pending">—</strong><span>待处理</span></div><div><strong id="skipped">—</strong><span>已校验去重跳过</span></div><div><strong id="total">—</strong><span>队列总数</span></div></div>
+<progress id="overall" max="100" value="0"></progress><p id="overall-text" class="muted">进度记录会自动保留，下次运行继续校验和处理。</p>
+<div class="current"><div><span class="muted">当前资产</span><strong id="current-id">—</strong></div><span id="stage">等待任务</span></div>
+<progress id="file-progress" max="100" value="0"></progress><p id="file-info" class="muted">尚无下载数据</p>
+<p id="prefetch-info" class="muted" hidden></p>
+<p id="deferred-info" class="muted" hidden></p>
+<p id="error" class="error" hidden></p><p id="updated" class="muted small"></p>
+</section>
+<section class="panel"><div class="heading"><div><h2>已完成的资产</h2><p id="asset-count" class="muted small">只显示已有完成回执的资产，入库失败的项不会计入。</p></div><input id="search" type="search" aria-label="搜索已完成资产" placeholder="搜索名称、Quixel ID 或类型"></div>
+<div id="assets" class="assets"><p class="empty">正在读取完成记录…</p></div>
+<div class="pagination"><button id="previous">上一页</button><span id="page" class="muted small"></span><button id="next">下一页</button></div>
+</section>
+<footer><div id="library" class="muted small"></div><p>3D Assets / Surface / Decal 最高 4K · 3D Assets 仅 Highpoly · 植物保留变体 / LOD · 普通贴图优先 PNG，排除 EXR · HDRI 保留 HDR / EXR</p><p class="muted small">默认 4 个文件并行下载，每次处理一项，校验归档与入库结果后清理本地缓存。关闭此窗口不停止下载。</p></footer>
+</main><script src="renderer.js"></script></body></html>

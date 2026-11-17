@@ -1,106 +1,102 @@
-name: Release Windows MSI
+﻿name: Release Windows installers
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       GH_TOKEN: ${{ github.token }}
-      CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-      CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-
+      ASSETHIVE_NO_PAUSE: "1"
     steps:
-      - name: Checkout clean source
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           lfs: true
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: "22"
+          node-version: "24.21.0"
           cache: npm
-
-      - name: Validate tag and release guard
+      - name: Validate version and immutable release
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $expectedTag = "v$version"
-          if ("${{ github.ref_name }}" -ne $expectedTag) {
-            throw "Tag '${{ github.ref_name }}' must equal '$expectedTag'"
-          }
-          gh release view $expectedTag --repo "${{ github.repository }}" *> $null
-          $releaseExists = $LASTEXITCODE -eq 0
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag must match package.json' }
+          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) { throw 'This release already exists; use a new version' }
           $global:LASTEXITCODE = 0
-          if ($releaseExists) {
-            throw "Release '$expectedTag' already exists; publish a new version instead"
-          }
-          "ASSETHIVE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
+          if (-not (Test-Path "docs/release-notes-$version.md")) { throw 'Missing release notes' }
+          "ASSETHIVE_VERSION=$version" >> $env:GITHUB_ENV
       - name: Install locked dependencies
-        run: npm ci
-
-      - name: Configure optional code signing
+        run: npm ci --include=optional
+      - name: Check types and update compatibility
         shell: pwsh
         run: |
+          npm run typecheck
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run test:updates
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run test:character
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Install official Inno Setup
+        shell: pwsh
+        run: |
+          $release = gh api repos/jrsoftware/issrc/releases/tags/is-6_7_3 | ConvertFrom-Json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $url = ($release.assets | Where-Object name -eq 'innosetup-6.7.3.exe').browser_download_url
+          if (-not $url) { throw 'Official installer not found' }
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          if ((Get-AuthenticodeSignature $installer).Status -ne 'Valid') { throw 'Invalid Inno Setup signature' }
+          $target = Join-Path $env:GITHUB_WORKSPACE 'tools/InnoSetup'
+          $process = Start-Process $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/NOICONS',"/DIR=$target" -Wait -PassThru
+          if ($process.ExitCode) { throw 'Inno Setup installation failed' }
+      - name: Build and verify Windows installers
+        shell: pwsh
+        run: |
+          npm run package:msi -- -KeepStage
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify-release-package.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Optional signing and final checksums
+        shell: pwsh
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $names = @("AssetHive-$env:ASSETHIVE_VERSION-Windows.msi", "AssetHive-$env:ASSETHIVE_VERSION-Windows-setup.exe", "AssetHive-$env:ASSETHIVE_VERSION-setup-win64.exe")
           if ($env:CERTIFICATE_BASE64) {
-            $certificatePath = Join-Path $env:RUNNER_TEMP "assethive-signing.pfx"
-            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:CERTIFICATE_BASE64))
-            "CSC_LINK=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            "CSC_KEY_PASSWORD=$env:CERTIFICATE_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            "ASSETHIVE_SIGNED=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          } else {
-            "ASSETHIVE_SIGNED=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            Write-Warning "No signing certificate configured; the MSI will be published unsigned."
+            $pfx = Join-Path $env:RUNNER_TEMP 'assethive-signing.pfx'
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERTIFICATE_BASE64))
+            $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx,$env:CERTIFICATE_PASSWORD)
           }
-
-      - name: Build MSI
-        run: npm run package:msi
-
-      - name: Verify installer and create checksum
-        shell: pwsh
-        run: |
-          $expectedName = "AssetHive-$env:ASSETHIVE_VERSION-Windows.msi"
-          $msi = Get-ChildItem "Output/installer" -Filter "*.msi" -File
-          if ($msi.Count -ne 1 -or $msi[0].Name -ne $expectedName) {
-            throw "Expected exactly Output/installer/$expectedName"
-          }
-          if ($env:ASSETHIVE_SIGNED -eq "true") {
-            $signature = Get-AuthenticodeSignature -LiteralPath $msi[0].FullName
-            if ($signature.Status -ne "Valid") {
-              throw "MSI signature verification failed: $($signature.Status)"
+          foreach ($name in $names) {
+            $file = Join-Path 'Output' $name
+            if ((Get-Item $file).Length -lt 1MB) { throw "Invalid installer: $name" }
+            if ($certificate) {
+              $signature = Set-AuthenticodeSignature -FilePath $file -Certificate $certificate -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com'
+              if ($signature.Status -ne 'Valid') { throw "Signing failed: $name" }
             }
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name" | Set-Content "$file.sha256" -Encoding ascii
           }
-          $hash = (Get-FileHash -LiteralPath $msi[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $expectedName" | Set-Content -LiteralPath "$($msi[0].FullName).sha256" -Encoding ascii -NoNewline
-
-      - name: Create immutable GitHub Release
+      - name: Publish immutable release
         shell: pwsh
         run: |
-          $msi = "Output/installer/AssetHive-$env:ASSETHIVE_VERSION-Windows.msi"
-          $checksum = "$msi.sha256"
-          $signingNote = if ($env:ASSETHIVE_SIGNED -eq "true") {
-            "The Windows installer is code signed."
-          } else {
-            "WARNING: This installer is unsigned and Windows SmartScreen may display a warning."
+          $assets = @()
+          foreach ($suffix in @('Windows.msi','Windows-setup.exe','setup-win64.exe')) {
+            $file = "Output/AssetHive-$env:ASSETHIVE_VERSION-$suffix"
+            $assets += $file
+            $assets += "$file.sha256"
           }
-          $notes = @"
-          AssetHive $env:ASSETHIVE_VERSION
-
-          $signingNote
-
-          Verify the installer with the attached SHA-256 file before installation.
-          "@
-          gh release create "${{ github.ref_name }}" $msi $checksum `
-            --repo "${{ github.repository }}" `
-            --verify-tag `
-            --title "AssetHive $env:ASSETHIVE_VERSION" `
-            --notes $notes
+          gh release create $env:GITHUB_REF_NAME @assets --repo $env:GITHUB_REPOSITORY --verify-tag --title "AssetHive $env:ASSETHIVE_VERSION" --notes-file "docs/release-notes-$env:ASSETHIVE_VERSION.md" --latest
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

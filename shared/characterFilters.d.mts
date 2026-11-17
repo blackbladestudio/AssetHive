@@ -1,0 +1,14 @@
+import type { AssetRecord } from "../src/types";
+export type CharacterFilters = { family: string; display: string; suitClass: string; part: string; form: string; maturity: string; weaponType: string; rigging: string; gender: string; hairType: string };
+export type CharacterFilterContext = { family: string; category: string; key: string };
+export const DEFAULT_CHARACTER_FILTERS: Readonly<CharacterFilters>;
+export function characterStatus(value: unknown): { value: "wip" | "needs_rig" | "rigged" | "approved"; zh: string; en: string };
+export function defaultCharacterFilters(context: CharacterFilterContext | null): CharacterFilters;
+export function matchesCharacterCategoryTag(tag: string, category: string, labels?: string[]): boolean;
+export function deduplicateCharacterCategoryTags(tags: string[], category: string, labels?: string[]): string[];
+export function characterFilterContext(node: string): CharacterFilterContext | null;
+export function changeCharacterFilter(current: CharacterFilters, key: keyof CharacterFilters, value: string): CharacterFilters;
+export function characterPartKind(asset: AssetRecord): string;
+export function characterFormIds(asset: AssetRecord): string[];
+export function filterCharacterCards(cards: AssetRecord[], filters?: CharacterFilters, matchedIds?: Set<string> | null): AssetRecord[];
+export function characterFilterDefinitions(context: CharacterFilterContext, cards: AssetRecord[]): Array<{ key: keyof CharacterFilters; zh: string; en: string; options: Array<{value: string; zh: string; en: string}> }>;

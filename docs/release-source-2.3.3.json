@@ -1,0 +1,12 @@
+{
+  "version": "2.3.3",
+  "desktop": {
+    "repository": "Biscuits-Lab/Assethive_Sourcecode",
+    "commit": "2387cde038e2fd923684fb4208a4074d9d5e06ef"
+  },
+  "plugin": {
+    "repository": "Biscuits-Lab/AssetHivePlugin",
+    "commit": "ca21b83",
+    "distribution": "Project plugin; not bundled in desktop installer"
+  }
+}

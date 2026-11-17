@@ -13,6 +13,7 @@ export function useExportState() {
   const [savingProgressMap, setSavingProgressMap] = useState<Record<string, number>>({});
   const [unrealConnected, setUnrealConnected] = useState(false);
   const [unrealConnectedTargetName, setUnrealConnectedTargetName] = useState("");
+  const [unrealConnectionMessage, setUnrealConnectionMessage] = useState("");
 
   return {
     busy, setBusy,
@@ -26,6 +27,7 @@ export function useExportState() {
     importSaving, setImportSaving,
     savingProgressMap, setSavingProgressMap,
     unrealConnected, setUnrealConnected,
-    unrealConnectedTargetName, setUnrealConnectedTargetName
+    unrealConnectedTargetName, setUnrealConnectedTargetName,
+    unrealConnectionMessage, setUnrealConnectionMessage
   };
 }

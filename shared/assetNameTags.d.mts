@@ -1,0 +1,1 @@
+export function removeAssetNameTags(tags: readonly string[] | undefined, metadata?: { name?: unknown; title?: unknown; displayName?: unknown; assetName?: unknown; semanticTags?: unknown }, extraNames?: readonly unknown[]): string[];

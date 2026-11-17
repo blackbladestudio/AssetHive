@@ -1,0 +1,41 @@
+.three-dcoat-dialog {
+  width: min(540px, calc(100vw - 48px));
+  box-sizing: border-box;
+  margin: auto;
+  padding: 24px;
+  color: var(--text-0, #eee);
+  background: var(--bg-2, #202125);
+  border: 1px solid var(--line-1, #42444a);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px #0008;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.three-dcoat-dialog::backdrop { background: #0008; backdrop-filter: blur(3px); }
+.three-dcoat-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.three-dcoat-header h2 { margin: 0; font-size: 18px; }
+.three-dcoat-brand { font-weight: 700; color: #a5cfb1; font-size: 12px; }
+.three-dcoat-asset-name { margin: 10px 0 20px; color: var(--text-2, #aaa); overflow-wrap: anywhere; }
+.three-dcoat-form { display: grid; gap: 16px; }
+.three-dcoat-field { display: grid; gap: 7px; }
+.three-dcoat-field > span { color: var(--text-2, #aaa); font-size: 12px; }
+.three-dcoat-field select {
+  width: 100%; box-sizing: border-box; padding: 10px 12px;
+  color: inherit; background: var(--bg-1, #191a1d);
+  border: 1px solid var(--line-1, #42444a); border-radius: 7px; font: inherit;
+}
+.three-dcoat-field option { background: #202125; color: #eee; }
+.three-dcoat-connection { border-top: 1px solid var(--line-1, #42444a); padding-top: 12px; }
+.three-dcoat-connection summary { cursor: pointer; color: var(--text-2, #aaa); }
+.three-dcoat-path-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.three-dcoat-path { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--text-2, #aaa); }
+.three-dcoat-dialog button { font: inherit; cursor: pointer; }
+.three-dcoat-dialog button:disabled { opacity: .5; cursor: default; }
+.three-dcoat-secondary { border: 1px solid var(--line-1, #42444a); border-radius: 7px; background: transparent; color: inherit; padding: 8px 12px; white-space: nowrap; }
+.three-dcoat-primary { border: 1px solid #80ab8b; border-radius: 7px; background: #80ab8b; color: #102316; font-weight: 600 !important; padding: 9px 16px; }
+.three-dcoat-hint { margin: 0; color: var(--text-2, #aaa); font-size: 12px; }
+.three-dcoat-status { margin: 0; min-height: 20px; overflow-wrap: anywhere; color: #a5cfb1; }
+.three-dcoat-status[data-error=true] { color: #edaf8a; }
+.three-dcoat-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.three-dcoat-dialog :focus-visible { outline: 2px solid #a5cfb1; outline-offset: 3px; }

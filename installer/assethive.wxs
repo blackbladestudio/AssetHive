@@ -1,0 +1,90 @@
+<!--
+  AssetHive WiX Toolset 源文件（MSI 安装包）
+
+  命令行覆盖（wix build）：
+    wix build installer\assethive.wxs ^
+      -d MyAppVersion=2.2.2 ^
+      -d "MyAppSourceDir=C:\...\AssetHive-win32-x64" ^
+      -d "AppIcon=C:\...\images\v2.ico" ^
+      -d "AppImageDir=C:\...\images" ^
+      -arch x64 -o Output\AssetHive-2.2.2-win64.msi
+
+  说明：
+    - <Files Include="...\**"> 是 WiX v5 内置的递归文件收集，无需 heat 扩展。
+    - 版本号、源目录均由 -d 预处理器变量注入，脚本里从 package.json 读取。
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package
+    Name="AssetHive"
+    Manufacturer="BlackBlade Studio"
+    Version="$(var.MyAppVersion)"
+    UpgradeCode="9F0A2C6E-8B4D-4A7E-9C1B-3D5F7E2A9B1C"
+    Compressed="yes"
+    Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of AssetHive is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="app.ico" SourceFile="$(var.AppIcon)" />
+    <Property Id="ARPPRODUCTICON" Value="app.ico" />
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" Sequence="execute" />
+
+    <!-- Covers Windows Settings uninstall as well as install, upgrade and repair. -->
+    <Property Id="REBOOT" Value="ReallySuppress" />
+
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.AppImageDir)\installer-msi-banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.AppImageDir)\installer-msi-dialog.bmp" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="AssetHive" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuSubfolder" Name="AssetHive">
+        <Component Id="StartMenuShortcut" Guid="*">
+          <Shortcut Id="StartMenuShortcut" Name="AssetHive" Target="[INSTALLFOLDER]AssetHive.exe" WorkingDirectory="INSTALLFOLDER" Icon="app.ico">
+            <ShortcutProperty Key="System.AppUserModel.ID" Value="com.blackblade.assethive" />
+          </Shortcut>
+          <RemoveFolder Id="RemoveProgramMenuSubfolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\BlackBlade Studio\AssetHive" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*">
+        <Shortcut Id="DesktopShortcut" Name="AssetHive" Target="[INSTALLFOLDER]AssetHive.exe" WorkingDirectory="INSTALLFOLDER" Icon="app.ico">
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="com.blackblade.assethive" />
+        </Shortcut>
+        <RegistryValue Root="HKCU" Key="Software\BlackBlade Studio\AssetHive" Name="desktop" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.MyAppSourceDir)\**" />
+      <Component Id="InstallationType" Guid="*">
+        <RegistryValue Root="HKLM" Key="Software\BlackBlade Studio\AssetHive\MSI" Name="InstallLocation" Value="[INSTALLFOLDER]" Type="string" KeyPath="yes" />
+        <IniFile Id="InstallType" Name="assethive-install.ini" Directory="INSTALLFOLDER" Section="Install" Key="Type" Value="msi" Action="addLine" />
+        <IniFile Id="InstallScope" Name="assethive-install.ini" Directory="INSTALLFOLDER" Section="Install" Key="Scope" Value="machine" Action="addLine" />
+        <RemoveFile Id="RemoveInstallMarker" Name="assethive-install.ini" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="AssetHive" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <CustomAction Id="LaunchApp" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]AssetHive.exe&quot;" Return="asyncNoWait" Impersonate="yes" />
+
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApp" Condition="NOT Installed" />
+    </UI>
+
+  </Package>
+</Wix>

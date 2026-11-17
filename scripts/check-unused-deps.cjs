@@ -1,6 +1,4 @@
 const { spawnSync } = require("node:child_process");
-const fs = require("node:fs");
-const path = require("node:path");
 
 function parseDepcheckJson(raw) {
   const text = String(raw || "");
@@ -42,9 +40,6 @@ function printList(title, list) {
 
 function main() {
   const root = process.cwd();
-  const outputRoot = path.join(root, "Output");
-  fs.mkdirSync(outputRoot, { recursive: true });
-  const reportPath = path.join(outputRoot, "unused-deps-report.json");
 
   const run = spawnSync(
     "npx",
@@ -64,15 +59,6 @@ function main() {
 
   const unusedDeps = Array.isArray(parsed.dependencies) ? parsed.dependencies : [];
   const unusedDevDeps = Array.isArray(parsed.devDependencies) ? parsed.devDependencies : [];
-  const report = {
-    generatedAt: new Date().toISOString(),
-    unusedDependencies: unusedDeps,
-    unusedDevDependencies: unusedDevDeps,
-    using: "depcheck"
-  };
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf-8");
-
-  process.stdout.write(`unused-deps report: ${reportPath}\n`);
   printList("Unused dependencies (affect package size):", unusedDeps);
   printList("Unused devDependencies:", unusedDevDeps);
 

@@ -1,0 +1,27 @@
+{
+  "monster": {
+    "root": "Monster",
+    "categories": ["0_Common", "1_Boss", "2_MiniBoss", "3_Elite", "4_NormalMonster", "5_Minion", "6_Temp"],
+    "importCategories": ["1_Boss", "2_MiniBoss", "3_Elite", "4_NormalMonster", "5_Minion"],
+    "categoryMode": "fixed",
+    "assetNameSubject": "name",
+    "folders": ["Animation", "Material", "Texture", "Mesh/SkeletalMesh", "Mesh/StaticMesh", "ABP", "BP", "ActionFiles", "OtherFiles"],
+    "fileRoles": ["animation", "material", "texture", "skeletalMesh", "physicsAsset", "skeleton", "staticMesh", "animationBlueprint", "blueprint", "actionFile", "other"]
+  },
+  "npc": {
+    "root": "NPC",
+    "categories": [],
+    "categoryMode": "fromAssetPrefix",
+    "assetNameSubject": "name",
+    "folders": ["Animation", "Material", "Texture", "Mesh/SkeletalMesh", "Mesh/StaticMesh", "ABP", "BP", "OtherFiles"],
+    "fileRoles": ["animation", "material", "texture", "skeletalMesh", "physicsAsset", "skeleton", "staticMesh", "animationBlueprint", "blueprint", "other"]
+  },
+  "weapon": {
+    "root": "Weapon",
+    "categories": ["Bow", "GreatAxe", "Jade", "LongSword", "PairedSwords", "ShieldAxe", "Spear", "Sword"],
+    "categoryMode": "fromAssetPrefix",
+    "assetNameSubject": "package",
+    "folders": ["Material", "Texture", "Mesh/SkeletalMesh", "Mesh/StaticMesh", "OtherFiles"],
+    "fileRoles": ["material", "texture", "skeletalMesh", "physicsAsset", "skeleton", "staticMesh", "other"]
+  }
+}

@@ -1,11 +1,39 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AssetRecord } from "../../types";
 import { defaultSearchState, type SearchState } from "./types";
+
+const RECENT_ASSETS_STORAGE_KEY = "assethive.recentAssetIds";
+const MAX_RECENT_ASSETS = 24;
+
+function loadRecentAssetIds(): string[] {
+  if (typeof window === "undefined" || typeof window.localStorage === "undefined") {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(RECENT_ASSETS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === "string").slice(0, MAX_RECENT_ASSETS);
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentAssetIds(ids: string[]) {
+  if (typeof window === "undefined" || typeof window.localStorage === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(RECENT_ASSETS_STORAGE_KEY, JSON.stringify(ids));
+  } catch {
+    // ignore quota / serialization errors
+  }
+}
 
 export function useAssetState() {
   const [allAssets, setAllAssets] = useState<AssetRecord[]>([]);
   const [assets, setAssets] = useState<AssetRecord[]>([]);
-  const [previewThumbByPath, setPreviewThumbByPath] = useState<Record<string, string>>({});
   const [search, setSearch] = useState<SearchState>(defaultSearchState);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -13,12 +41,24 @@ export function useAssetState() {
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [missingFilePathSet, setMissingFilePathSet] = useState<Set<string>>(new Set());
   const [deleteConfirmAsset, setDeleteConfirmAsset] = useState<AssetRecord | null>(null);
-  const [expandedCategories, setExpandedCategories] = useState<string[]>(["3d-assets"]);
+  const [expandedCategories, setExpandedCategories] = useState<string[]>(["environment"]);
+  const [recentAssetIds, setRecentAssetIds] = useState<string[]>(() => loadRecentAssetIds());
+
+  useEffect(() => {
+    saveRecentAssetIds(recentAssetIds);
+  }, [recentAssetIds]);
+
+  const recordAssetUsage = useCallback((assetId: string) => {
+    setRecentAssetIds((prev) => {
+      const filtered = prev.filter((id) => id !== assetId);
+      const next = [assetId, ...filtered];
+      return next.slice(0, MAX_RECENT_ASSETS);
+    });
+  }, []);
 
   return {
     allAssets, setAllAssets,
     assets, setAssets,
-    previewThumbByPath, setPreviewThumbByPath,
     search, setSearch,
     selectedAssetId, setSelectedAssetId,
     selectedIds, setSelectedIds,
@@ -26,6 +66,8 @@ export function useAssetState() {
     favoriteIds, setFavoriteIds,
     missingFilePathSet, setMissingFilePathSet,
     deleteConfirmAsset, setDeleteConfirmAsset,
-    expandedCategories, setExpandedCategories
+    expandedCategories, setExpandedCategories,
+    recentAssetIds, setRecentAssetIds,
+    recordAssetUsage
   };
 }

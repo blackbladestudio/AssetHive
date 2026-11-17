@@ -2,9 +2,11 @@ import { useRef, useState } from "react";
 
 interface SizeComparisonProps {
   dimensions?: { x: number; y: number; z: number } | null;
+  t?: (zh: string, en: string) => string;
 }
 
-export function SizeComparison({ dimensions }: SizeComparisonProps) {
+export function SizeComparison({ dimensions, t }: SizeComparisonProps) {
+  const sizeLabel = t ? t("尺寸", "Size") : "Size";
   const [hover, setHover] = useState(false);
   const [tooltipPosition, setTooltipPosition] = useState<{ top: number; left: number } | null>(null);
   const triggerRef = useRef<HTMLDivElement | null>(null);
@@ -34,7 +36,7 @@ export function SizeComparison({ dimensions }: SizeComparisonProps) {
                     <line x1="8" y1="12" x2="16" y2="12"></line>
                 </svg>
             </div>
-            <span className="icon-label" style={{ textTransform: "none" }}>Size</span>
+            <span className="icon-label" style={{ textTransform: "none" }}>{sizeLabel}</span>
         </div>
       );
   }
@@ -43,35 +45,35 @@ export function SizeComparison({ dimensions }: SizeComparisonProps) {
   const lengthM = dimensions.x || 0; // x -> Length
   const heightM = dimensions.y || 0; // y -> Height
   const widthM = dimensions.z || 0;  // z -> Width (or depth)
-  
+
   // Format: "长: 2.18m  宽: 1.02m  高: 0.81m"
   const label = `${lengthM.toFixed(2)}m x ${widthM.toFixed(2)}m x ${heightM.toFixed(2)}m`;
-  
+
   // Calculate scaling for visualization
   // We want to fit the object (length x height) into a box of max 40x40px
   // But we also want to show the human (1.8m) at a reasonable scale if possible.
-  
+
   // Base scale: 1 meter = 10 pixels (previous logic)
   const MAX_VIEW_SIZE = 40;
   const HUMAN_HEIGHT_M = 1.8;
   const maxAssetDim = Math.max(lengthM, widthM, heightM);
-  
+
   // Determine the bounding box of the scene (Object + Human side-by-side)
   // Human is roughly 0.5m wide?
   // We visualize Length (x) as width in 2D icon, and Height (y) as height.
   const sceneWidthM = lengthM + 1.0; // object + gap + human width
   const sceneHeightM = Math.max(heightM, HUMAN_HEIGHT_M);
-  
+
   // Calculate scale to fit MAX_VIEW_SIZE
   let pixelsPerMeter = 10; // Default zoom
-  
+
   // If object is too big, zoom out
   if (sceneWidthM * pixelsPerMeter > MAX_VIEW_SIZE || sceneHeightM * pixelsPerMeter > MAX_VIEW_SIZE) {
       const scaleX = MAX_VIEW_SIZE / sceneWidthM;
       const scaleY = MAX_VIEW_SIZE / sceneHeightM;
       pixelsPerMeter = Math.min(scaleX, scaleY);
   }
-  
+
   // If object is tiny, maybe zoom in? (Optional, but let's stick to max 10px/m to keep human recognizable)
   pixelsPerMeter = Math.min(pixelsPerMeter, 14);
 
@@ -85,7 +87,7 @@ export function SizeComparison({ dimensions }: SizeComparisonProps) {
   }
 
   return (
-    <div 
+    <div
       className="icon-action-col"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
@@ -100,8 +102,8 @@ export function SizeComparison({ dimensions }: SizeComparisonProps) {
               <AssetBoxIcon width={lengthM} height={heightM} scale={pixelsPerMeter} />
           </div>
       </div>
-      <span className="icon-label" style={{ textTransform: "none" }}>Size</span>
-      
+      <span className="icon-label" style={{ textTransform: "none" }}>{sizeLabel}</span>
+
       {hover && tooltipPosition && (
           <div className="size-tooltip" style={{ position: "fixed", top: tooltipPosition.top, left: tooltipPosition.left, transform: "none", zIndex: 5000, whiteSpace: 'nowrap' }}>
               {label}
@@ -116,7 +118,7 @@ function HumanIcon({ scale }: { scale: number }) {
     // Width ~0.5m
     const h = 1.8 * scale;
     const w = 0.5 * scale;
-    
+
     // Minimum visibility size (dot)
     if (h < 2) {
         return <div style={{ width: 2, height: 2, borderRadius: '50%', background: '#888', marginBottom: 0 }} />;
@@ -135,11 +137,11 @@ function HumanIcon({ scale }: { scale: number }) {
 function AssetBoxIcon({ width, height, scale }: { width: number, height: number, scale: number }) {
     let pxWidth = width * scale;
     let pxHeight = height * scale;
-    
+
     // Minimum visibility
     if (pxWidth < 1) pxWidth = 1;
     if (pxHeight < 1) pxHeight = 1;
-    
+
     return (
         <div style={{
             width: pxWidth,

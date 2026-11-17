@@ -1,0 +1,10 @@
+export type WeaponIdentity = { type: string; category: string; serial: string; name: string; assetName: string };
+export const WEAPON_CATEGORIES: string[];
+export const WEAPON_TYPES: string[];
+export const WEAPON_UE_ROOT: string;
+export function weaponCategory(type: string): string;
+export function parseWeaponIdentity(value: string): WeaponIdentity | null;
+export function weaponFileIdentity(file: string): WeaponIdentity | null;
+export function weaponTargetRoot(identity: string): string;
+export function splitWeaponPackage(files: string[]): { groups: (WeaponIdentity & { files: string[] })[]; unassigned: string[] };
+export function weaponFileSuffix(sourceStem: string, role: string, sourceIdentity?: string): string;

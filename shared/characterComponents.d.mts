@@ -1,0 +1,28 @@
+import type { AssetRecord } from "../src/types";
+export type ComponentFile = { originalName?: string; normalizedName: string; storedPath: string; role: string; size?: number; sha256?: string; rigNeedsUpdate?: boolean; rigReviewPending?: boolean };
+export function applyCharacterRigUpdateState(files: ComponentFile[], changes: Array<{ name: string; status: string }>): ComponentFile[];
+export function characterRigReviewSignature(asset: AssetRecord): string;
+export function characterRigProgress(asset: AssetRecord): { total: number; uploaded: number; stale: number; pendingReview: number; reviewedUnchanged: number; staticReady: boolean; complete: boolean; needsAttention: boolean };
+export function characterModelGroups(asset: AssetRecord): Array<Pick<CharacterComponent, 'slot' | 'name' | 'role' | 'files' | 'meshKinds'> & { label?: string; sharedAcrossForms?: boolean }>;
+export const characterModelUpdateGroups: typeof characterModelGroups;
+export type ComponentRevision = { id: string; name: string; files: ComponentFile[]; createdAt: string; previewUri?: string; previewRevision?: string };
+export type CharacterComponent = { id: string; parentId: string; slot: string; name: string; label: string; role: string; sharedAcrossForms: boolean; currentRevision: string; updatedAt: string; files: ComponentFile[]; revisions: ComponentRevision[]; previewUri: string; previewRevision: string; previewState: string; previewOrigin: string; meshPreviews: Record<string, CharacterMeshPreview>; meshKinds: { staticMesh: boolean; skeletalMesh: boolean } };
+export function needsCharacterComponentPreview(part: CharacterComponent): boolean;
+export function characterSuitPendingPreviewViews(asset: AssetRecord): string[];
+export function characterMeshPreviewRevision(files: ComponentFile[], kind: string): string;
+export function needsCharacterMeshPreview(part: CharacterComponent, kind: string): boolean;
+export type CharacterMeshPreview = { previewUri: string; previewRevision: string; previewOrigin: string; previewImages: Array<{ uri: string; tags: string[] }> };
+
+export const COMPONENT_SEPARATOR: string;
+export function monsterBodyMetrics(files: Array<{ normalizedName: string; storedPath: string; role: string; componentRole?: string; triangleCount?: number | null }>): { modelCount: number; knownTriangleCount: number; unknownModelCount: number; totalTriangleCount: number | null; overBudget: boolean };
+export function characterDisplayName(asset: AssetRecord): string;
+export function componentParentId(id: string): string;
+export function characterComponentLabel(part: CharacterComponent, language?: string): string;
+export function listCharacterComponents(asset: AssetRecord | null): CharacterComponent[];
+export function characterModelPreviewComponents(asset: AssetRecord | null): CharacterComponent[];
+export function componentAssetRecord(parent: AssetRecord, part: CharacterComponent): AssetRecord;
+export function characterMeshAssetRecord(parent: AssetRecord, part: CharacterComponent, kind: 'staticMesh' | 'skeletalMesh'): AssetRecord;
+export function characterPreviewState(asset: AssetRecord): string;
+export function activeCharacterFiles(asset: AssetRecord): ComponentFile[];
+export function expandCharacterCards(assets: AssetRecord[]): AssetRecord[];
+export function characterGroomPendingPreviewViews(asset: import('../src/types').AssetRecord): string[];
