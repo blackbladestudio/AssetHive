@@ -29,7 +29,12 @@ Copy-Item -LiteralPath "Output/AssetHive-$version-win64.msi" -Destination $publi
 $artifacts = @($publicMsi, "Output/AssetHive-$version-Windows-setup.exe", "Output/AssetHive-$version-setup-win64.exe")
 foreach ($artifact in $artifacts) {
     if ((Get-Item -LiteralPath $artifact).Length -lt 1MB) { throw "Invalid installer: $artifact" }
-    $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+    # Windows PowerShell launched from pwsh can inherit a module path without
+    # Microsoft.PowerShell.Utility. Use the runtime directly for this checksum.
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead((Resolve-Path -LiteralPath $artifact).Path)
+    try { $hash = [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $stream.Dispose(); $algorithm.Dispose() }
     "$hash  $(Split-Path $artifact -Leaf)" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
 }
 Write-Host "Release $version built and checksummed."

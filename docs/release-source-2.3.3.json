@@ -2,7 +2,7 @@
   "version": "2.3.3",
   "desktop": {
     "repository": "Biscuits-Lab/Assethive_Sourcecode",
-    "commit": "2387cde038e2fd923684fb4208a4074d9d5e06ef"
+    "commit": "89f412207d4fe92af9568cf96cf7305ac33d6219"
   },
   "plugin": {
     "repository": "Biscuits-Lab/AssetHivePlugin",
