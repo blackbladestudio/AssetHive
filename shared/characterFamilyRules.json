@@ -16,9 +16,17 @@
     "folders": ["Animation", "Material", "Texture", "Mesh/SkeletalMesh", "Mesh/StaticMesh", "ABP", "BP", "OtherFiles"],
     "fileRoles": ["animation", "material", "texture", "skeletalMesh", "physicsAsset", "skeleton", "staticMesh", "animationBlueprint", "blueprint", "other"]
   },
+  "item": {
+    "root": "GameplayItem",
+    "categories": ["Chest", "FormationFlag", "Interactable", "ThrowingKnife", "Consumable", "DroppedGear"],
+    "categoryMode": "fixed",
+    "assetNameSubject": "name",
+    "folders": ["Material", "Texture", "Mesh/SkeletalMesh", "Mesh/StaticMesh", "OtherFiles"],
+    "fileRoles": ["material", "texture", "skeletalMesh", "physicsAsset", "skeleton", "staticMesh", "other"]
+  },
   "weapon": {
     "root": "Weapon",
-    "categories": ["Bow", "GreatAxe", "Jade", "LongSword", "PairedSwords", "ShieldAxe", "Spear", "Sword"],
+    "categories": ["Bow", "Dagger", "DualHands", "GreatAxe", "GreatSword", "Jade", "LongSword", "PairedSwords", "ShieldAxe", "Spear", "Sword"],
     "categoryMode": "fromAssetPrefix",
     "assetNameSubject": "package",
     "folders": ["Material", "Texture", "Mesh/SkeletalMesh", "Mesh/StaticMesh", "OtherFiles"],

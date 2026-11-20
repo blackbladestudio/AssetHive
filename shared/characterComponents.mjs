@@ -9,6 +9,7 @@ const modelKey = value => stem(value).replace(/_LOD\d+$/i, "").replace(/^(?:SK|S
 const modelRoles = new Set(["model", "skeletalMesh", "staticMesh"]);
 const isModelFile = item => modelRoles.has(item?.role)
   && CHARACTER_MODEL_EXTENSIONS.has(`.${base(item?.normalizedName || item?.storedPath).split(".").pop()?.toLowerCase() || ""}`);
+const isPrimaryModel = file => isModelFile(file) && !/_LOD[1-9]\d*(?=\.[^.]+$)/i.test(file.normalizedName || file.storedPath);
 const suitPartOrder = new Map(["head", "upbody", "downbody", "arm"].map((part, index) => [part, index]));
 const join = (root, file) => /^(?:[A-Za-z]:|[\\/]{1,2})/.test(file) ? file : `${root.replace(/[\\/]+$/, "")}/${file}`;
 
@@ -19,7 +20,7 @@ export function monsterBodyMetrics(files) {
     const name = file.normalizedName || file.storedPath || '';
     if (!isModelFile(file) || file.componentRole === 'weapon'
       || /(?:^|[_/\\])(?:WP|Weapon)(?:[_/\\]|\.)/i.test(name)
-      || /_LOD\d+(?=\.[^.]+$)/i.test(name)) continue;
+      || /_LOD[1-9]\d*(?=\.[^.]+$)/i.test(name)) continue;
     const key = modelKey(name);
     const previous = bodies.get(key);
     if (!previous || characterMeshKind(file) === 'skeletalMesh') bodies.set(key, file);
@@ -42,8 +43,8 @@ export function characterMeshKind(file) {
 
 // Each model kind owns its preview revision. Uploading SK must not invalidate SM.
 export function characterMeshPreviewRevision(files, kind) {
-  const weapon = files.some(file => /^(?:SM|SK)_(?:Bow|Arrow|GreatAxe|Jade|LongSword|PairedSwords|ShieldAxe|Spear|Sword)\d+_/i.test(file.normalizedName || ''));
-  return (weapon ? 'weapon-material-joints-v2:' : '') + JSON.stringify(files.filter(file => isModelFile(file) && characterMeshKind(file) === kind
+  const weapon = files.some(file => /^(?:SM|SK)_(?:Bow|Arrow|Dagger|DualHands|DualAxe|GreatAxe|GreatSword|Jade|LongSword|PairedSwords|ShieldAxe|Spear|Sword)\d+_/i.test(file.normalizedName || ''));
+  return (weapon ? 'weapon-material-joints-v2:' : '') + JSON.stringify(files.filter(file => isPrimaryModel(file) && characterMeshKind(file) === kind
     || kind === 'staticMesh' && file.role === 'texture').map(file => [file.role, file.sha256 || file.storedPath]).sort());
 }
 
@@ -54,7 +55,15 @@ export function needsCharacterMeshPreview(part, kind) {
     image.tags?.includes(`view:${view}`) && image.tags?.includes('origin:manual')))) return false;
   const complete = ['front', 'left', 'right', 'back'].every(view => preview?.previewImages?.some(image =>
     image.uri && image.tags?.includes(`view:${view}`)));
-  return !complete || !preview?.previewUri || preview.previewRevision !== characterMeshPreviewRevision(part.files, kind);
+  if (!complete || !preview?.previewUri) return true;
+  if (preview.previewRevision === characterMeshPreviewRevision(part.files, kind)) return false;
+  // Older desktop processes included artist LODs in this signature, although
+  // the rendered view uses only LOD0. Accept the exact legacy signature only
+  // while every recorded model and texture is still unchanged.
+  const weapon = part.files.some(file => /^(?:SM|SK)_(?:Bow|Arrow|Dagger|DualHands|DualAxe|GreatAxe|GreatSword|Jade|LongSword|PairedSwords|ShieldAxe|Spear|Sword)\d+_/i.test(file.normalizedName || ''));
+  const legacy = (weapon ? 'weapon-material-joints-v2:' : '') + JSON.stringify(part.files.filter(file => isModelFile(file) && characterMeshKind(file) === kind
+    || kind === 'staticMesh' && file.role === 'texture').map(file => [file.role, file.sha256 || file.storedPath]).sort());
+  return preview.previewRevision !== legacy;
 }
 
 export function characterSuitPendingPreviewViews(asset) {
@@ -97,7 +106,7 @@ export function characterRigProgress(asset) {
   const reviewedUnchanged = groups.filter(files => files.some(file => isModelFile(file) && characterMeshKind(file) === 'skeletalMesh' && !file.rigNeedsUpdate && file.rigReviewDecision === 'not-required')).length;
   const staticReady = Boolean(groups.length > 0
     && groups.every(files => files.some(file => isModelFile(file) && characterMeshKind(file) === 'staticMesh')));
-  const complete = groups.length > 0 && uploaded === groups.length && stale === 0;
+  const complete = groups.length > 0 && uploaded === groups.length && stale === 0 && pendingReview === 0;
   return { total: groups.length, uploaded, stale, pendingReview, reviewedUnchanged,
     staticReady, complete, needsAttention: staticReady && !complete };
 }
@@ -111,14 +120,14 @@ export function characterRigReviewSignature(asset) {
 // Update/rigging identities include the root model of a face, NPC, weapon or
 // monster. They do not create extra cards or apply outfit slot rules.
 export function characterModelGroups(asset) {
-  if (!asset || !['suit', 'monster', 'npc', 'weapon'].includes(asset.assetType)) return [];
-  if (['weapon', 'monster', 'npc'].includes(asset.assetType) && !asset.meta?.componentView) return characterModelPreviewComponents(asset);
+  if (!asset || !['suit', 'monster', 'npc', 'weapon', 'item'].includes(asset.assetType)) return [];
+  if (['weapon', 'monster', 'npc', 'item'].includes(asset.assetType) && !asset.meta?.componentView) return characterModelPreviewComponents(asset);
   const parts = listCharacterComponents(asset);
   const files = activeCharacterFiles(asset);
   const groups = new Map(parts.map(part => [part.slot, part]));
   for (const file of files.filter(isModelFile)) {
     if (asset.assetType === 'suit' && !heroPartKind(asset.meta?.character) && !heroSuitPart(file.normalizedName || file.storedPath)) continue;
-    if (!/\.fbx$/i.test(file.normalizedName || file.storedPath) || /_LOD\d+\./i.test(file.normalizedName)) continue;
+    if (!/\.fbx$/i.test(file.normalizedName || file.storedPath) || /_LOD[1-9]\d*\./i.test(file.normalizedName)) continue;
     const slot = modelKey(file.normalizedName);
     if (groups.has(slot)) continue;
     const models = files.filter(item => isModelFile(item) && modelKey(item.normalizedName) === slot);
@@ -169,7 +178,7 @@ export function listCharacterComponents(asset) {
 
 // Monster, NPC and weapon model records live inside the owner detail panel.
 export function characterModelPreviewComponents(asset) {
-  if (!asset || asset.meta?.componentView || !["monster", "suit", "npc", "weapon"].includes(asset.assetType)) return [];
+  if (!asset || asset.meta?.componentView || !["monster", "suit", "npc", "weapon", "item"].includes(asset.assetType)) return [];
   const manifest = asset.meta?.characterManifest?.files || [];
   const candidates = manifest.filter(file => isModelFile(file) && !/\.abc$/i.test(file.storedPath || file.normalizedName));
   const groups = new Map();
@@ -272,14 +281,14 @@ export function componentAssetRecord(parent, part) {
   const meshSlots = Object.fromEntries(["staticMesh", "skeletalMesh"].map(kind => [kind, {
     hasModel: Boolean(part.meshKinds?.[kind]),
     previewState: !part.meshPreviews?.[kind]?.previewUri ? 'missing' : needsCharacterMeshPreview(part, kind) ? 'stale' : 'current',
-    modelFiles: part.files.filter(file => isModelFile(file) && characterMeshKind(file) === kind).map(file => join(parent.path, file.storedPath)),
+    modelFiles: part.files.filter(file => isPrimaryModel(file) && characterMeshKind(file) === kind).map(file => join(parent.path, file.storedPath)),
     previewPath: part.meshPreviews?.[kind]?.previewUri ? join(parent.path, part.meshPreviews[kind].previewUri) : "",
     previewGalleryRevision: part.meshPreviews?.[kind]?.previewGalleryRevision || part.meshPreviews?.[kind]?.previewRevision || part.currentRevision,
     images: part.meshPreviews?.[kind]?.previewImages || [],
     previewImages: (part.meshPreviews?.[kind]?.previewImages || []).map(item => ({ path: join(parent.path, item.uri), tags: item.tags || [] }))
   }]));
   return { ...parent, id: part.id, assetID: part.id, name: part.name,
-    modelFiles: part.files.filter(isModelFile).map(file => join(parent.path, file.storedPath)),
+    modelFiles: part.files.filter(isPrimaryModel).map(file => join(parent.path, file.storedPath)),
     textureFiles: part.files.filter(file => file.role === "texture").map(file => join(parent.path, file.storedPath)),
     preview, previewImage: preview, detailImage: preview, previewImages,
     meta: { ...parent.meta, componentView: { parentId: parent.id, slot: part.slot, role: part.role, sharedAcrossForms: part.sharedAcrossForms, currentRevision: part.currentRevision, previewGalleryRevision: part.previewGalleryRevision, previewState: part.previewState, meshKinds: part.meshKinds, meshSlots },

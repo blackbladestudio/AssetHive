@@ -1,4 +1,8 @@
+export type SkeletonSelection = { mode: 'auto' | 'existing' | 'create'; path?: string };
 export type SuitExportOptions = {
+  skeletonSelection?: SkeletonSelection;
+  skeletonOverrides?: Record<string, SkeletonSelection>;
+  inspectAllMeshes?: boolean;
   includeStaticMeshes?: boolean;
   normalFormat?: string;
   skeletonPath?: string;
@@ -9,6 +13,9 @@ export type SuitExportRow = {
   assetId: string; key: string; name: string; kind?: string; targetPath?: string; path?: string;
   status: string; action: string; message?: string;
   partSlot?: string; groupName?: string; oldKey?: string;
+  dependencies?: string[];
+  skeletonSelection?: SkeletonSelection;
+  skeletonPath?: string;
 };
 export type SuitExportResult = {
   entries: SuitExportRow[]; inspectToken: string; manifestHash: string; projectPath: string;

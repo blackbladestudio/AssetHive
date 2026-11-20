@@ -7,6 +7,15 @@ const { test } = require("node:test");
 const { UnrealDiscovery } = require("../electron/services/unrealDiscovery");
 const { AssetHiveTCPClient } = require("../electron/services/tcpClient");
 
+test('an occupied editor reports another client instead of waiting for handshake timeout', () => {
+  const client = new AssetHiveTCPClient();
+  let closed = false;
+  client.client = { destroy() { closed = true; } };
+  client.handleMessage({ type: 'busy', protocolVersion: 2 });
+  assert.equal(client.diagnostic.state, 'editor-busy');
+  assert.equal(closed, true);
+});
+
 async function editor(t, { project = "A", helloDelay = 0, protocolVersion = 2, onMessage, autoHello = true, pongBeforeHello = true, capabilities = [] } = {}) {
   const sockets = new Set();
   const messages = [];

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AssetRecord } from "../types";
 import { activeCharacterFiles, componentAssetRecord, characterModelPreviewComponents as listCharacterComponents, needsCharacterComponentPreview, needsCharacterMeshPreview, characterMeshPreviewRevision, characterSuitPendingPreviewViews, characterGroomPendingPreviewViews } from "../../shared/characterComponents.mjs";
+import { heroPartKind } from "../../shared/heroPackageRules.mjs";
 import { generateCharacterFourViewBlobs, generateCharacterPartFrontBlob, generateCharacterUpdatePreviews } from "./characterPreview";
 
 // One GPU job at a time. Never substitute the parent cover, never render LODs
@@ -22,7 +23,7 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
   // must not remain hidden behind the startup SQLite list snapshot.
   useEffect(() => {
     if (paused || !bridge?.getAssetById) return;
-    const owners = assets.filter(asset => asset.source === "custom" && ["monster", "suit", "npc", "weapon"].includes(asset.assetType));
+    const owners = assets.filter(asset => asset.source === "custom" && ["monster", "suit", "npc", "weapon", "item"].includes(asset.assetType));
     for (const owner of owners.filter(item => !hydrated.current.has(`${item.path}|${item.id}`)).slice(0, 2)) {
       const key = `${owner.path}|${owner.id}`;
       hydrated.current.add(key);
@@ -31,20 +32,20 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
       }).catch(() => {}).finally(() => setIteration(value => value + 1));
     }
   }, [assets, bridge, paused, iteration]);
-  const partJobs = useMemo(() => assets.filter(asset => asset.source === "custom" && ["monster", "suit", "npc", "weapon"].includes(asset.assetType))
-    .filter(owner => !['suit', 'monster', 'npc', 'weapon'].includes(owner.assetType)).flatMap(owner => listCharacterComponents(owner).filter(needsCharacterComponentPreview).map(part => ({
+  const partJobs = useMemo(() => assets.filter(asset => asset.source === "custom" && ["monster", "suit", "npc", "weapon", "item"].includes(asset.assetType))
+    .filter(owner => !['suit', 'monster', 'npc', 'weapon', 'item'].includes(owner.assetType)).flatMap(owner => listCharacterComponents(owner).filter(needsCharacterComponentPreview).map(part => ({
       kind: "part" as const, owner, part, key: `${owner.path}|${part.id}|${part.currentRevision}|${part.previewUri}`
     }))), [assets]);
-  const suitJobs = useMemo(() => assets.filter(owner => owner.source === 'custom' && ['suit', 'monster', 'npc', 'weapon'].includes(owner.assetType) && !owner.meta?.componentView)
+  const suitJobs = useMemo(() => assets.filter(owner => owner.source === 'custom' && ['suit', 'monster', 'npc', 'weapon', 'item'].includes(owner.assetType) && !owner.meta?.componentView)
     .map(owner => {
       const parts = listCharacterComponents(owner);
       const pending = characterSuitPendingPreviewViews(owner);
       const changes = parts.flatMap(part => (['staticMesh', 'skeletalMesh'] as const).filter(kind => needsCharacterMeshPreview(part, kind))
-        .map(kind => [part.slot, kind, characterMeshPreviewRevision(part.files, kind), part.meshPreviews[kind].previewUri]));
+        .map(kind => [part.slot, kind, characterMeshPreviewRevision(part.files, kind)]));
       return { kind: 'suit' as const, owner, pending, changes,
-        key: JSON.stringify([owner.path, owner.id, changes, pending, pending.length ? owner.meta.characterComponents : null]) };
+        key: JSON.stringify([owner.path, owner.id, changes, pending, pending.length ? (owner.meta.characterComponents as { contentRevision?: string })?.contentRevision : null]) };
     }).filter(job => job.pending.length || job.changes.length), [assets]);
-  const ownerJobs = useMemo(() => assets.filter(asset => asset.source === "custom" && (asset.assetType !== "suit" || Boolean((asset.meta.character as { variant?: string })?.variant)) && ["suit", "monster", "npc", "weapon"].includes(asset.assetType) && !asset.meta?.componentView)
+  const ownerJobs = useMemo(() => assets.filter(asset => asset.source === "custom" && (asset.assetType !== "suit" || Boolean((asset.meta.character as { variant?: string })?.variant)) && ["suit", "monster", "npc", "weapon", "item"].includes(asset.assetType) && !asset.meta?.componentView)
     .filter(owner => characterGroomPendingPreviewViews(owner).length > 0 || Array.isArray((owner.meta?.characterComponents as { autoPreviewPendingViews?: string[] } | undefined)?.autoPreviewPendingViews)
       && ((owner.meta.characterComponents as { autoPreviewPendingViews?: string[] }).autoPreviewPendingViews?.length || 0) > 0)
     .map(owner => {
@@ -83,11 +84,12 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
             const tasks = parts.flatMap(part => (['staticMesh', 'skeletalMesh'] as const).filter(kind => needsCharacterMeshPreview(part, kind)).map(kind => {
               const card = componentAssetRecord(owner, part);
               const slot = (card.meta.componentView as { meshSlots: Record<string, { modelFiles: string[] }> }).meshSlots[kind];
-              const models = slot.modelFiles.filter(file => /\.fbx$/i.test(file) && !/_LOD\d+(?=\.[^.]+$)/i.test(file));
+              const models = slot.modelFiles.filter(file => /\.fbx$/i.test(file) && !/_LOD[1-9]\d*(?=\.[^.]+$)/i.test(file));
               if (models.length !== 1) throw new Error('自动四视图需要一个独立 FBX 主模型');
               return { part, kind, path: models[0] };
             }));
             const total = (tasks.length + (pendingViews.length ? 1 : 0)) * 4;
+            if (!total || cancelled) return;
             let done = 0;
             setProgress({ done, total, message: '正在准备模型和贴图…' });
             const saves: Array<{ action: 'updateCharacterPreview' | 'updateCharacterAutoPreviews'; payload: Parameters<NonNullable<typeof bridge.updateCharacter>>[1] }> = [];
@@ -106,7 +108,7 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
               const renderOwner = kind === 'staticMesh' && pendingViews.length > 0;
               if (!changed.length && !renderOwner) continue;
               const models = renderOwner ? parts.flatMap(part => part.files.filter(file => ['model', 'staticMesh'].includes(file.role)
-                && /\.fbx$/i.test(file.normalizedName) && !/_LOD\d+(?=\.[^.]+$)/i.test(file.normalizedName)).map(file => owner.path + '/' + file.storedPath)) : changed.map(task => task.path);
+                && /\.fbx$/i.test(file.normalizedName) && !/_LOD[1-9]\d*(?=\.[^.]+$)/i.test(file.normalizedName)).map(file => owner.path + '/' + file.storedPath)) : changed.map(task => task.path);
               // Normalize separators so paths from model slots and manifest share one scene.
               const normalize = (path: string) => path.replace(/\\/g, '/');
               const texturePaths = kind === 'skeletalMesh' ? [] : renderOwner ? owner.textureFiles
@@ -120,7 +122,7 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
                   saves.push({ action: 'updateCharacterPreview', payload: { assetId: owner.id, slot: task.part.slot,
                     automatic: true, meshKind: kind, expectedRevision: characterMeshPreviewRevision(task.part.files, kind),
                     expectedPreviewUri: task.part.meshPreviews[kind].previewUri, images: await materialize(blobs) } });
-                }, () => setProgress({ done: ++done, total, message: '正在生成预览…' }));
+                }, () => setProgress({ done: ++done, total, message: '正在生成预览…' }), heroPartKind(owner.meta?.character as { variant?: string } | undefined), owner.assetType === 'weapon');
               if (renderOwner) saves.push({ action: 'updateCharacterAutoPreviews', payload: { assetId: owner.id,
                 expectedRevision: state.contentRevision || 'initial', images: await materialize(ownerBlobs) } });
             }
@@ -144,7 +146,7 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
               previewPath: bridge.getPreviewThumbnail ? await bridge.getPreviewThumbnail(sourcePath).catch(() => sourcePath) || sourcePath : sourcePath
             })));
             if (cancelled) return;
-            const blob = await generateCharacterPartFrontBlob(models[0], textures);
+            const blob = await generateCharacterPartFrontBlob(models[0], textures, 768, heroPartKind(owner.meta?.character as { variant?: string } | undefined));
             if (cancelled) return;
             const previewPath = await bridge.materializeDroppedFile!({ name: "character_part_front.png", bytes: await blob.arrayBuffer() });
             if (!previewPath) throw new Error("无法保存部件正面照");
@@ -171,7 +173,7 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
             const textures = await Promise.all(owner.textureFiles.map(async sourcePath => ({ sourcePath,
               previewPath: bridge.getPreviewThumbnail ? await bridge.getPreviewThumbnail(sourcePath).catch(() => sourcePath) || sourcePath : sourcePath
             })));
-            const blobs = await generateCharacterFourViewBlobs(models, textures);
+            const blobs = await generateCharacterFourViewBlobs(models, textures, 1024, false, heroPartKind(owner.meta?.character as { variant?: string } | undefined), owner.assetType === 'weapon');
             const images = [];
             for (const view of job.pendingViews) {
               const blob = blobs[view as keyof typeof blobs];

@@ -102,6 +102,7 @@ test("production scan routing uses the persisted deadline and defers full work d
   let recoveries = 0;
   let expectedConcurrency = 4;
   const context = vm.createContext({ process,
+    recycleInProgress: false, activeExportCalls: 0,
     settings: { customLibraryPath: "library-a" },
     getLibraryRootPath: () => "library-a", waitForLibraryCacheRestore: async () => {},
     normalizeComparePath: (value) => value, getLibrarySqlCachePath: () => f.file.replace(/\.scan.json$/, ".sqlite"),
@@ -141,10 +142,12 @@ test("production scan routing uses the persisted deadline and defers full work d
   assert.ok(warmed.some(call => call.options?.replace && call.assets.length === 1));
   f.advance(RECONCILE_INTERVAL_MS);
   importing = true;
+  const scansBeforeImport = modes.length;
   await context.performScan(null, { reason: "periodic" });
+  assert.equal(modes.length, scansBeforeImport, 'foreground import pauses automatic discovery entirely');
   importing = false;
   await context.performScan(null, { reason: "periodic" });
-  assert.deepEqual(modes, [false, true, true, false]);
+  assert.deepEqual(modes, [false, true, false]);
   expectedConcurrency = 8;
   await context.performScan(null, { reason: "manual-rescan", force: true });
   assert.equal(modes.at(-1), false, "manual rescans still fully validate the library without granting write permission");
@@ -158,6 +161,7 @@ async function scanPublicationFixture(initial, worker, schedulePlan) {
   let clock = 10000;
   const context = vm.createContext({
     path, process, index: initial, settings: { customLibraryPath: "library-a" },
+    recycleInProgress: false, activeExportCalls: 0,
     Date: { now: () => clock },
     getLibraryRootPath: () => context.settings.customLibraryPath,
     waitForLibraryCacheRestore: async () => {}, ensureLibraryEditsRecovered: async () => {},
@@ -182,6 +186,17 @@ async function scanPublicationFixture(initial, worker, schedulePlan) {
   const window = { isDestroyed: () => false, webContents: { send: (channel, payload) => events.push({ channel, payload }) } };
   return { context, events, snapshots, publications, run: () => context.performScan(window, { reason: "periodic" }) };
 }
+
+test('automatic polling yields to deletion and UE export, then resumes on the next tick', async () => {
+  let scans = 0;
+  const f = await scanPublicationFixture([], () => { scans++; return []; });
+  f.context.recycleInProgress = true;
+  await f.run(); assert.equal(scans, 0); assert.equal(f.events.length, 0);
+  f.context.recycleInProgress = false; f.context.activeExportCalls = 1;
+  await f.run(); assert.equal(scans, 0);
+  f.context.activeExportCalls = 0;
+  await f.run(); assert.equal(scans, 1);
+});
 
 test("imports completed during scan survive every partial publication, final IDs and the persisted snapshot", async () => {
   const old = { id: "existing", name: "Existing" };

@@ -1,3 +1,4 @@
+const characterLod = require('../../shared/characterLods.cjs');
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -50,7 +51,18 @@ function characterMeshIdentity(name) {
   return String(name || "").replace(/\.[^.]+$/, "").replace(/^(?:SK|SM)_/i, "").toLowerCase();
 }
 
-function newMeshTarget(targetPath, parent, slot) {
+function newMeshTarget(targetPath, parent, slot, replacements = []) {
+  const lodMatch = /^__new_character_lod__:(staticMesh|skeletalMesh):(\d+):(.+)$/.exec(targetPath);
+  if (lodMatch) {
+    const targetSlot = decodeURIComponent(lodMatch[3]);
+    const part = characterModelUpdateGroups(parent).find(item => item.slot === targetSlot);
+    const index = Number(lodMatch[2]);
+    const addsBase = replacements.some(item => item.storedPath === `__new_character_mesh__:${lodMatch[1]}:${encodeURIComponent(targetSlot)}`
+      || (slot === targetSlot && item.storedPath === `__new_character_mesh__:${lodMatch[1]}`));
+    if (!part || (slot && slot !== targetSlot) || index < 1 || (!part.meshKinds?.[lodMatch[1]] && !addsBase)
+      || part.files.some(file => expectedCharacterMeshRole(file) === lodMatch[1] && characterLod.level(file.normalizedName) === index)) throw new Error('新增 LOD 目标无效或已存在');
+    return { role: lodMatch[1], part, lod: index };
+  }
   const match = /^__new_character_mesh__:(staticMesh|skeletalMesh)(?::(.+))?$/.exec(targetPath);
   if (!match) return null;
   const targetSlot = match[2] ? decodeURIComponent(match[2]) : slot;
@@ -130,7 +142,7 @@ function newTextureTarget(targetPath, parent, slot, sourcePath) {
 }
 
 async function matchCharacterTextureReplacements({ root, asset, slot, sourceFolder, sourcePaths }, scannedFiles) {
-  const { parent } = await loadParent(root, asset, ["suit", "monster", "npc", "weapon"]);
+  const { parent } = await loadParent(root, asset, ["suit", "monster", "npc", "weapon", "item"]);
   const scanned = scannedFiles || await readSourcePackage(sourcePaths || sourceFolder);
   const part = slot ? listCharacterComponents(parent).find(item => item.slot === slot) : null;
   if (slot && !part) throw new Error("目标部件不存在，请刷新后重试");
@@ -162,7 +174,7 @@ async function matchCharacterTextureReplacements({ root, asset, slot, sourceFold
 }
 
 async function inspectCharacterUpdateInput(options) {
-  const { parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon"]);
+  const { parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon", "item"]);
   const scanned = await readSourcePackage(options.sourcePaths || options.sourceFolder);
   const parts = characterModelUpdateGroups(parent).filter(part => !options.slot || part.slot === options.slot);
   if (options.slot && !parts.length) throw new Error("目标部件不存在，请刷新后重试");
@@ -177,14 +189,20 @@ async function inspectCharacterUpdateInput(options) {
     if (CHARACTER_MODEL_EXTENSIONS.has(ext)) {
       const analysis = await inspectCharacterMeshSource(source.sourcePath, options.analyzeModel || analyzeFbxInWorker);
       role = analysis.meshKind;
-      candidates = targets.filter(file => expectedCharacterMeshRole(file) === role && path.extname(file.normalizedName).toLowerCase() === ext)
+      candidates = targets.filter(file => expectedCharacterMeshRole(file) === role && characterLod.level(file.normalizedName) === characterLod.level(source.sourcePath) && path.extname(file.normalizedName).toLowerCase() === ext)
         .map(file => ({ storedPath: file.storedPath, name: normalizeCharacterMeshPrefix(file.normalizedName, role) }));
-      for (const part of parts) if (!part.meshKinds?.[role]) candidates.push({
+      for (const part of parts) if (!characterLod.level(source.sourcePath) && !part.meshKinds?.[role]) candidates.push({
         storedPath: `__new_character_mesh__:${role}:${encodeURIComponent(part.slot)}`,
         name: `${role === 'skeletalMesh' ? 'SK' : 'SM'}_${part.name.replace(/^(?:SK|SM)_/i, '')}${ext}`
       });
+      const sourceLevel = characterLod.level(source.sourcePath);
+      if (sourceLevel) for (const part of parts) {
+        if (part.files.some(file => expectedCharacterMeshRole(file) === role && characterLod.level(file.normalizedName) === sourceLevel)) continue;
+        candidates.push({ storedPath: `__new_character_lod__:${role}:${sourceLevel}:${encodeURIComponent(part.slot)}`,
+          name: `${role === 'skeletalMesh' ? 'SK' : 'SM'}_${characterLod.strip(part.name).replace(/^(?:SK|SM)_/i, '')}_LOD${sourceLevel}${ext}` });
+      }
       const normalized = parent.assetType === 'suit'
-        ? buildCharacterModelBaseName(parent.name, source.sourcePath, parent.meta.character, role)
+        ? buildCharacterModelBaseName(parent.name, source.sourcePath, parent.meta.character, role) + characterLod.suffix(source.sourcePath)
         : path.basename(source.sourcePath, ext);
       // Original filenames remain a reliable identity after library normalization
       // or a name change. Never require a user to rename their working files.
@@ -268,7 +286,7 @@ function newSourceTarget(targetPath, slot) {
 }
 
 async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, sourcePaths, replacements, analyzeModel }) {
-  const { parent } = await loadParent(root, asset, ["suit", "monster", "npc", "weapon"]);
+  const { parent } = await loadParent(root, asset, ["suit", "monster", "npc", "weapon", "item"]);
   const scannedSources = await readSourcePackage(sourcePaths || sourceFolder);
   const oldFiles = activeCharacterFiles(parent);
   const targeted = Array.isArray(replacements) && replacements.length > 0;
@@ -291,7 +309,7 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
     for (const source of sources) {
       const matches = replacements.filter(item => path.resolve(item.sourcePath) === path.resolve(source.sourcePath));
       const targetPath = matches.length === 1 ? matches[0].storedPath : "";
-      const virtualTarget = newMeshTarget(targetPath, parent, slot);
+      const virtualTarget = newMeshTarget(targetPath, parent, slot, replacements);
       const virtualRole = virtualTarget?.role || "";
       const newSourceName = newSourceTarget(targetPath, slot);
       const newTextureName = newTextureTarget(targetPath, parent, slot, source.sourcePath);
@@ -305,6 +323,8 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
       if (previous && !isAllowedCharacterPackageFile(previous.normalizedName)) throw new Error("目标文件格式不在白名单");
       if (virtualRole && !CHARACTER_MODEL_EXTENSIONS.has(path.extname(source.sourcePath).toLowerCase())) throw new Error("新增模型槽只接收模型文件");
       const expectedRole = virtualRole || expectedCharacterMeshRole(previous);
+      if (virtualTarget?.lod && characterLod.level(source.sourcePath) !== virtualTarget.lod) throw new Error('新增 LOD 文件等级与所选目标不一致');
+      if (expectedRole && previous && characterLod.level(previous.normalizedName) !== characterLod.level(source.sourcePath)) throw new Error('不能跨 LOD 等级替换模型');
       const analysis = modelAnalyses.get(path.resolve(source.sourcePath).toLowerCase());
       if (expectedRole && (!analysis || analysis.meshKind !== expectedRole)) {
         const actual = analysis?.meshKind === "skeletalMesh" ? "骨骼模型" : "静态模型";
@@ -328,7 +348,7 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
       const target = replacements.find(item => path.resolve(item.sourcePath) === path.resolve(source.sourcePath));
       const previous = oldFiles.find(file => file.storedPath === target.storedPath);
       const analysis = modelAnalyses.get(path.resolve(source.sourcePath).toLowerCase());
-      const virtualTarget = newMeshTarget(target.storedPath, parent, slot);
+      const virtualTarget = newMeshTarget(target.storedPath, parent, slot, replacements);
       const virtualRole = virtualTarget?.role || "";
       const newSourceName = newSourceTarget(target.storedPath, slot);
       if (newSourceName) return { ...source, normalizedName: newSourceName, role: 'other', relativePath: `SourceFiles/${newSourceName}` };
@@ -338,7 +358,7 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
         const part = virtualTarget.part;
         const ext = path.extname(source.sourcePath).toLowerCase();
         const subject = part.name.replace(/^(?:SK|SM)_/i, "");
-        const normalizedName = `${virtualRole === "skeletalMesh" ? "SK" : "SM"}_${subject}${ext}`;
+        const normalizedName = `${virtualRole === "skeletalMesh" ? "SK" : "SM"}_${characterLod.strip(subject)}${virtualTarget.lod ? '_LOD' + virtualTarget.lod : ''}${ext}`;
         return { ...source, normalizedName, role: virtualRole, ...(analysis || {}), componentRole: part.role,
           sharedAcrossForms: part.sharedAcrossForms, relativePath: `Mesh/${virtualRole === "skeletalMesh" ? "SkeletalMesh" : "StaticMesh"}/${normalizedName}` };
       }
@@ -356,10 +376,10 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
       return { ...previous, ...source, normalizedName, role, replacesStoredPath: previous.storedPath, ...(analysis || {}),
         relativePath: `${previous.role === "texture" ? "Texture" : expectedCharacterMeshRole(previous) ? (role === "skeletalMesh" ? "Mesh/SkeletalMesh" : "Mesh/StaticMesh") : "SourceFiles"}/${normalizedName}` };
     });
-  } else if (["monster", "npc", "weapon"].includes(parent.assetType)) {
+  } else if (["monster", "npc", "weapon", "item"].includes(parent.assetType)) {
     const fields = parent.meta.character || {};
     const plan = buildFamilyPackagePlan(parent.assetType, sourceFolder || path.dirname(sources[0].sourcePath), sources.map(file => file.sourcePath), {
-      assetName: characterDisplayName(parent), name: fields.name, category: parent.meta.category, modelAnalyses
+      assetName: characterDisplayName(parent), name: fields.name, category: parent.meta.category, modelAnalyses, partial: true
     });
     if (!plan.ok) throw new Error(plan.errors.join("\n"));
     if (parent.assetType === "monster" && plan.forms.map(form => form.id).join("|") !== (fields.formIds || []).join("|")) throw new Error("整套更新不能改变怪物形态；新形态请独立导入并关联");
@@ -373,7 +393,7 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
       if (kind === "model") {
         const analysis = modelAnalyses.get(path.resolve(source.sourcePath).toLowerCase());
         role = analysis?.meshKind || "staticMesh"; folder = role === "skeletalMesh" ? "Mesh/SkeletalMesh" : "Mesh/StaticMesh";
-        const lod = source.sourcePath.match(/(_LOD\d+)(?=\.[^.]+$)/i)?.[1] || "";
+        const lod = require('../../shared/characterLods.cjs').suffix(source.sourcePath);
         normalizedName = buildCharacterModelBaseName(parent.name, source.sourcePath.replace(/_LOD\d+(?=\.[^.]+$)/i, ""), parent.meta.character, role) + lod + ext;
       } else if (kind === "texture") {
         role = "texture"; folder = "Texture";
@@ -423,6 +443,7 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
   }
   for (const previous of old.values()) changes.push({ name: previous.normalizedName, status: "retained" });
   const merged = [...files, ...old.values()];
+  characterLod.validate(merged);
   if (parent.assetType === "suit" && !["Hair", "Face"].includes(parent.meta.character?.variant)) {
     const slots = new Set(merged.filter(file => ["model", "skeletalMesh", "staticMesh"].includes(file.role)).map(file => characterMeshIdentity(file.normalizedName).replace(/_lod\d+$/, "")));
     if (slots.size > 4) throw new Error("更新后套装超过 4 个部件，请核对资源归属");
@@ -436,7 +457,7 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
 async function updateCharacterPackage(options) {
   const note = String(options.note || "").trim();
   if (!note) throw new Error("请填写更新备注");
-  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon"]);
+  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon", "item"]);
   return withRecycleLock(root, () => withFileTransaction({ root, owner: "character-components", key: parent.metaPath }, async () => {
     const plan = await prepareCharacterPackageUpdate(options);
     if (!options.token || options.token !== plan.token || options.confirmWholePackage !== true) throw new Error("请重新检查并确认整套更新范围");
@@ -516,7 +537,7 @@ async function updateCharacterPackage(options) {
 }
 
 async function restoreCharacterPackageVersion(options) {
-  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon"]);
+  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon", "item"]);
   return withRecycleLock(root, async () => {
     const historical = (parent.meta.characterPackageHistory || []).find(item => item.id === options.revisionId);
     if (!historical) throw new Error("整套历史版本不存在");

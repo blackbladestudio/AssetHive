@@ -1,4 +1,4 @@
-import { useState, type HTMLAttributes } from 'react';
+import { useEffect, useState, type HTMLAttributes } from 'react';
 
 export function CharacterRigPanel({ assetId, isPart, suitWorkflow = true, total, uploaded, stale, pendingReview = 0, reviewedUnchanged = 0, complete, staticReady, needsAttention, disabled, onUpload, onReview, uploadDropProps, t }: {
   assetId: string; isPart: boolean; suitWorkflow?: boolean; total: number; uploaded: number; stale: number; pendingReview?: number; reviewedUnchanged?: number; complete: boolean; staticReady: boolean; disabled: boolean;
@@ -11,6 +11,10 @@ export function CharacterRigPanel({ assetId, isPart, suitWorkflow = true, total,
   const [message, setMessage] = useState('');
   const [failed, setFailed] = useState(false);
   const [reviewing, setReviewing] = useState(false);
+  const [percent, setPercent] = useState(0);
+  useEffect(() => window.arkhive.onRigDownloadProgress?.(event => {
+    if (event.assetId === assetId) setPercent(current => Math.max(current, Math.min(100, Math.round(Number(event.percent) || 0))));
+  }), [assetId]);
   const needsUpload = uploaded < total || stale > pendingReview;
   async function review(needsRigging: boolean) {
     setReviewing(true); setFailed(false); setMessage('');
@@ -19,7 +23,7 @@ export function CharacterRigPanel({ assetId, isPart, suitWorkflow = true, total,
     finally { setReviewing(false); }
   }
   async function download() {
-    setDownloading(true); setMessage(''); setFailed(false);
+    setDownloading(true); setPercent(0); setMessage(''); setFailed(false);
     try {
       const result = await window.arkhive.downloadCharacterRigFiles(assetId);
       if (result.canceled) return;
@@ -47,7 +51,7 @@ export function CharacterRigPanel({ assetId, isPart, suitWorkflow = true, total,
       : !suitWorkflow ? t('上传后保留静态模型；后续修改使用资产或部件的更新按钮。', 'Static models are retained. Use the asset or part update action for later changes.')
       : stale > 0 ? t('模型已更新，请重新上传绑定文件，再使用底部“发送到 Unreal Engine”同步。', 'Models changed. Upload updated rigging, then use “Send to Unreal Engine” below.')
         : t('上传完成后，请用底部“发送到 Unreal Engine”同步到 UE。', 'After uploading, use “Send to Unreal Engine” at the bottom to sync to UE.')}</p>
-    {(downloading || reviewing) && <div className="character-operation-progress" role="status"><span>{reviewing ? t('正在保存绑定选择…', 'Saving rigging decision…') : t('正在准备并下载模型…', 'Preparing and downloading models…')}</span><progress /></div>}
+    {(downloading || reviewing) && <div className="character-operation-progress" role="status"><div className="character-operation-progress-heading"><span>{reviewing ? t('正在保存绑定选择…', 'Saving rigging decision…') : t('正在准备并下载模型…', 'Preparing and downloading models…')}</span><span>{reviewing ? 0 : percent}%</span></div><progress max={100} value={reviewing ? 0 : percent} /></div>}
     {message && <p className={failed ? 'character-preview-error' : 'settings-field-hint'} role="status">{message}</p>}
   </section>;
 }

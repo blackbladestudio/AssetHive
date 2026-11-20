@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
 const { setImmediate } = require("node:timers");
+const { Buffer } = require("node:buffer");
 const { gzipSync } = require("node:zlib");
 const { createCacheProcess } = require("../electron/services/cacheProcess");
 const { DatabaseSync } = require("node:sqlite");
@@ -101,6 +102,31 @@ test("new and legacy SQLite caches round-trip full and incremental saves without
   assert.deepEqual(Array.from(restored[0].standardAssetTags), ["Dressing"]);
   assert.equal(restored[0].meta.slug, asset.meta.slug);
   assert.deepEqual(await fs.readFile(memoPath), memoBefore);
+});
+
+test("recorded animation covers are saved through the derived cache without changing the asset index", async () => {
+  const archive = path.resolve("library", "Animation");
+  const modelPath = path.join(archive, "AS_Walk.fbx");
+  const localCover = path.resolve("local-cache", "cover.webm");
+  const asset = {
+    id: "AS_Walk", name: "Walk", source: "custom", assetType: "animation", path: archive, metaPath: modelPath,
+    modelFiles: [modelPath], meta: { identity: { contentFingerprint: "unchanged" } }
+  };
+  const writes = [];
+  const before = JSON.stringify(asset);
+  const context = vm.createContext({
+    index: [asset], librarySelectionGeneration: 1, recycleInProgress: false, Buffer, ArrayBuffer,
+    normalizePath: file => file.replaceAll("\\", "/"), normalizeComparePath: file => path.resolve(file).toLowerCase(),
+    getSharedDerivedCache: () => ({ saveAnimationPreview: async (...args) => { writes.push(args); return localCover; } })
+  });
+  vm.runInContext(declarations(["cacheAnimationPreview"]), context);
+  const bytes = new ArrayBuffer(32);
+  const key = "a".repeat(64);
+  assert.equal(await context.cacheAnimationPreview({ assetId: asset.id, modelPath: `${modelPath}.fbx`, key, bytes }), "");
+  assert.equal(await context.cacheAnimationPreview({ assetId: asset.id, modelPath, key, bytes }), localCover.replaceAll("\\", "/"));
+  assert.deepEqual(writes, [[modelPath, key, Buffer.from(bytes)]]);
+  assert.equal(context.index[0], asset);
+  assert.equal(JSON.stringify(asset), before);
 });
 
 test("new metadata omits export tracking while legacy fields are preserved without a migration", () => {

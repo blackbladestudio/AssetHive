@@ -21,6 +21,7 @@ const { execFile } = require("node:child_process");
 const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeImage, powerMonitor } = require("electron");
 const { createScanSchedule, CHANGE_CHECK_INTERVAL_MS } = require("./services/scanSchedule");
 const { recordLibraryChanges } = require("./services/libraryChanges");
+const { boundedMap } = require('./services/boundedMap');
 const { startupScanDelay, periodicScanDelay } = require("./services/scanTiming");
 const { toAssetListRecord, toAssetIndexRecord } = require("./services/assetListRecord");
 const { createImportQueueStore } = require("./services/importQueue");
@@ -960,7 +961,7 @@ function getSharedDerivedCache() {
     let lastWarmLog = 0;
     sharedDerivedCache = createSharedDerivedCache({
       libraryRoot: root, localRoot: getThumbCacheDir(),
-      canWarm: () => !scanInProgress && !hasActiveBackgroundImport(),
+      canWarm: () => !scanInProgress && !hasActiveBackgroundImport() && !recycleInProgress && activeExportCalls === 0,
       onWarmProgress: progress => {
         if (Date.now() - lastWarmLog < 60000 && (progress.queued || progress.active)) return;
         lastWarmLog = Date.now();
@@ -991,6 +992,25 @@ async function persistLocalAnimationPreview(assetId, sourcePath) {
   const destDir = getAnimationPreviewCacheDir();
   const dest = await compressPreviewImage(resolved, destDir, `${sanitizeAnimationPreviewId(assetId)}_preview`);
   return dest ? normalizePath(dest) : "";
+}
+
+async function cacheAnimationPreview(payload) {
+  const assetId = String(payload?.assetId || "").trim();
+  const modelPath = String(payload?.modelPath || "").trim();
+  const key = String(payload?.key || "");
+  const bytes = payload?.bytes;
+  if (!assetId || !/\.fbx$/i.test(modelPath) || !/^[a-f0-9]{64}$/.test(key) || !(bytes instanceof ArrayBuffer)) return "";
+  // The canvas records at most two seconds at 700 kbps.
+  if (bytes.byteLength < 32 || bytes.byteLength > 2 * 1024 * 1024) return "";
+
+  const generation = librarySelectionGeneration;
+  const modelKey = normalizeComparePath(modelPath);
+  const matches = asset => asset?.id === assetId && asset.source === "custom" && asset.assetType === "animation"
+    && asset.metaPath && normalizeComparePath(asset.metaPath) === modelKey;
+  if (!index.some(matches)) return "";
+  const file = await getSharedDerivedCache().saveAnimationPreview(modelPath, key, Buffer.from(bytes));
+  if (!file || generation !== librarySelectionGeneration || recycleInProgress || !index.some(matches)) return "";
+  return normalizePath(file);
 }
 
 // 批量导入的会话工作区：解压产物（DroppedArchives）与拖拽物化文件（DroppedFiles）
@@ -1991,6 +2011,7 @@ async function getUnrealConnectionStatus(targetProjectPath, targetEditorPath) {
     incompatible: "AssetHive 插件协议不兼容，请更新插件并重启 Unreal",
     handshaking: "正在等待 Unreal 插件握手，编辑器可能正在加载项目",
     "handshake-timeout": "Unreal 插件握手超时，请检查编辑器是否仍在加载或被其他 AssetHive 实例连接",
+    "editor-busy": "此 UE 已被另一个 AssetHive 连接，请关闭另一个正式版或测试版后重试",
     "heartbeat-timeout": "Unreal 插件响应超时，正在自动重连",
     unavailable: "未发现目标插件服务（127.0.0.1:13430–13439），请确认目标项目已打开且 AssetHive 插件已启用"
   };
@@ -4134,14 +4155,14 @@ async function inspectCharacterIdentity(payload) {
   const candidates = index.filter(asset => asset.source === "custom" && asset.assetType === payload.assetType && characterIdentity(asset.assetType, { ...asset.meta?.character, category: asset.meta?.category }, asset.name) === identity);
   if (candidates.length > 1) return { ok: false, message: "此编号存在多条资产记录，请先核对库内记录，不能自动选择覆盖目标" };
   if (!candidates.length) return { ok: true };
-  const { parent } = await require("./services/characterComponents").loadParent(settings.customLibraryPath, candidates[0], ["suit", "monster", "npc", "weapon"]);
+  const { parent } = await require("./services/characterComponents").loadParent(settings.customLibraryPath, candidates[0], ["suit", "monster", "npc", "weapon", "item"]);
   return { ok: true, asset: parent };
 }
 
 async function importCustomAsset(payload, sender) {
   const characterImportStartedAt = Date.now();
   if (payload?.__action === "deleteCustom") {
-    return deleteCustomAsset({ assetId: payload?.assetId });
+    return deleteCustomAsset({ assetId: payload?.assetId }, sender);
   }
   if (!settings.customLibraryPath) {
     return { ok: false, message: "请先在设置中配置 Standard Library 路径" };
@@ -4149,7 +4170,8 @@ async function importCustomAsset(payload, sender) {
   let assetName = convertChineseToPinyin(String(payload?.assetName || "").trim());
   const assetType = sanitizeToken(payload?.assetType || "");
   const topCategory = getTopCategoryForAssetType(assetType);
-  const category = String(payload?.category || assetType || "custom").trim() || "custom";
+  const rawCategory = String(payload?.category || assetType || "custom").trim() || "custom";
+  const category = assetType === 'item' ? require('../shared/gameplayCategories.mjs').normalizeCategory(rawCategory) : rawCategory;
   const inputStandardAssetTags = Array.isArray(payload?.standardAssetTags)
     ? payload.standardAssetTags.map((tag) => String(tag || "").trim()).filter(Boolean)
     : (payload?.subType ? [String(payload.subType).trim()] : []);
@@ -4164,6 +4186,11 @@ async function importCustomAsset(payload, sender) {
   const isCharacterImport = isCharacterAssetType(assetType);
   if (isCharacterImport) writeLog('INFO', 'character import started', { name: assetName, fileCount: payload?.characterPackageFiles?.length || 0 });
   const characterFields = isCharacterImport ? normalizeCharacterFields(assetType, payload?.character) : null;
+  if (assetType === 'item') {
+    const identity = require('../shared/gameplayNaming.mjs').gameplayIdentity(category, characterFields.displayNameEn);
+    characterFields.name = identity.name;
+    characterFields.displayNameEn = identity.name;
+  }
   let characterPackageFiles = isCharacterImport && Array.isArray(payload?.characterPackageFiles)
     ? partitionCharacterPackageFiles(payload.characterPackageFiles).accepted
     : [];
@@ -4175,7 +4202,7 @@ async function importCustomAsset(payload, sender) {
   }
   const isFamilyImport = isCharacterImport && assetType !== "suit";
   const weaponModelAnalyses = new Map();
-  if (assetType === 'weapon' || assetType === 'suit' || assetType === 'monster') {
+  if (assetType === 'weapon' || assetType === 'suit' || assetType === 'monster' || assetType === 'npc' || assetType === 'item') {
     for (const file of characterPackageFiles.filter(file => /\.(fbx|obj|gltf|glb)$/i.test(file))) {
       const analysis = /\.fbx$/i.test(file) ? await require('./services/characterFileInspection').inspectCharacterModel(file) : { meshKind: 'staticMesh' };
       if (analysis.error || !analysis.meshKind) return { ok: false, message: `无法检查模型：${path.basename(file)}` };
@@ -4194,6 +4221,7 @@ async function importCustomAsset(payload, sender) {
     if (!collision.ok) return collision;
     if (collision.asset) return { ok: false, message: "相同角色身份／编号已存在。请确认更新此资产，或修改编号后重新导入。", collisionAssetId: collision.asset.id };
     const characterErrors = validateCharacterImport({
+      materialNames: payload.materialNames || {},
       modelAnalyses: Object.fromEntries(characterPackageFiles.map(file => [file, weaponModelAnalyses.get(path.resolve(file).toLowerCase()) || {}])),
       assetType,
       assetName,
@@ -4204,7 +4232,7 @@ async function importCustomAsset(payload, sender) {
     });
     if (characterErrors.length > 0) return { ok: false, message: characterErrors[0] };
     if (familyPlan && !familyPlan.ok) return { ok: false, message: familyPlan.errors[0], validationIssues: familyPlan.validationIssues };
-    if (familyPlan && assetType !== "monster" && characterFields.serial !== familyPlan.fields.serial) {
+    if (familyPlan && assetType === "weapon" && characterFields.serial !== familyPlan.fields.serial) {
       return { ok: false, message: "编号与资产目录不一致，请核对并重新确认结构化字段" };
     }
     if (familyPlan && String(characterFields.name || "").toLowerCase() !== familyPlan.fields.name.toLowerCase()) {
@@ -4216,6 +4244,13 @@ async function importCustomAsset(payload, sender) {
       characterFields.formIds = familyPlan.forms.map((form) => form.id);
       assetName = buildMonsterAssetName(characterFields.name, characterFields.formIds);
       familyPlan.assetName = assetName;
+    }
+    if (familyPlan?.family === 'npc') {
+      if (JSON.stringify(characterFields.formIds || []) !== JSON.stringify(familyPlan.fields.formIds || [])) {
+        return { ok: false, message: 'NPC 形态与资产名称不一致，请核对两位形态编号' };
+      }
+      characterFields.serial = '';
+      characterFields.formIds = [...(familyPlan.fields.formIds || [])];
     }
     if (assetType === 'weapon' && characterFields.relatedAssetId) {
       const arrow = index.find(asset => asset.id === characterFields.relatedAssetId && asset.assetType === 'weapon');
@@ -4540,8 +4575,10 @@ async function importCustomAsset(payload, sender) {
     assetIdentity = reservation.assetIdentity || assetIdentity;
   }
   const uniqueId = assetIdentity.uniqueId;
+  let reportedCharacterProgress = 0;
   const characterProgress = (value, message) => {
     if (!isCharacterImport) return;
+    value = reportedCharacterProgress = Math.max(reportedCharacterProgress, Math.min(100, value));
     emitCustomSaveProgress(sender, uniqueId, value, `character:${message}`);
     writeLog('INFO', 'character import progress', { assetId: uniqueId, progress: Math.round(value), message, elapsedMs: Date.now() - characterImportStartedAt });
   };
@@ -4619,11 +4656,17 @@ async function importCustomAsset(payload, sender) {
   if (familyPlan) require("./services/characterFamilyRules").applyFamilyModelAnalyses(familyPlan, characterModelAnalyses);
   const familyArchivedBySource = new Map();
   if (familyPlan) {
-    for (const item of familyPlan.files) {
+    let copied = 0;
+    const familyCopies = await boundedMap(familyPlan.files, 3, async item => {
       const folder = path.join(destinationDir, ...item.relativePath.split("/").slice(0, -1));
       await fs.mkdir(folder, { recursive: true });
       const copiedPath = await copyRenamedFile(item.sourcePath, folder, path.basename(item.normalizedName, path.extname(item.normalizedName)), true);
-      if (!copiedPath) return { ok: false, message: `角色资产文件入库失败：${item.sourceName}` };
+      if (!copiedPath) throw new Error(`角色资产文件入库失败：${item.sourceName}`);
+      characterProgress(5 + ++copied / familyPlan.files.length * 45, `正在保存文件 ${copied}/${familyPlan.files.length}`);
+      return copiedPath;
+    });
+    for (const [fileIndex, item] of familyPlan.files.entries()) {
+      const copiedPath = familyCopies[fileIndex];
       const key = path.resolve(item.sourcePath).toLowerCase();
       const analysis = characterModelAnalyses.get(key);
       const archived = { ...(analysis || {}), role: item.role, destination: copiedPath, ...(item.formId ? { formId: item.formId } : {}),
@@ -4799,11 +4842,9 @@ async function importCustomAsset(payload, sender) {
   };
   const texturesToCopy = isFamilyImport ? [] : resolvedTextureSlots;
   const textureCopyConcurrency = isCharacterImport ? 3 : 1;
-  for (let offset = 0; offset < texturesToCopy.length; offset += textureCopyConcurrency) {
-    const results = await Promise.all(texturesToCopy.slice(offset, offset + textureCopyConcurrency).map(saveImportTexture));
-    const failure = results.find(result => result?.ok === false);
-    if (failure) return failure;
-  }
+  const textureCopyResults = await boundedMap(texturesToCopy, textureCopyConcurrency, saveImportTexture);
+  const textureCopyFailure = textureCopyResults.find(result => result?.ok === false);
+  if (textureCopyFailure) return textureCopyFailure;
 
   let characterManifest = null;
   let characterMetrics = null;
@@ -5117,19 +5158,20 @@ async function importCustomAsset(payload, sender) {
   characterProgress(70, '正在保存预览');
   if (isCharacterImport && (Object.values(characterPreviewPaths).some(Boolean)
     || assetType === "suit" && !require("../shared/heroPackageRules.mjs").heroPartKind(characterFields))) {
-    for (const view of ["front", "left", "right", "back"]) {
+    const previews = await boundedMap(["front", "left", "right", "back"], 3, async view => {
       const source = String(characterPreviewPaths[view] || "").trim();
-      if (!(await statOrNull(source))?.isFile()) return { ok: false, message: `角色${view}预览不存在` };
+      if (!(await statOrNull(source))?.isFile()) throw new Error(`角色${view}预览不存在`);
       const normalizedView = `${view.charAt(0).toUpperCase()}${view.slice(1)}`;
       const destination = await compressPreviewImage(source, previewDir, `${assetName}_Preview_${normalizedView}`);
-      if (!destination) return { ok: false, message: `无法读取或解码角色${view}预览` };
-      characterPreviewEntries.push({
+      if (!destination) throw new Error(`无法读取或解码角色${view}预览`);
+      return {
         contentLength: (await statOrNull(destination))?.size || 0,
         resolution: "unknown",
         uri: toPreviewRelativeUri(destinationDir, destination),
         tags: ["preview", `view:${view}`, "origin:auto"]
-      });
-    }
+      };
+    });
+    characterPreviewEntries.push(...previews);
   }
 
   if (isCharacterImport) {
@@ -5393,7 +5435,7 @@ async function importCustomAsset(payload, sender) {
     });
   }
 
-  if (sender && !sender.isDestroyed()) {
+  if (!isCharacterImport && sender && !sender.isDestroyed()) {
     sender.send("assets:change", { incremental: true, count: index.length });
   }
 
@@ -6353,7 +6395,8 @@ async function updateCustomAssetFiles(payload, sender) {
     nextMetaPath = metadataWrite.metaPath;
   }
 
-  const previewRel = (meta?.previews?.images?.[0]?.uri || meta.previewImage || meta.detailImage || "").trim();
+  const previewRel = ((isFlatCustomAssetType(nextAssetType) && meta.previewImage)
+    || meta?.previews?.images?.[0]?.uri || meta.previewImage || meta.detailImage || "").trim();
   const previewUri = previewRel
     ? (path.isAbsolute(previewRel) ? previewRel : path.join(assetDir, previewRel))
     : "";
@@ -6687,10 +6730,16 @@ async function deleteLegacyCustomAsset(payload) {
 
 // The recycle journal is authoritative even when a local/shared cache is stale.
 let recycleInProgress = false;
-async function filterRecycledIndex(characterRequest = false) {
+async function filterRecycledIndex(concurrency = 8) {
   const root = String(settings.customLibraryPath || "").trim();
   if (!root) return;
-  const deleted = new Set([...(await listRecycledAssets(root, { concurrency: characterRequest ? 8 : 1 })), ...(await listPermanentlyDeletedAssets(root))].map(item => item.assetId));
+  const generation = librarySelectionGeneration;
+  const [recycled, permanentlyDeleted] = await Promise.all([
+    listRecycledAssets(root, { concurrency }),
+    listPermanentlyDeletedAssets(root, { concurrency })
+  ]);
+  if (generation !== librarySelectionGeneration) return;
+  const deleted = new Set([...recycled, ...permanentlyDeleted].map(item => item.assetId));
   if (deleted.size) index = index.filter(asset => !deleted.has(asset.id));
 }
 
@@ -6701,13 +6750,17 @@ async function syncRecycleIndex(action, asset, root) {
   index = index.filter(item => item.id !== asset.id);
   if (action === "restore") index.push(asset);
   await applyLibrarySqlCacheChanges({ upsertAssets: action === "restore" ? [asset] : [], deleteIds: action === "delete" ? [asset.id] : [], changedDirectories: [asset.path] });
-  if (!await saveIndexSnapshot(index)) throw new Error("本机索引未能持久化");
-  scheduleIndexSnapshotSave("recycle_" + action);
+  if (!getLibraryDb() && !await saveIndexSnapshot(index)) throw new Error("本机索引未能持久化");
+  sharedSnapshotVersion++;
+  if (sharedIndexComplete && !scanInProgress) publishSharedIndexSnapshot();
 }
 
-function requireRecycleIdle() {
-  if (recycleInProgress || scanInProgress || hasActiveBackgroundImport() || activeExportCalls > 0 || foliageOpaqueRegenInFlight.size) {
-    throw new Error("正在扫描、导入、导出或处理资产，请完成后再删除/恢复");
+async function waitForCharacterDeletion(report) {
+  const started = Date.now();
+  while (scanInProgress || hasActiveBackgroundImport() || activeExportCalls > 0 || foliageOpaqueRegenInFlight.size) {
+    report(0, scanInProgress ? '正在等待当前扫描结束，随后删除…' : '正在等待当前资源操作结束，随后删除…');
+    if (Date.now() - started > 120000) throw new Error('当前资源操作仍未结束，本次未删除任何文件，请稍后重试');
+    await new Promise(resolve => globalThis.setTimeout(resolve, 250));
   }
 }
 
@@ -6726,21 +6779,30 @@ async function waitForCharacterOperation(readOnly, previewOnly = false) {
 
 async function previewCustomAssetDeletion(payload) {
   if (String(payload?.assetId || "").includes("::part::")) throw new Error("部件不能单独删除，请从主体删除整套及所属部件");
-  requireRecycleIdle();
+  // Read-only confirmation can run during polling or export. The confirmed
+  // token and live files are checked again after acquiring the deletion lock.
+  if (recycleInProgress) throw new Error('正在删除角色资产，请稍后重试');
   const target = index.find(asset => asset.id === payload?.assetId && asset.source === "custom");
-  if (!target || !["monster", "suit", "npc", "weapon"].includes(target.assetType)) throw new Error("请选择角色资产进行删除");
+  if (!target || !["monster", "suit", "npc", "weapon", "item"].includes(target.assetType)) throw new Error("请选择角色资产进行删除");
   return { ok: true, plan: await preparePermanentCharacterDeletion({ root: settings.customLibraryPath, asset: target, records: index }) };
 }
 
-async function deleteCustomAsset(payload) {
+async function deleteCustomAsset(payload, sender) {
   if (String(payload?.assetId || "").includes("::part::")) throw new Error("部件不能单独删除，请从主体删除整套及所属部件");
   const selected = index.find(asset => asset.id === payload?.assetId && asset.source === "custom");
-  if (selected && !["monster", "suit", "npc", "weapon"].includes(selected.assetType)) return deleteLegacyCustomAsset(payload);
-  requireRecycleIdle();
+  if (selected && !["monster", "suit", "npc", "weapon", "item"].includes(selected.assetType)) return deleteLegacyCustomAsset(payload);
+  if (recycleInProgress) throw new Error('正在删除角色资产，请稍后重试');
   recycleInProgress = true;
   const root = settings.customLibraryPath;
+  const startedAt = Date.now();
+  const report = (progress, message) => emitCustomSaveProgress(sender, payload.assetId, progress, `character-update:${message}`);
   let blockedPaths = [];
   try {
+    // Reserve the operation first: no new background scans/exports may race
+    // ahead while we drain an already running operation.
+    await waitForCharacterDeletion(report);
+    if (normalizeComparePath(settings.customLibraryPath) !== normalizeComparePath(root)) throw new Error('标准库已切换，本次未删除任何文件');
+    report(0, '正在检查关联缓存…');
     const target = index.find(asset => asset.id === payload?.assetId && asset.source === "custom");
     const { prepareCharacterCacheCleanup, clearCharacterCacheFiles } = require('./services/characterCacheCleanup');
     const cleanup = await prepareCharacterCacheCleanup(target, root, getPersistentCacheRoot());
@@ -6752,14 +6814,17 @@ async function deleteCustomAsset(payload) {
     sharedDerivedCache?.dispose(); sharedDerivedCache = null;
     markInternalLibraryMutation(25000);
     const result = await deleteCharacterPermanently({ root, asset: target, records: index, token: payload?.token, confirmPermanent: payload?.confirmPermanent,
+      onProgress: (progress, message) => report(10 + progress * 0.7, message),
       onIndexChange: (action, asset) => syncRecycleIndex(action, asset, root) });
     if (result.ok) {
       try {
+        report(82, '正在清理草稿和缓存…');
         const clearedDraftIds = await getImportQueueStore().discardCharacter(root, cleanup);
         for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send('assets:characterDeleted', {
           assetId: target.id, assetPath: target.path, paths: cleanup.paths, clearedDraftIds
         });
         await clearCharacterCacheFiles(cleanup);
+        report(92, '正在清理扫描记录…');
         const { clearCharacterScanMemos } = require('./services/characterCacheCleanup');
         await clearCharacterScanMemos(cleanup, root, [getLibrarySqlCachePath().replace(/\.sqlite$/, '.memo.json.gz'), getLibrarySqlCachePath().replace(/\.sqlite$/, '.memo.resident.json.gz')]);
         require('./services/characterSuitExport').clearCharacterExportInspection();
@@ -6770,11 +6835,14 @@ async function deleteCustomAsset(payload) {
         writeLog('ERROR', 'character deletion cache cleanup failed', { assetId: target.id, message: error.message });
       }
     }
-    await filterRecycledIndex();
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.send("assets:change");
+    // characterDeleted already removes the owner/parts in every window. A full
+    // index reload here re-read the journals and 30k unrelated records again.
+    if (!result.ok || result.indexPending) {
+      await filterRecycledIndex();
+      for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send('assets:change');
     }
-    writeLog(result.ok ? "INFO" : "ERROR", "character permanent deletion", { assetId: result.assetId, indexPending: result.indexPending, message: result.message });
+    if (result.ok) report(100, '删除完成');
+    writeLog(result.ok ? "INFO" : "ERROR", "character permanent deletion", { assetId: result.assetId, durationMs: Date.now() - startedAt, indexPending: result.indexPending, message: result.message });
     return result;
   } finally {
     blockedPaths.forEach(file => deletingCharacterCachePaths.delete(file));
@@ -7549,6 +7617,10 @@ async function performScan(window, options = {}) {
   const requestedGeneration = librarySelectionGeneration;
   await waitForLibraryCacheRestore();
   if (requestedGeneration !== librarySelectionGeneration) return index;
+  // Automatic polls are retried on the next tick. Do not compete with a user
+  // operation for SMB I/O or start a scan of its partially copied package.
+  if ((reason === 'periodic' || reason.startsWith('watch')) &&
+      (hasActiveBackgroundImport() || recycleInProgress || activeExportCalls > 0)) return index;
   if (scanInProgress) {
     if (reason !== "periodic" && (reason.startsWith("watch") || force)) {
       pendingScanRequest = { reason, force: true };
@@ -7919,6 +7991,7 @@ async function refreshAssetById(assetId) {
   const target = index[assetIndex];
   const assetDir = String(target?.path || "").trim();
   const metaPath = String(target?.metaPath || "").trim();
+  const generation = librarySelectionGeneration;
   if (!assetDir && !metaPath) {
     return target;
   }
@@ -7966,6 +8039,10 @@ async function refreshAssetById(assetId) {
     ...fullDetails,
     favorite: target.favorite // Preserve favorite state from index
   });
+  const livePosition = index.findIndex(asset => asset?.id === normalizedId);
+  if (generation !== librarySelectionGeneration || livePosition < 0) return null;
+  // A detail read can finish after the animation's new local cover is published.
+  if (isAnimationModelMetaPath(metaPath) && index[livePosition] !== target) return index[livePosition];
   if (!refreshed) {
     const deleteId = String(target?.id || "").trim();
     if (deleteId) {
@@ -7981,7 +8058,7 @@ async function refreshAssetById(assetId) {
     }
     return null;
   }
-  index[assetIndex] = toAssetIndexRecord(refreshed);
+  index[livePosition] = toAssetIndexRecord(refreshed);
   return refreshed;
 }
 
@@ -9060,9 +9137,19 @@ app.whenReady().then(async () => {
     await filterRecycledIndex();
     return index.map(toAssetListRecord).filter(Boolean);
   });
+  let detailDeletionCheck = null;
   ipcMain.handle("assets:getById", async (_, assetId) => {
-    await filterRecycledIndex(index.some(asset => asset.id === assetId && isCharacterAssetType(asset.assetType)));
-    const asset = await refreshAssetById(assetId);
+    const generation = librarySelectionGeneration;
+    // Rapid card selections can share the active journal read. A later request
+    // starts a fresh check so other clients' deletes and restores stay visible.
+    if (detailDeletionCheck?.generation !== generation) {
+      const check = filterRecycledIndex(8).finally(() => {
+        if (detailDeletionCheck?.promise === check) detailDeletionCheck = null;
+      });
+      detailDeletionCheck = { generation, promise: check };
+    }
+    await detailDeletionCheck.promise;
+    const asset = generation === librarySelectionGeneration ? await refreshAssetById(assetId) : null;
     return {
       ok: Boolean(asset),
       asset: asset || null,
@@ -9080,17 +9167,18 @@ app.whenReady().then(async () => {
       return { ok: false, message: error.message };
     } finally { activeExportCalls--; }
   });
-  ipcMain.handle('character:downloadRigFiles', async (_, assetId) => {
+  ipcMain.handle('character:downloadRigFiles', async (event, assetId) => {
     if (recycleInProgress) return { ok: false, message: '删除/恢复处理中，请稍后下载' };
     try {
       const ownerId = componentParentId(String(assetId || ''));
       const asset = await refreshAssetById(ownerId);
-      if (!asset || !['suit', 'weapon', 'monster', 'npc'].includes(asset.assetType)) throw new Error('请选择角色资产或部件');
+      if (!asset || !['suit', 'weapon', 'monster', 'npc', 'item'].includes(asset.assetType)) throw new Error('请选择角色资产或部件');
       const part = ownerId !== assetId ? listCharacterComponents(asset).find(item => item.id === assetId) : null;
       if (ownerId !== assetId && !part) throw new Error('目标部件不存在，请刷新');
       const picked = await dialog.showOpenDialog({ title: part ? '保存这个部件的模型' : '保存此资产的模型', properties: ['openDirectory', 'createDirectory'] });
       if (picked.canceled || !picked.filePaths.length) return { ok: false, canceled: true };
-      const result = await require('./services/characterRigDownload').downloadCharacterRigFiles({ root: settings.customLibraryPath, asset, slot: part?.slot, destination: picked.filePaths[0] });
+      const result = await require('./services/characterRigDownload').downloadCharacterRigFiles({ root: settings.customLibraryPath, asset, slot: part?.slot, destination: picked.filePaths[0],
+        onProgress: percent => { if (!event.sender.isDestroyed()) event.sender.send('character:rigDownloadProgress', { assetId, percent }); } });
       await shell.openPath(result.path);
       return result;
     } catch (error) { return { ok: false, message: error.message }; }
@@ -9130,11 +9218,11 @@ app.whenReady().then(async () => {
     if (recycleInProgress) return { ok: false, message: "删除/恢复处理中，请稍后导出" };
     const characterRequest = target === 'unreal' && payload?.assetIds?.length > 0 && payload.assetIds.every(id => index.some(asset => asset.id === componentParentId(id) && isCharacterUEAsset(asset)));
     if (characterRequest) event.sender.send('assets:exportProgress', { percent: 0, message: '正在读取所选角色资源…' });
-    await filterRecycledIndex(characterRequest);
     if (appUpdates?.isInstalling()) return { ok: false, message: "正在安装更新，请稍后重试" };
     if (!Array.isArray(payload?.assetIds) || !payload.assetIds.length) return { ok: false, message: "未选择资产" };
     activeExportCalls++;
     try {
+    await filterRecycledIndex();
     const byId = new Map(index.map(asset => [asset.id, asset]));
     const rawAssets = [...new Set(payload.assetIds)].map(id => {
       const parent = target === "unreal" && componentParentId(id) !== id ? byId.get(componentParentId(id)) : null;
@@ -9349,6 +9437,17 @@ app.whenReady().then(async () => {
     await fs.writeFile(targetPath, buffer);
     droppedMaterializedFiles.add(targetPath);
     return targetPath;
+  });
+
+  ipcMain.handle("assets:getAnimationPreview", (_, modelPath) => getSharedDerivedCache().animationPreview(String(modelPath || "")));
+  ipcMain.handle("assets:cacheAnimationPreview", async (_, payload) => {
+    if (recycleInProgress) return "";
+    try {
+      return await cacheAnimationPreview(payload);
+    } catch (error) {
+      writeLog("WARN", "animation preview cache failed", { message: error?.message || String(error) });
+      return "";
+    }
   });
 
   const dropResolveJobs = new Map();
@@ -9987,6 +10086,10 @@ app.whenReady().then(async () => {
       return "";
     }
     const resolvedPath = path.resolve(targetPath);
+    if (/\.fbx$/i.test(resolvedPath)) {
+      const preview = await getSharedDerivedCache().animationPreview(resolvedPath);
+      return preview?.path || targetPath;
+    }
     // Character TGA previews have a dedicated decoder. Avoid first sending them
     // through the general image decoder, which cannot read this format.
     let thumbPath = options?.character && path.extname(resolvedPath).toLowerCase() === '.tga'
@@ -10065,9 +10168,9 @@ app.whenReady().then(async () => {
       }
       if (result?.ok) {
         const windows = BrowserWindow.getAllWindows();
-        if (windows.length > 0) {
-          windows[0].webContents.send("assets:change");
-        }
+        const changed = index.find(asset => asset.id === result.assetId);
+        const update = changed && isCharacterUEAsset(changed) ? { incremental: true, records: [toAssetListRecord(changed)] } : undefined;
+        for (const win of windows) if (!win.isDestroyed()) win.webContents.send('assets:change', update);
       } else {
         // 失败时通知界面清理进度环，避免卡片一直停在中间进度。
         emitCustomSaveFailure(event.sender, result?.message || "");
@@ -10188,9 +10291,9 @@ app.whenReady().then(async () => {
     });
   });
 
-  ipcMain.handle("assets:deleteCustom", async (_, payload) => {
+  ipcMain.handle("assets:deleteCustom", async (event, payload) => {
     try {
-      return await deleteCustomAsset(payload);
+      return await deleteCustomAsset(payload, event.sender);
     } catch (error) {
       writeLog("ERROR", "assets:deleteCustom failed", {
         message: error?.message,
@@ -10215,7 +10318,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("assets:revealCharacterHistorySource", async (_, payload) => {
     try {
       const asset = index.find(item => item.source === "custom" && item.id === payload?.assetId);
-      const { parent, root } = await require("./services/characterComponents").loadParent(settings.customLibraryPath, asset, ["suit", "monster", "npc", "weapon"]);
+      const { parent, root } = await require("./services/characterComponents").loadParent(settings.customLibraryPath, asset, ["suit", "monster", "npc", "weapon", "item"]);
       const source = await resolveHistorySource(parent, root, payload.historyId, payload.sourceIndex);
       shell.showItemInFolder(source);
       return { ok: true };
@@ -10270,7 +10373,9 @@ app.whenReady().then(async () => {
           sharedSnapshotVersion++;
           if (sharedIndexComplete && !scanInProgress) publishSharedIndexSnapshot();
         } catch (error) { indexPending = true; writeLog("ERROR", "character update index pending", { assetId: asset.id, message: error.message }); }
-        for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send("assets:change");
+        const changedRecord = refreshed && toAssetListRecord(refreshed);
+        for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send("assets:change",
+          changedRecord ? { incremental: true, records: [changedRecord] } : undefined);
         report(100, '更新完成');
         return { ...result, indexPending, asset: refreshed || null };
       } catch (error) {

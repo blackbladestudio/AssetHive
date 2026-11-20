@@ -1,4 +1,5 @@
 import patterns from "./characterFilePatterns.json" with { type: "json" };
+import { ownedWeaponIdentity } from './ownedWeaponNaming.mjs';
 
 const identityPattern = new RegExp(patterns.monsterIdentity, "i");
 const mapPattern = new RegExp(patterns.textureSuffix, "i");
@@ -64,11 +65,12 @@ function inspectFile(file) {
   const name = parts.at(-1) || "";
   const ext = name.split(".").at(-1).toLowerCase();
   const stem = normalizeMonsterSourceStem(name.replace(/\.[^.]+$/, "").replace(/\.(?:ma|mb)$/i, ""));
-  const match = stem.match(identityPattern);
+  const modernWeapon = /^(?:SM|SK|SKEL|MI|T)_WP_/i.test(stem) ? ownedWeaponIdentity(stem) : null;
+  const match = modernWeapon ? null : stem.match(identityPattern);
   const parent = parts.slice(0, -1).reverse().map((part) => normalizeMonsterSourceStem(part).match(identityPattern)).find(Boolean);
   const { role, folder } = classifyMonsterSource(file);
   const weapon = /(?:^|_)(?:WP|Weapon)(?:_|$)/i.test(stem);
-  return { path: file, name, ext, stem, role, folder, weapon, match, parent,
+  return { path: file, name, ext, stem, role, folder, weapon, modernWeapon, match, parent,
     mesh: ["skeletalMesh", "staticMesh"].includes(role),
     owner: match?.[1] || "", form: match?.[2] || "" };
 }
@@ -122,6 +124,12 @@ export function auditMonsterPackage(files, options = {}) {
 
   const wrongOwner = [], wrongForm = [], unknown = [], pathConflicts = [];
   for (const row of rows) {
+    if (row.modernWeapon) {
+      row.modernWeapon = ownedWeaponIdentity(row.stem, sourceName);
+      if (sourceName && row.modernWeapon.owner.toLowerCase() !== sourceName.toLowerCase()) wrongOwner.push(row);
+      if (row.role === 'texture' && !mapPattern.test(row.stem)) unknown.push(row);
+      continue;
+    }
     const inferred = row.match || row.parent;
     if (inferred && names.length <= 1 && sourceName && inferred[1].toLowerCase() !== sourceName.toLowerCase()) wrongOwner.push(row);
     if (inferred && formIds.length === 1 && inferred[2] !== formIds[0]) wrongForm.push(row);

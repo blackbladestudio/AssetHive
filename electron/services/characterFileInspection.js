@@ -22,7 +22,7 @@ function tracked(operation) {
 }
 // Local derived data only: survive preview/application restarts without modifying the library.
 // Bump this version when model inspection semantics change.
-const cacheRoot = process.env.ASSETHIVE_CHARACTER_INSPECTION_CACHE || path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'AssetHive', 'CharacterInspection', 'v2');
+const cacheRoot = process.env.ASSETHIVE_CHARACTER_INSPECTION_CACHE || path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'AssetHive', 'CharacterInspection', 'v3');
 const cacheKey = value => crypto.createHash('sha256').update(value).digest('hex');
 async function readCache(kind, key) {
   try { return JSON.parse(await fs.readFile(path.join(cacheRoot, `${kind}-${key}.json`), 'utf8')); } catch { return null; }
@@ -56,7 +56,9 @@ async function inspectCharacterFile(filePath) {
     return stored.value;
   }
   const digest = crypto.createHash('sha256');
-  for await (const chunk of createReadStream(file)) digest.update(chunk);
+  // Node's 64 KiB default causes thousands of serial read requests for large
+  // FBX/TGA files on SMB. Four bounded export readers use at most 16 MiB here.
+  for await (const chunk of createReadStream(file, { highWaterMark: 4 * 1024 * 1024 })) digest.update(chunk);
   if (stamp(await fs.stat(file)) !== signature) throw new Error('文件正在变化，请重新检查：' + filePath);
   const value = { sourcePath: file, sourceHash: digest.digest('hex') };
   remember(hashes, file, { signature, value });

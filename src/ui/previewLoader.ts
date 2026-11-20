@@ -33,6 +33,14 @@ export class PreviewLoader {
     return this.cache.get(path) || "";
   }
 
+  setResolved(path: string, resolved: string) {
+    this.versions.set(path, (this.versions.get(path) || 0) + 1);
+    this.cache.delete(path);
+    this.cache.set(path, resolved);
+    this.trim();
+    this.listeners.get(path)?.forEach(listener => listener());
+  }
+
   subscribe(path: string, listener: Listener): () => void {
     if (!path) return () => {};
     let group = this.listeners.get(path);
@@ -44,7 +52,9 @@ export class PreviewLoader {
     const cached = this.cache.get(path);
     if (cached) {
       this.cache.delete(path);
-      this.cache.set(path, cached);
+      // An FBX result without a video can become a hit after another client
+      // creates the cover. Retry when the card comes back into view.
+      if (cached !== path || !/\.fbx$/i.test(path) || group.size > 1) this.cache.set(path, cached);
     }
     this.schedule();
     return () => {

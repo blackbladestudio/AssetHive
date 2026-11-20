@@ -1,14 +1,17 @@
 import type { CharacterImportFields } from "./hooks/types";
+import { ownedWeaponIdentity } from '../../shared/ownedWeaponNaming.mjs';
 import type { MonsterModelAnalysis } from "../../shared/monsterPackageAudit.mjs";
 import { heroPartKind, heroPartName, inferHeroPart, cleanSuitName } from "../../shared/heroPackageRules.mjs";
-import { CHARACTER_MODEL_EXTENSIONS, isAllowedCharacterPackageFile, characterRoleAllowsFile } from "../../shared/characterFilePolicy.mjs";
+import { CHARACTER_MODEL_EXTENSIONS, isAllowedCharacterPackageFile, characterRoleAllowsFile, characterTextureChannel } from "../../shared/characterFilePolicy.mjs";
 import type { AssetRecord } from "../types";
+import { tree as gameplayTree, entries as gameplayEntries, categories as gameplayCategories, inferCategory as inferGameplayCategory, normalizeCategory as normalizeGameplayCategory, type GameplayCategoryNode } from '../../shared/gameplayCategories.mjs';
 import familyRules from "../../shared/characterFamilyRules.json";
+import { gameplayIdentity, gameplayCategoryFromName, gameplayFileStem } from '../../shared/gameplayNaming.mjs';
 import filePatterns from "../../shared/characterFilePatterns.json" with { type: "json" };
 import { auditMonsterPackage, classifyMonsterSource, normalizeMonsterSourceStem, buildMonsterAssetName } from "../../shared/monsterPackageAudit.mjs";
 import { inferCharacterChineseName, normalizeMonsterNames } from "../../shared/characterNames.mjs";
 import { heroTextureChannel } from '../../shared/heroMaterialRules.mjs';
-import { weaponCategory, splitWeaponPackage, weaponFileSuffix } from "../../shared/weaponRules.mjs";
+import { weaponCategory, splitWeaponPackage, weaponFileSuffix, weaponAssemblyKind, weaponSideOutput, weaponPackageOutput } from "../../shared/weaponRules.mjs";
 export { auditMonsterPackage, buildMonsterAssetName };
 export { displayMonsterFormNumbers } from "../../shared/monsterPackageAudit.mjs";
 
@@ -18,7 +21,7 @@ export function getFamilyTextureMapCode(stem: string) {
   return (filePatterns.textureMapCodes as Record<string, string>)[stem.match(CHARACTER_MAP_SUFFIX)?.[1]?.toLowerCase() || ""] || "";
 }
 
-export const CHARACTER_ASSET_TYPES = ["suit", "monster", "npc", "weapon"] as const;
+export const CHARACTER_ASSET_TYPES = ["suit", "monster", "npc", "weapon", "item"] as const;
 
 export function isCharacterAssetType(assetType: string) {
   return CHARACTER_ASSET_TYPES.includes(String(assetType || "").trim().toLowerCase() as typeof CHARACTER_ASSET_TYPES[number]);
@@ -28,14 +31,16 @@ export const characterCategoryOptions: Record<string, string[]> = {
   suit: ["Male_01", "Female_01"],
   monster: familyRules.monster.importCategories,
   npc: [],
-  weapon: familyRules.weapon.categories
+  weapon: familyRules.weapon.categories,
+  item: [...gameplayCategories, ...familyRules.item.categories]
 };
 
 export const characterDefaultRelativeDir: Record<string, string> = {
   suit: "Character\\Hero",
   monster: "Character\\Monster",
   npc: "Character\\NPC",
-  weapon: "Character\\Weapon"
+  weapon: "Character\\Weapon",
+  item: "Character\\GameplayItem"
 };
 
 export function getCharacterLibraryCategory(asset: Pick<AssetRecord, "assetType" | "meta" | "categories">) {
@@ -49,15 +54,19 @@ export function getCharacterLibraryCategory(asset: Pick<AssetRecord, "assetType"
   const category = [meta.category, manifest?.ruleCategory, semantic?.subject_matter, fallback]
     .find((value) => typeof value === "string" && value.trim());
   const raw = typeof category === "string" ? category.trim() : "";
+  if (family === 'item') return normalizeGameplayCategory(raw);
   if (family === 'weapon') return weaponCategory(raw) || raw;
   return characterCategoryOptions[family]?.find((value) => value.toLowerCase() === raw.toLowerCase()) || raw;
 }
 
 export function getCharacterNavigationSelection(nodeId: string | null) {
-  const match = String(nodeId || "").match(/^character-(suit|monster|npc|weapon)(?::(.+))?$/);
+  const match = String(nodeId || "").match(/^character-(suit|monster|npc|weapon|item)(?::(.+))?$/);
   if (!match) return null;
   try {
-    return { family: match[1], category: match[2] ? decodeURIComponent(match[2]) : "" };
+    const category = match[1] === 'item' ? normalizeGameplayCategory(match[2] ? decodeURIComponent(match[2]) : '') : match[2] ? decodeURIComponent(match[2]) : '';
+    const assembly = match[1] === 'weapon' ? /^(single|combined)(?:\/(.*))?$/.exec(category) : null;
+    return { family: match[1], category: assembly ? assembly[2] || '' : category,
+      ...(assembly ? { assembly: assembly[1] as 'single' | 'combined' } : {}) };
   } catch {
     return null;
   }
@@ -65,8 +74,9 @@ export function getCharacterNavigationSelection(nodeId: string | null) {
 
 export function characterImportDefaults(nodeId: string, family: string) {
   const selection = getCharacterNavigationSelection(nodeId);
-  const category = selection?.family === family ? selection.category : '';
+  const category = selection?.family === family && selection.category.toLowerCase() !== 'outfit' ? selection.category : '';
   const fields: Partial<CharacterImportFields> = {};
+  if (selection?.assembly) fields.weaponAssembly = selection.assembly;
   if (family === 'suit') {
     if (['Face', 'Hair'].includes(category)) fields.variant = category;
     const body = category.match(/^(Male|Female)_(\d{2})$/);
@@ -75,15 +85,21 @@ export function characterImportDefaults(nodeId: string, family: string) {
   return { category, fields };
 }
 
-export function getCharacterCategoryDisplayLabel(family: string, category: string, language = "zh") {
+export function getCharacterCategoryDisplayLabel(family: string, category: string, language = "zh"): string {
+  if (family === 'weapon' && /^(single|combined)\//.test(category)) return category.split('/').map(value => getCharacterCategoryDisplayLabel(family, value, language)).join(' · ');
+  if (family === 'item') {
+    const entry = gameplayEntries.find(item => item.value === normalizeGameplayCategory(category));
+    if (entry) return language === 'en' ? entry.value.split('/').join(' / ') : entry.label;
+  }
   const labels: Record<string, Record<string, [string, string]>> = {
-    suit: { male_01: ["男装", "Male"], female_01: ["女装", "Female"], face: ["脸部", "Face"], hair: ["头发", "Hair"] },
+    item: { chest: ['宝箱', 'Chest'], formationflag: ['阵旗', 'Formation flag'], interactable: ['交互物', 'Interactable'], throwingknife: ['飞刀', 'Throwing knife'], consumable: ['消耗品', 'Consumable'], droppedgear: ['掉落装备', 'Dropped gear'] },
+    suit: { outfit: ["套装衣服", "Outfit clothing"], male_01: ["男装", "Male"], female_01: ["女装", "Female"], face: ["脸部", "Face"], hair: ["头发", "Hair"] },
     monster: {
       "1_boss": ["01大首领", "01 Boss"], "2_miniboss": ["02小首领", "02 MiniBoss"], "3_elite": ["03精英怪", "03 Elite"],
       "4_normalmonster": ["04普通怪", "04 NormalMonster"], "5_minion": ["05杂兵怪", "05 Minion"]
     },
     npc: { merchant: ["商人", "Merchant"], guard: ["守卫", "Guard"], scholar: ["学者", "Scholar"], other: ["其他", "Other"] },
-    weapon: { bow: ["弓 / 箭", "Bow / Arrow"], greataxe: ["巨斧", "GreatAxe"], jade: ["玉器", "Jade"], longsword: ["长剑", "LongSword"], pairedswords: ["双剑", "PairedSwords"], shieldaxe: ["盾斧", "ShieldAxe"], spear: ["长枪", "Spear"], sword: ["短剑", "Sword"] }
+    weapon: { single: ['单武器', 'Single weapon'], combined: ['组合武器', 'Combined weapons'], dagger: ['匕首', 'Dagger'], dualhands: ['同类双持', 'DualHands'], dualaxe: ['双斧', 'DualAxe'], arrow: ['箭', 'Arrow'], greatsword: ['巨剑', 'GreatSword'], bow: ["弓箭", "Bow"], greataxe: ["巨斧", "GreatAxe"], jade: ["玉器", "Jade"], longsword: ["长剑", "LongSword"], pairedswords: ["参差剑", "PairedSwords"], shieldaxe: ["盾斧", "ShieldAxe"], spear: ["长枪", "Spear"], sword: ["短剑", "Sword"] }
   };
   const label = labels[family]?.[category.toLowerCase()];
   return label ? label[language === "en" ? 1 : 0] : category;
@@ -91,6 +107,23 @@ export function getCharacterCategoryDisplayLabel(family: string, category: strin
 
 export function getCharacterCategoryNodes(family: string, assets: AssetRecord[]) {
   if (!isCharacterAssetType(family)) return [];
+  if (family === 'item') {
+    type CategoryNode = { id: string; label: string; children: CategoryNode[] };
+    const nodes = (items: GameplayCategoryNode[], parent = ''): CategoryNode[] => items.map(item => {
+      const category = parent ? parent + '/' + item.code : item.code;
+      return { id: 'character-item:' + encodeURIComponent(category), label: item.zh, children: nodes(item.children || [], category) };
+    });
+    return [...nodes(gameplayTree), ...familyRules.item.categories.filter(category => assets.some(asset => asset.assetType === 'item' && getCharacterLibraryCategory(asset) === category)).map(category => ({ id: 'character-item:' + category, label: getCharacterCategoryDisplayLabel('item', category), children: [] }))];
+  }
+  if (family === 'weapon') return characterCategoryOptions.weapon.map(category => ({
+    id: `character-weapon:${category}`, label: getCharacterCategoryDisplayLabel('weapon', category), children: []
+  }));
+  if (family === 'suit') return [
+    { id: 'character-suit:Outfit', label: getCharacterCategoryDisplayLabel('suit', 'Outfit'), children: ['Male_01', 'Female_01'].map(category => ({
+      id: `character-suit:${category}`, label: getCharacterCategoryDisplayLabel('suit', category), children: []
+    })) },
+    ...['Face', 'Hair'].map(category => ({ id: `character-suit:${category}`, label: getCharacterCategoryDisplayLabel('suit', category), children: [] }))
+  ];
   const fixed = family === "suit" ? ["Male_01", "Female_01", "Face", "Hair"] : characterCategoryOptions[family] || [];
   const categories = fixed.length ? fixed : [...new Map(
     assets.filter((asset) => String(asset.assetType || "").trim().toLowerCase() === family)
@@ -106,9 +139,14 @@ export function getCharacterCategoryNodes(family: string, assets: AssetRecord[])
 
 export function matchesCharacterNavigation(asset: AssetRecord, nodeId: string) {
   const selected = getCharacterNavigationSelection(nodeId);
+  const category = getCharacterLibraryCategory(asset).toLowerCase();
   return Boolean(selected
     && String(asset.assetType || "").trim().toLowerCase() === selected.family
-    && (!selected.category || getCharacterLibraryCategory(asset).toLowerCase() === selected.category.toLowerCase()));
+    && (!selected.assembly || weaponAssemblyKind(asset) === selected.assembly)
+    && (!selected.category
+      || selected.family === 'suit' && selected.category.toLowerCase() === 'outfit' && ['male_01', 'female_01'].includes(category)
+      || selected.family === 'item' && category.startsWith(selected.category.toLowerCase() + '/')
+      || category === selected.category.toLowerCase()));
 }
 
 const suitClassByCode: Record<string, string> = {
@@ -146,17 +184,29 @@ function inferSuitName(values: string[]) {
 }
 
 export function inferCharacterAssetType(values: string[]) {
+  if (values.some(gameplayCategoryFromName)) return 'item';
+  if (inferGameplayCategory(values)) return "item";
   const text = values.join(" ");
+  if (/(?:^|[\\/])(?:GameplayItems?|Chest|FormationFlag|Interactable|ThrowingKnife|Consumable|DroppedGear)(?:[\\/]|$)/i.test(text)) return 'item';
   if (/(?:^|[\\/])weapon(?:[\\/]|$)/i.test(text)) return "weapon";
   if (/(?:^|[\\/])npc(?:[\\/]|$)/i.test(text)) return "npc";
   if (/(?:^|[\\/])monster(?:[\\/]|$)/i.test(text)) return "monster";
-  if (/(?:^|[\\/_\s-])(weapon|bow|arrow|greataxe|jade|longsword|pairedswords|shieldaxe|sword|blade|spear|shield|axe|gun)\d*(?:$|[\\/_\s.-])/i.test(text)) return "weapon";
+  if (/(?:^|[\\/_\s-])(weapon|bow|arrow|dagger|dualhands|dualaxe|greataxe|greatsword|jade|longsword|pairedswords|shieldaxe|sword|blade|spear|shield|axe|gun)\d*(?:$|[\\/_\s.-])/i.test(text)) return "weapon";
   if (/(?:^|[\\/_\s-])(npc|merchant|keeper|vendor)\d*(?:$|[\\/_\s.-])/i.test(text)) return "npc";
   if (/(?:^|[\\/_\s-])(monster|boss|miniboss|elite|minion)(?:$|[\\/_\s.-])/i.test(text)) return "monster";
   return "suit";
 }
 
 export function inferFamilyPackageIdentity(assetType: string, sourcePath: string, files: string[], modelAnalyses?: Record<string, MonsterModelAnalysis>) {
+  if (assetType === 'item') {
+    const parts = [sourcePath, ...files].flatMap(value => value.replaceAll('\\', '/').split('/'));
+    const category = inferGameplayCategory([sourcePath, ...files]) || [sourcePath, ...files].map(gameplayCategoryFromName).find(Boolean) || familyRules.item.categories.find(value => parts.some(part => part.toLowerCase() === value.toLowerCase())) || '';
+    const model = files.find(file => /\.(fbx|obj|glb|gltf)$/i.test(file));
+    const packageFolder = category ? parts.find(part => gameplayCategoryFromName(part) === category && !/\.[a-z0-9]+$/i.test(part)) : undefined;
+    const name = (packageFolder || model || sourcePath).replaceAll('\\', '/').split('/').pop()?.replace(/\.[^.]+$/, '').replace(/^(?:GamePlay|Item)_/i, '').replace(/^(SM|SK)_/i, '') || '';
+    const identity = gameplayIdentity(category, name);
+    return { assetName: identity.assetName, category, name: identity.name, serial: '', variant: '', formIds: [] as string[] };
+  }
   if (!(["monster", "npc", "weapon"] as string[]).includes(assetType)) return null;
   if (assetType === 'weapon') {
     const identity = splitWeaponPackage(files).groups[0];
@@ -166,7 +216,7 @@ export function inferFamilyPackageIdentity(assetType: string, sourcePath: string
     const values = [sourcePath, ...files];
     const parts = values.flatMap((value) => value.replace(/\\/g, "/").split("/").filter(Boolean));
     const category = familyRules.monster.importCategories.find((value) =>
-      parts.some((part) => [value.toLowerCase(), value.replace(/^\d+_/, "").toLowerCase()].includes(part.toLowerCase()))) || "";
+      parts.some((part) => [value.toLowerCase(), value.replace(/^\d+_/, "").toLowerCase()].some(category => part.toLowerCase() === category || part.toLowerCase().startsWith(category + '_')))) || "";
     const packages = parts.map((part) => part.match(/^(?:Boss|MiniBoss|Elite|NormalMonster|Minion)(\d{3})_([A-Za-z][A-Za-z0-9_]*)$/i)).filter(Boolean);
     const identified = parts.map((part) => part.replace(/\.[^.]+$/, "").match(MONSTER_FILE_IDENTITY)).filter(Boolean);
     const unnumberedMeshes = parts.map((part) => part.replace(/\.[^.]+$/, "").match(/^(?:SK|SM)_(.+)$/i)).filter(Boolean);
@@ -181,6 +231,20 @@ export function inferFamilyPackageIdentity(assetType: string, sourcePath: string
   const pathParts = String(sourcePath || "").replace(/\\/g, "/").split("/").filter(Boolean);
   const filePathParts = files.flatMap((file) => String(file || "").replace(/\\/g, "/").split("/"));
   const rootPresent = [...pathParts, ...filePathParts].some((part) => part.toLowerCase() === rule.root.toLowerCase());
+  if (assetType === 'npc') {
+    const allParts = [...pathParts, ...filePathParts].filter(Boolean);
+    const rootIndex = allParts.findIndex(part => part.toLowerCase() === 'npc');
+    const packageFolder = allParts.find(part => /^[A-Za-z][A-Za-z0-9]*_[A-Za-z][A-Za-z0-9_]*_[\u3400-\u9fff]+(?:_\d{2})?$/.test(part));
+    const category = packageFolder ? packageFolder.split('_')[0] : rootIndex >= 0 ? allParts[rootIndex + 1] || '' : '';
+    const identities = files.map(file => (file.replace(/\\/g, '/').split('/').pop() || '').replace(/\.[^.]+$/, '').match(MONSTER_FILE_IDENTITY))
+      .filter((match): match is RegExpMatchArray => Boolean(match));
+    const bodyIdentities = identities.filter(match => !/(?:^|_)(?:WP|Weapon)(?:_|$)/i.test(match[1]));
+    const names = [...new Set(bodyIdentities.map(match => match[1]))];
+    const forms = [...new Set(bodyIdentities.map(match => match[2]))];
+    if (names.length === 1 && forms.length === 1) return {
+      assetName: buildMonsterAssetName(names[0], forms), category, serial: '', name: names[0], variant: forms[0], formIds: forms
+    };
+  }
   const meshCandidates = files.map((file) => file.replace(/\\/g, "/").split("/").pop() || "")
     .filter((file) => /^(SK|SM)_/i.test(file) && !/_Physics\.[^.]+$/i.test(file))
     .map((file) => file.replace(/\.[^.]+$/, "").replace(/^(SK|SM)_/i, ""));
@@ -232,10 +296,18 @@ export function getCharacterCategoryFromFields(assetType: string, fields: Charac
 }
 
 export function buildCharacterAssetName(assetType: string, fields: CharacterImportFields, category = "") {
+  if (assetType === 'item') {
+    const name = fields.displayNameEn || fields.name || '';
+    return characterCategoryOptions.item.includes(normalizeGameplayCategory(category)) ? gameplayIdentity(category, name).assetName : '';
+  }
   if (assetType === "suit" && heroPartKind(fields)) return heroPartName(fields);
   if (assetType === "monster") {
     const name = normalizeMonsterNames(fields).name;
     return characterCategoryOptions.monster.includes(category) ? buildMonsterAssetName(name, fields.formIds) : "";
+  }
+  if (assetType === 'npc') {
+    const name = normalizeMonsterNames(fields).name;
+    return category.trim() ? buildMonsterAssetName(name, fields.formIds) : '';
   }
   if (assetType !== "suit") {
     if (!(["monster", "npc", "weapon"] as string[]).includes(assetType)) return "";
@@ -284,13 +356,13 @@ export function inferCharacterSourcePackageName(folderName: string, files: strin
 
 export function inferCharacterTextureType(filePath: string) {
   const stem = String(filePath || "").replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") || "";
-  const hairChannel = /_(Opacity|Alpha|Root|ID|Height|Depth|Tangent|Flow)$/i.test(stem) ? heroTextureChannel(filePath) : '';
+  const hairChannel = /_(Opacity|Alpha|Root|ID|Height|Depth|Tangent|Flow|Scatter|SRMF|Mask)$/i.test(stem) ? heroTextureChannel(filePath) : '';
   return hairChannel || (/(?:^|_)A$/i.test(stem) ? "Opacity" : "");
 }
 
 export function inferCharacterTextureGroup(filePath: string) {
   const stem = String(filePath || "").replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") || "";
-  const withoutMap = stem.replace(/_(?:ORM|D|N|A)$/i, "");
+  const withoutMap = characterTextureChannel(filePath) ? stem.slice(0, stem.lastIndexOf('_')) : stem;
   if (!withoutMap || withoutMap === stem) return "";
   const suitPart = withoutMap.match(/(?:^|_)[MHL]\d{3}_[MF]\d{2}_(.+)$/i)?.[1];
   const canonicalPart = withoutMap.match(/^T_[MF]\d{2}_(?:Light|Medium|Heavy)\d{3}_[^_]+_(.+)$/i)?.[1];
@@ -347,10 +419,17 @@ export function classifyFamilyPackageFile(family: string, filePath: string) {
   return { role: allowed ? role : "other", folder: allowed ? folders[role] || "OtherFiles" : "OtherFiles" };
 }
 
-export function previewFamilyFileName(family: string, assetName: string, filePath: string, monsterName = "", modelAliases: Record<string, string> = {}) {
+export function previewFamilyFileName(family: string, assetName: string, filePath: string, monsterName = "", modelAliases: Record<string, string> = {}): string {
+  const lodMatch = /_LOD(\d+)(?=\.[^.]+$)/i.exec(filePath);
+  if (lodMatch && /\.fbx$/i.test(filePath)) {
+    const base = previewFamilyFileName(family, assetName, filePath.replace(/_LOD\d+(?=\.[^.]+$)/i, ''), monsterName, modelAliases);
+    return base.replace(/(?=\.[^.]+$)/, Number(lodMatch[1]) ? `_LOD${Number(lodMatch[1])}` : '');
+  }
   const original = String(filePath || "").replace(/\\/g, "/").split("/").pop() || "";
-  const parsed = String(assetName || "").match(/^[A-Za-z][A-Za-z0-9]*?\d{3}_([A-Za-z][A-Za-z0-9_]*)$/)
-    || (family === "monster" && /^[A-Za-z][A-Za-z0-9_]*$/.test(assetName) ? [assetName, assetName] : null);
+  const npcIdentity = family === 'npc' ? String(assetName || '').match(/^SK_([A-Za-z][A-Za-z0-9_]*?)_(\d{2})$/) : null;
+  const parsed = npcIdentity ? [npcIdentity[0], npcIdentity[1]]
+    : String(assetName || "").match(/^[A-Za-z][A-Za-z0-9]*?\d{3}_([A-Za-z][A-Za-z0-9_]*)$/)
+      || (['monster', 'item'].includes(family) && /^[A-Za-z][A-Za-z0-9_]*$/.test(assetName) ? [assetName, assetName] : null);
   const rule = familyRules[family as "monster" | "npc" | "weapon"];
   if (!rule || !parsed) return original;
   const role = classifyFamilyPackageFile(family, filePath).role;
@@ -358,13 +437,19 @@ export function previewFamilyFileName(family: string, assetName: string, filePat
   if (!prefix) return original;
   const ext = original.match(/\.[^.]+$/)?.[0] || "";
   const rawStem = modelAliases[filePath] || original.slice(0, original.length - ext.length);
+  if (family === 'item' && gameplayCategoryFromName(assetName)) return (gameplayFileStem(assetName, role, rawStem, [monsterName]) || rawStem) + ext;
   const stem = family === "monster" ? normalizeMonsterSourceStem(rawStem) : rawStem;
   const map = role === "texture" ? getFamilyTextureMapCode(stem) : "";
   if (role === "texture" && !map) return original;
-  const variant = family === "monster" ? (stem.match(/_(\d{2})(?:_(?:ORM|D|N|A|Physics))?$/i)?.[1] || "") : "";
-  const subject = family === "monster" && monsterName ? monsterName : rule.assetNameSubject === "package" || (family === "npc" && role === "staticMesh") ? assetName : parsed[1];
-  const monsterIdentity = family === "monster" ? stem.match(MONSTER_FILE_IDENTITY) : null;
-  const targetForm = family === 'monster' && monsterName && assetName.startsWith(`SK_${monsterName}`) ? assetName.slice(`SK_${monsterName}`.length) : null;
+  const numberedFamily = family === 'monster' || Boolean(npcIdentity);
+  const variant = numberedFamily ? (stem.match(/_(\d{2})(?:_(?:ORM|D|N|A|Physics))?$/i)?.[1] || "") : "";
+  const subject = family === "monster" && monsterName ? monsterName : npcIdentity ? npcIdentity[1]
+    : rule.assetNameSubject === "package" || (family === "npc" && role === "staticMesh") ? assetName : parsed[1];
+  const ownedWeapon = numberedFamily && /^(?:SM|SK|SKEL|MI|T)_WP_/i.test(stem) ? ownedWeaponIdentity(stem, subject) : null;
+  if (ownedWeapon) return `${prefix}_WP_${subject}_${role === 'texture' ? ownedWeapon.suffix.replace(CHARACTER_MAP_SUFFIX, '') + '_' + map : ownedWeapon.suffix}${ext}`;
+  const monsterIdentity = numberedFamily ? stem.match(MONSTER_FILE_IDENTITY) : null;
+  const targetForm = family === 'monster' && monsterName && assetName.startsWith(`SK_${monsterName}`) ? assetName.slice(`SK_${monsterName}`.length)
+    : npcIdentity ? `_${npcIdentity[2]}` : null;
   if (family === "monster" && !monsterIdentity && /_WP_/i.test(stem)) {
     return `${prefix}_${subject}${targetForm || ''}${stem.slice(stem.toUpperCase().indexOf("_WP_"))}${ext}`;
   }
@@ -372,12 +457,26 @@ export function previewFamilyFileName(family: string, assetName: string, filePat
     const base = `${prefix}_${subject}${targetForm !== null ? targetForm : `_${monsterIdentity[2]}`}${monsterIdentity[3] ? `_${monsterIdentity[3]}` : ""}`;
     return `${role === "texture" ? base.replace(CHARACTER_MAP_SUFFIX, "") + "_" + map : base}${ext}`;
   }
-  const suffix = family === 'weapon' ? weaponFileSuffix(stem, role) : '';
+  if (npcIdentity && targetForm !== null) {
+    let raw = stem.replace(/^(?:SKEL|SK|SM|MI|T|ABP|BP)_/i, '');
+    if (role === 'texture') raw = raw.replace(CHARACTER_MAP_SUFFIX, '');
+    if (role === 'physicsAsset') raw = raw.replace(/_Physics$/i, '');
+    let suffix = '';
+    if (raw.toLowerCase().startsWith(subject.toLowerCase() + '_')) suffix = raw.slice(subject.length);
+    else {
+      const escaped = subject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      suffix = raw.match(new RegExp(`^[A-Za-z][A-Za-z0-9]*?\\d{3}_${escaped}(.*)$`, 'i'))?.[1] || '';
+    }
+    const base = `${prefix}_${subject}${targetForm}${suffix}`;
+    return `${role === 'physicsAsset' ? base + '_Physics' : role === 'texture' ? base + '_' + map : base}${ext}`;
+  }
+  const suffix = family === 'weapon' ? weaponFileSuffix(stem, role, subject) : '';
   const expected = `${prefix}_${subject}${suffix}${targetForm !== null ? targetForm : variant ? `_${variant}` : ""}${role === "physicsAsset" ? "_Physics" : ""}${map ? `_${map}` : ""}`;
   const valid = stem.toLowerCase() === expected.toLowerCase()
     || (role === "material" && stem.toLowerCase().startsWith(`${expected.toLowerCase()}_`))
     || (role === "texture" && stem.toLowerCase().startsWith(`${expected.replace(/_(ORM|D|N|A)$/i, "").toLowerCase()}_`) && /_(ORM|D|N|A)$/i.test(stem))
-    || (family === "npc" && ["skeletalMesh", "staticMesh"].includes(role) && stem.toLowerCase() === `${prefix}_${assetName}`.toLowerCase());
+    || (family === "npc" && !npcIdentity && ["skeletalMesh", "staticMesh"].includes(role) && stem.toLowerCase() === `${prefix}_${assetName}`.toLowerCase());
+  if (family === 'weapon') return `${weaponPackageOutput(weaponSideOutput(expected), subject)}${ext}`;
   return valid && stem === rawStem ? original : `${expected}${ext}`;
 }
 
@@ -449,6 +548,8 @@ export function getMonsterUnassignedResourceTokens(files: string[]) {
 
 export function getCharacterDestinationRelativePath(assetType: string, category: string) {
   const root = characterDefaultRelativeDir[assetType] || "Character";
+  if (assetType === 'item') category = normalizeGameplayCategory(category);
+  if (assetType === 'item' && gameplayCategories.includes(category)) return `${root}\\${category.replaceAll('/', '\\')}`;
   const safeCategory = String(category || "Other").trim().replace(/[<>:"/\\|?*]+/g, "_");
   return `${root}\\${safeCategory || "Other"}`;
 }

@@ -111,6 +111,12 @@ class AssetHiveTCPClient extends EventEmitter {
   }
 
   handleMessage(message) {
+    if (message.type === 'busy' && !this.editorInfo) {
+      this.diagnostic = { state: 'editor-busy', port: this.port };
+      clearTimeout(this.handshakeTimer);
+      this.client?.destroy();
+      return;
+    }
     if (message.type === "hello") {
       if (message.protocolVersion !== 2 || typeof message.sessionId !== "string" || !message.sessionId
         || typeof message.projectPath !== "string" || !message.projectPath) {

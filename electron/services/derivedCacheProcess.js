@@ -2,9 +2,11 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 const { createHash, randomUUID } = require("node:crypto");
+const { Buffer } = require("node:buffer");
 const { gzip, gunzip } = require("node:zlib");
 const { promisify } = require("node:util");
 const { toAssetListRecord } = require("./assetListRecord");
+const { isAnimationLibraryPath } = require("./customAssetLayout");
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -236,6 +238,53 @@ async function writeThumbnail({ sharedDir, localFile, key }) {
   return true;
 }
 
+function animationPreviewFile(directory, key) {
+  if (!/^[a-f0-9]{64}$/.test(key)) throw new Error("Invalid animation preview key");
+  return path.join(directory, "AnimationPreviews", key.slice(0, 2), `${key}.webm`);
+}
+
+function isAnimationPreviewVideo(bytes) {
+  return Buffer.isBuffer(bytes) && bytes.length >= 32 && bytes.length <= 2 * 1024 * 1024
+    && bytes.readUInt32BE(0) === 0x1a45dfa3;
+}
+
+async function animationPreviewBytes(file) {
+  const stat = await fs.stat(file).catch(() => null);
+  if (!stat?.isFile() || stat.size < 32 || stat.size > 2 * 1024 * 1024) return null;
+  const bytes = await fs.readFile(file).catch(() => null);
+  return isAnimationPreviewVideo(bytes) ? bytes : null;
+}
+
+async function probeAnimationPreview({ sourcePath, root, localDir }) {
+  const relative = relativeToRoot(root, sourcePath);
+  if (!relative || !isAnimationLibraryPath(relative) || !/\.fbx$/i.test(relative)) return null;
+  const stat = await fs.stat(sourcePath).catch(() => null);
+  if (!stat?.isFile()) return null;
+  const key = createHash("sha256").update(JSON.stringify([
+    "animation-webm-v1", relative.toLowerCase(), stat.size, stat.mtimeMs
+  ])).digest("hex");
+  const localFile = animationPreviewFile(localDir, key);
+  return { key, path: await animationPreviewBytes(localFile) ? localFile : "" };
+}
+
+async function readAnimationPreview({ sharedDir, localDir, key }) {
+  const bytes = await animationPreviewBytes(animationPreviewFile(sharedDir, key));
+  if (!bytes) return null;
+  return saveAnimationPreview({ directory: localDir, key, bytes });
+}
+
+async function saveAnimationPreview({ directory, key, bytes }) {
+  if (!isAnimationPreviewVideo(bytes)) return null;
+  const output = animationPreviewFile(directory, key);
+  if (!await animationPreviewBytes(output)) await atomicWrite(output, bytes);
+  return output;
+}
+
+async function publishAnimationPreview({ sharedDir, localFile, key }) {
+  const bytes = await animationPreviewBytes(localFile);
+  return bytes ? saveAnimationPreview({ directory: sharedDir, key, bytes }) : null;
+}
+
 async function warmThumbnail({ sourcePath, root, localDir, sharedDir, verify = false }) {
   if (relativeToRoot(root, sourcePath) === null) return { status: "skipped", reason: "outside-library" };
   if (/\.(webm|mp4|gif)$/i.test(sourcePath)) return { status: "skipped", reason: "motion-preview" };
@@ -260,7 +309,8 @@ async function warmThumbnail({ sourcePath, root, localDir, sharedDir, verify = f
   }
 }
 
-const operations = { readSnapshot, writeSnapshot, readScanMemoRecords, probeThumbnail, renderThumbnail, readThumbnail, writeThumbnail, warmThumbnail };
+const operations = { readSnapshot, writeSnapshot, readScanMemoRecords, probeThumbnail, renderThumbnail, readThumbnail, writeThumbnail, warmThumbnail,
+  probeAnimationPreview, readAnimationPreview, saveAnimationPreview, publishAnimationPreview };
 if (require.main === module) {
   process.on("message", async ({ id, operation, args }) => {
     try {

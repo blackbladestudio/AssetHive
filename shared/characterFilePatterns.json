@@ -1,11 +1,11 @@
 {
-  "monsterIdentity": "^(?:SK|SM|SKEL|MI|T|ABP|BP)_(.+?)_(\\d{2})(?:_(.*))?$",
+  "monsterIdentity": "^(?:SK|SM|SKEL|MI|T|ABP|BP)_(?!WP_)(.+?)_(\\d{2})(?:_(.*))?$",
   "meshExtensions": ["fbx", "obj", "abc", "gltf", "glb", "uasset"],
-  "textureSuffix": "_(ORM|D|N|A|Emissive|Emission|E|OpacityMask|Opacity|Root|ID|Height|Tangent|Depth|Flow|Alpha)$",
+  "textureSuffix": "_(ORM|D|N|A|O|SS|SSC|Dis|Emissive|Emission|E|OpacityMask|Opacity|Root|ID|Height|Tangent|Depth|Flow|Alpha)$",
   "textureMapCodes": {
     "orm": "ORM", "d": "D", "n": "N", "a": "A",
     "root": "Root", "id": "ID", "height": "Height", "depth": "Height", "tangent": "Tangent", "flow": "Tangent", "alpha": "A",
-    "opacitymask": "A", "opacity": "A",
+    "opacitymask": "A", "opacity": "A", "o": "A", "ss": "SS", "ssc": "SSC", "dis": "Dis",
     "emissive": "Emissive", "emission": "Emissive", "e": "Emissive"
   }
 }

@@ -1,20 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AppSettings } from '../types';
-import type { SuitExportOptions, SuitExportResult } from './suitExportTypes';
+import type { SkeletonSelection, SuitExportOptions, SuitExportResult } from './suitExportTypes';
 import { DialogCloseButton } from './DialogCloseButton';
 import { characterSendSummary } from '../../shared/characterSendSummary.mjs';
+import { characterExportScope } from '../../shared/characterExportScope.mjs';
 
-export function SuitExportDialog({ assetIds, weapon = false, monster = false, heroPart = '', settings, hidden, onHide, onShow, onClose, onApplied, onProjectSettings, t }: {
+export function SuitExportDialog({ assetIds, weapon = false, monster = false, npc = false, item = false, heroPart = '', settings, hidden, onHide, onShow, onClose, onApplied, onProjectSettings, t }: {
   weapon?: boolean;
   monster?: boolean;
+  npc?: boolean;
+  item?: boolean;
   heroPart?: string;
   assetIds: string[]; settings: AppSettings; onClose: () => void; onApplied: () => Promise<void>;
   hidden: boolean; onHide: () => void; onShow: () => void;
   onProjectSettings: () => void;
   t: (zh: string, en: string) => string;
 }) {
-  const [options, setOptions] = useState<SuitExportOptions>({ includeStaticMeshes: false });
-  const subject = monster ? t('怪物', 'Monster') : weapon ? t('武器', 'Weapon') : heroPart === 'Hair' ? t('头发', 'Hair') : heroPart === 'Face' ? t('脸部', 'Face') : t('套装', 'Suit');
+  const [options, setOptions] = useState<SuitExportOptions>({ includeStaticMeshes: false, inspectAllMeshes: true });
+  const subject = item ? t('玩法物件', 'Gameplay Item') : npc ? 'NPC' : monster ? t('怪物', 'Monster') : weapon ? t('武器', 'Weapon') : heroPart === 'Hair' ? t('头发', 'Hair') : heroPart === 'Face' ? t('脸部', 'Face') : t('套装', 'Suit');
   const [result, setResult] = useState<SuitExportResult | null>(null);
   const [decisions, setDecisions] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -30,9 +33,13 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, he
     if (busy || (phase === 'apply' && !result)) return;
     setBusy(true); setPhase(phase); setError(''); setProgress({ percent: 0, message: '' });
     try {
+      const selectedKeys = new Set(characterExportScope(result?.entries || [], Boolean(exportOptions.includeStaticMeshes)).map(row => row.key));
+      const excluded = (result?.entries || []).filter(row => !selectedKeys.has(row.key));
       const reply = await window.arkhive.exportToUnreal({ assetIds, options: { ...settings, suitPhase: phase,
         suitOptions: exportOptions, suitManifestHash: result?.manifestHash, suitInspectToken: result?.inspectToken,
-        suitDecisions: { ...decisions, ...Object.fromEntries((result?.entries || []).filter(row => row.status === 'missing').map(row => [row.key, 'restore'])) } } });
+        suitDecisions: { ...decisions,
+          ...Object.fromEntries((result?.entries || []).filter(row => row.status === 'missing').map(row => [row.key, 'restore'])),
+          ...Object.fromEntries(excluded.map(row => [row.key, 'skip'])) } } });
       if (!reply.ok || !reply.suitResult) throw new Error(reply.message);
       setResult(reply.suitResult);
       setHasSkeletalMesh(reply.suitResult.entries.some(row => row.kind === 'skeletalMesh' && row.action !== 'retained'));
@@ -48,22 +55,36 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, he
     // Each dialog instance owns one fixed selection; later inspections are explicit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  useEffect(() => window.arkhive.onExportProgress(setProgress), []);
+  useEffect(() => window.arkhive.onExportProgress(next => setProgress(previous => ({
+    message: next.message,
+    percent: Math.max(previous.percent, Math.min(100, Math.round(Number(next.percent) || 0)))
+  }))), []);
   const actionLabel: Record<string, string> = {
     added: t('新增', 'Add'), updated: t('更新', 'Update'), renamed: t('改名', 'Rename'),
     updatedRenamed: t('更新并改名', 'Update & rename'), unchanged: t('无变化', 'Unchanged'),
-    restore: t('新增', 'Add'), adopt: t('同名待确认', 'Confirm existing asset'), retained: t('保持不变', 'Keep existing'),
+    restore: t('新增', 'Add'), adopt: t('UE 已有同名资源', 'Existing UE resource'), retained: t('保持不变', 'Keep existing'),
     repair: t('更新材质关联', 'Update material references'), relinked: t('自动重新关联', 'Reassociate automatically')
   };
   const done = result?.phase === 'apply';
-  const needsAttention = Boolean(error || result?.entries.some(row => ['failed', 'blocked', 'conflict', 'skipped'].includes(row.status)));
-  const rows = result?.entries.filter(row => row.action !== 'retained') || [];
+  const rows = characterExportScope(result?.entries || [], Boolean(options.includeStaticMeshes)).filter(row => row.action !== 'retained');
+  const adoptRows = rows.filter(row => row.status === 'conflict' && row.action === 'adopt');
+  const needsAttention = Boolean(error || rows.some(row => ['failed', 'blocked', 'conflict', 'skipped'].includes(row.status)));
   const sendBlocked = Boolean(error || rows.some(row => ['failed', 'blocked'].includes(row.status) || row.status === 'conflict' && !decisions[row.key]));
   const unchanged = rows.filter(row => row.action === 'unchanged').length;
   const added = rows.filter(row => ['added', 'restore'].includes(row.action)).length;
   const updated = rows.filter(row => ['updated', 'updatedRenamed', 'renamed', 'repair', 'relinked'].includes(row.action)).length;
   const content = characterSendSummary(rows, decisions, done);
-  const materialGroups = result?.monsterMaterialGroups || [];
+  const visibleKeys = new Set(rows.map(row => row.key));
+  const materialGroups = (result?.monsterMaterialGroups || []).filter(group => visibleKeys.has(group.key));
+  const materialRequests = (result?.materialRequests || []).filter(request => visibleKeys.has(request.key.split('|')[0]));
+  const skeletonRows = rows.filter(row => row.kind === 'skeletalMesh');
+  const changeSkeleton = (key: string, selection: SkeletonSelection) => {
+    setMappingChanged(true);
+    setOptions(current => ({ ...current, skeletonOverrides: {
+      ...Object.fromEntries(skeletonRows.map(row => [row.key, row.skeletonSelection || { mode: 'auto' }])),
+      ...current.skeletonOverrides, [key]: selection
+    } }));
+  };
   const uncertainMaterials = materialGroups.filter(group => !group.type);
   const knownMaterials = materialGroups.filter(group => group.type);
   const renderMaterialType = (group: typeof materialGroups[number]) => <label key={group.key}>
@@ -90,7 +111,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, he
   if (hidden) return <aside className="suit-export-background" aria-label={t(`${subject} UE 后台任务`, `${subject} UE background task`)}>
     <div role="status"><strong>{taskStatus}</strong>
       <span className="suit-export-background-message">{error || (busy ? progress.message : t('点击查看清单及结果', 'View the checklist and results'))}</span>
-      {busy && <div className="suit-export-background-progress"><progress max={100} value={progress.percent || undefined} /><span>{progress.percent > 0 ? `${progress.percent}%` : '…'}</span></div>}
+      {busy && <div className="suit-export-background-progress"><progress max={100} value={progress.percent} /><span>{progress.percent}%</span></div>}
     </div>
     <button className="browse-btn" onClick={onShow}>{t('查看任务', 'View task')}</button>
   </aside>;
@@ -101,25 +122,44 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, he
       </header>
       <div className="suit-export-body">
       <p>{t('只发送新增或有变化的资源，其他资源保持不变。', 'Send new or changed resources only. Everything else stays unchanged.')}</p>
+      {item && <p className="settings-field-hint">{t('玩法物件使用项目指定母材质，自动连接颜色、法线、ORM及发光贴图，并启用所需的虚拟纹理。透明等未支持通道会明确提示。', 'Items use the project master with color, normal, ORM and emissive textures and required virtual texturing. Unsupported channels such as opacity are reported explicitly.')}</p>}
       <div className="suit-export-project">
         <span>{t('目标工程', 'Project')}</span>
         <code>{result?.projectPath || settings.unrealProjectPath || t('自动识别当前连接的 UE 工程', 'Use the currently connected UE project')}</code>
         <button type="button" className="character-name-edit" disabled={busy} onClick={onProjectSettings}>{t('设置目标工程', 'Set project')}</button>
       </div>
-      <label className="suit-export-static-option"><input type="checkbox" disabled={busy} checked={Boolean(options.includeStaticMeshes)} onChange={event => {
-        const next = { ...options, includeStaticMeshes: event.target.checked }; changeOptions(next); void send('inspect', next);
+      <label className="suit-export-static-option"><input type="checkbox" disabled={busy && phase === 'apply' || done} checked={Boolean(options.includeStaticMeshes)} onChange={event => {
+        const checked = event.target.checked;
+        setOptions(current => ({ ...current, includeStaticMeshes: checked }));
       }} /><span>{t('同时发送静态模型', 'Also send static meshes')}</span></label>
       {hasSkeletalMesh === false && <p className="settings-field-hint">{options.includeStaticMeshes
         ? t('尚未上传骨骼模型。本次包含静态模型，绑定完成后可再次发送。', 'No rigged meshes yet. This send includes static meshes; send again after rigging.')
         : t('尚未上传骨骼模型，本次仅发送贴图和材质。上传绑定文件后可再次发送。', 'No skeletal meshes yet. This send includes textures and materials only. Upload rigged meshes and send again later.')}</p>}
+      {skeletonRows.length > 0 && <details className="suit-export-settings">
+        <summary>{t('骨架：按模型设置 · 更改', 'Skeleton settings · Change')}</summary>
+        <p className="settings-field-hint">{t('默认沿用当前规则。绑定可指定已有骨架或创建新骨架，发送后记住选择。更换骨架可能影响动画关联，发送前会检查兼容性。', 'Defaults follow existing rules. Choose an existing or new Skeleton; choices are saved on send. Changing a Skeleton may affect animations; compatibility is checked before sending.')}</p>
+        {skeletonRows.map(row => {
+          const selection = options.skeletonOverrides?.[row.key] || options.skeletonSelection || row.skeletonSelection || { mode: 'auto' };
+          return <div className="suit-export-mappings" key={row.key}>
+            <label>{row.name}<select disabled={busy || done} value={selection.mode}
+              onChange={event => changeSkeleton(row.key, { mode: event.target.value as SkeletonSelection['mode'] })}>
+              <option value="auto">{t('自动（按当前规则）', 'Automatic (current rules)')}</option>
+              <option value="existing">{t('使用已有骨架', 'Use existing Skeleton')}</option>
+              <option value="create">{t('从此模型创建新骨架', 'Create Skeleton from this model')}</option>
+            </select></label>
+            {selection.mode !== 'auto' && <input aria-label={t(`${row.name} 骨架路径`, `${row.name} Skeleton path`)}
+              disabled={busy || done} placeholder={selection.mode === 'create' ? t('可选：新骨架路径；默认放在模型旁边', 'Optional new Skeleton path; defaults beside the model') : '/Game/…/SKEL_…'} value={selection.path || ''}
+              onChange={event => changeSkeleton(row.key, { mode: selection.mode, path: event.target.value })} />}
+            {selection.mode === 'auto' && row.skeletonPath && <small>{row.skeletonPath}</small>}
+          </div>;
+        })}
+        {mappingChanged && <small>{t('修改后点击“重新检查”。', 'Recheck after changing settings.')}</small>}
+      </details>}
       <details className="suit-export-settings"><summary>{t('导入设置', 'Import settings')}</summary>
       <fieldset disabled={busy} className="suit-export-options">
         <label>{t('法线格式', 'Normal format')}<select value={options.normalFormat || ''} onChange={event => changeOptions({ ...options, normalFormat: event.target.value })}>
           <option value="">{t('使用入库记录；未知时提示', 'Use library record; flag unknown')}</option><option value="dx">DirectX</option><option value="gl">OpenGL</option>
         </select></label>
-        {hasSkeletalMesh && !weapon && !monster && <label>{t('关联 UE 已有骨架', 'Use an existing UE Skeleton')}
-          <input value={options.skeletonPath || ''} placeholder={t('自动使用工程共享骨架 SKEL_Character', 'Use project Skeleton SKEL_Character automatically')} onChange={event => changeOptions({ ...options, skeletonPath: event.target.value })} />
-          <small>{t('默认关联 Common/SKEL_Character，并检查骨骼层级。只有使用其他骨架时才需要填写；不会创建或修改骨架。', 'Uses Common/SKEL_Character and checks the bone hierarchy. Enter a path only for a different Skeleton; no Skeleton is created or modified.')}</small></label>}
       </fieldset>
       </details>
       {uncertainMaterials.length > 0 && <div className="suit-export-mappings">
@@ -133,9 +173,9 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, he
         <div className="suit-export-mappings">{knownMaterials.map(renderMaterialType)}</div>
         {mappingChanged && <small>{t('调整后点击“重新检查”。', 'Recheck after changing a type.')}</small>}
       </details>}
-      {!!result?.materialRequests?.length && <div className="suit-export-mappings">
+      {!!materialRequests.length && <div className="suit-export-mappings">
         <h4>{t('请指定未匹配的材质槽', 'Resolve unmatched material slots')}</h4>
-        {result.materialRequests.map(request => <label key={request.key}>{request.meshName} · {request.slot}
+        {materialRequests.map(request => <label key={request.key}>{request.meshName} · {request.slot}
           <input list={`suit-groups-${request.key}`} placeholder={t('选择材质组或输入已有 UE 材质路径', 'Select group or enter an existing UE material path')}
             disabled={busy}
             value={options.materialMappings?.[request.key] || ''}
@@ -147,6 +187,13 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, he
       {result && <div className="suit-export-summary"><span>{t('新增', 'New')} {added}</span><span>{t('更新', 'Updated')} {updated}</span><span>{t('无变化', 'Unchanged')} {unchanged}</span>
         {unchanged > 0 && <button type="button" className="suit-export-text-button" onClick={() => setShowUnchanged(value => !value)}>{showUnchanged ? t('收起无变化项', 'Hide unchanged') : t('查看无变化项', 'Show unchanged')}</button>}
       </div>}
+      {!done && adoptRows.length > 0 && <section className="suit-export-adoption">
+        <strong>{t('UE 目标位置已有同名资源', 'Resources already exist in the UE destination')} · {adoptRows.length}</strong>
+        <p>{t('这些资源尚未与本条 AssetHive 记录关联。新入库的资产也可能对应 UE 里已有的文件。关联后会更新现有资源，保留 UE 对象引用。', 'These resources are not linked to this library record. A new library asset can have existing UE files. Association updates those resources while preserving UE object references.')}</p>
+        <button className="browse-btn" disabled={busy} onClick={() => setDecisions(current => ({ ...current, ...Object.fromEntries(adoptRows.map(row => [row.key, 'adopt'])) }))}>{t('全部设为关联并更新', 'Associate and update all')}</button>
+        <button className="browse-btn" disabled={busy} onClick={() => setDecisions(current => ({ ...current, ...Object.fromEntries(adoptRows.map(row => [row.key, 'skip'])) }))}>{t('全部跳过', 'Skip all')}</button>
+        <small>{t('可在下方逐项调整，点击“确认发送”后才会执行。', 'Adjust individual choices below. Nothing changes until you confirm the send.')}</small>
+      </section>}
       {result && <section className="suit-send-content" aria-label={t('本次发送内容', 'Contents of this send')}>
         <h4>{done ? t('本次已发送', 'Sent this time') : t('本次发送内容', 'Sending this time')}</h4>
         <dl>
@@ -172,7 +219,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, he
       </div>
       <footer className="suit-export-footer">
       {busy && <div role="status"><p>{progress.message || (phase === 'apply' ? t('正在发送资源…', 'Sending resources…') : t('正在检查资源…', 'Checking resources…'))}</p>
-        <progress max={100} value={progress.percent || undefined} />{progress.percent > 0 && <span> {progress.percent}%</span>}</div>}
+        <progress max={100} value={progress.percent} /><span> {progress.percent}%</span></div>}
       <div className="confirm-actions">
         <button className="browse-btn" onClick={onHide}>{busy ? t('后台运行', 'Run in background') : t('收起窗口', 'Minimize')}</button>
         <button className="browse-btn" disabled={busy} onClick={() => void send('inspect')}>{t('重新检查', 'Recheck')}</button>

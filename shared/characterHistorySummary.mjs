@@ -12,7 +12,10 @@ export function characterImportSourceFolders(meta = {}) {
     const folder = normalized.slice(0, normalized.lastIndexOf('/'));
     if (folder) folders.set(folder.toLowerCase(), folder.replace(/\//g, '\\'));
   }
-  return [...folders.values()];
+  // Display a source package once, while per-file history retains the exact
+  // texture/model subfolders. Never collapse different sibling packages.
+  return [...folders].filter(([key]) => ![...folders.keys()].some(parent => key !== parent && key.startsWith(parent + '/')))
+    .map(([, folder]) => folder);
 }
 
 export function characterHistorySummary(entry) {

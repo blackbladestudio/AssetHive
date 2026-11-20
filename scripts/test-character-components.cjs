@@ -10,6 +10,65 @@ const { updateCharacterStatus } = require("../electron/services/characterCompone
 const { updateCharacterNames } = require("../electron/services/characterNames");
 const { analyzeCharacterModelTriangles, analyzeCharacterMayaTriangles, summarizeCharacterTriangles } = require("../electron/services/characterModelMetrics");
 
+test('untextured characters keep previews out of scanner, details and UE export, including cached records', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'character-preview-textures-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const model = 'SK_M01_Heavy001_Test_Arm.fbx';
+  await fs.writeFile(path.join(dir, model), 'model');
+  await fs.mkdir(path.join(dir, 'Preview'));
+  const previews = ['asset_preview.png', 'M01_Heavy001_Test_Preview_Front.png', 'skeletalMesh_arm_back.png'];
+  for (const file of previews) await sharp({ create: { width: 2, height: 2, channels: 3, background: '#fff' } }).png().toFile(path.join(dir, 'Preview', file));
+  const texture = 'T_M01_Heavy001_Test_Preview_D.png';
+  await fs.copyFile(path.join(dir, 'Preview', previews[0]), path.join(dir, texture));
+  const meta = { id: 'no-textures', name: 'M01_Heavy001_Test', assetType: 'suit', type: 'suit', topCategory: 'character',
+    character: { gender: 'Male', bodyCode: '01', suitClass: 'Heavy', suitName: 'Test' },
+    modelFiles: [path.join(dir, 'removed-staging-folder', model)], textureFiles: [], textureEntries: [], previews: { images: [{ uri: 'Preview/' + previews[0] }] },
+    characterManifest: { files: [{ role: 'skeletalMesh', storedPath: model, normalizedName: model }] } };
+  const metaPath = path.join(dir, 'asset_info.json');
+  const { getAssetDetailsByMetaPath } = require('../electron/services/assetScanner');
+  for (const family of ['suit', 'monster', 'npc', 'weapon', 'item']) {
+    await fs.writeFile(metaPath, JSON.stringify({ ...meta, type: family, assetType: family }));
+    const record = await getAssetDetailsByMetaPath(metaPath);
+    assert.ok(record, family);
+    assert.deepEqual(record.modelFiles.map(file => path.resolve(file)), [path.join(dir, model)], family + ' must use the stored manifest instead of stale staging paths');
+    assert.deepEqual(record.textureFiles, [], family + ' must respect an empty manifest');
+    assert.ok(record.previewImage, 'preview remains usable');
+  }
+  const ts = require('typescript');
+  const source = ts.createSourceFile('App.tsx', await fs.readFile(path.join(__dirname, '../src/ui/App.tsx'), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const declaration = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'getCharacterAssetInfo');
+  const code = ts.transpileModule(declaration.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const getInfo = new Function('isCharacterAssetType', 'activeCharacterFiles', 'isAllowedCharacterTextureFile', `${code}; return getCharacterAssetInfo;`)(
+    () => true, require('../shared/characterComponents.mjs').activeCharacterFiles, require('../shared/characterFilePolicy.mjs').isAllowedCharacterTextureFile);
+  const asset = { id: meta.id, name: meta.name, path: dir, assetType: 'suit', meta, textureFiles: previews };
+  assert.deepEqual(getInfo(asset).textureGroups, [], 'stale cached preview paths cannot reappear in details');
+  const { buildSuitExport } = require('../electron/services/characterSuitExport');
+  const plan = await buildSuitExport(asset, {}, async () => ({ meshKind: 'skeletalMesh', hasSkin: true, skinnedMeshCount: 1, materialNames: [], bones: [{ name: 'root', parent: '' }] }));
+  assert.equal(plan.entries.filter(entry => entry.kind === 'texture').length, 0);
+  meta.characterManifest.files.push({ role: 'texture', storedPath: texture, normalizedName: texture });
+  await fs.writeFile(metaPath, JSON.stringify(meta));
+  const textured = await getAssetDetailsByMetaPath(metaPath);
+  assert.equal(textured.textureFiles.length, 1, 'real texture with Preview in its name stays available');
+  assert.ok(textured.textureFiles[0].endsWith(texture));
+});
+
+test('complete legacy LOD previews remain current but changed base meshes or textures invalidate them', () => {
+  const { needsCharacterMeshPreview, characterMeshPreviewRevision } = require('../shared/characterComponents.mjs');
+  const files = [
+    { role:'staticMesh', normalizedName:'SM_M01_Heavy007_Test_Arm.fbx', sha256:'base' },
+    { role:'staticMesh', normalizedName:'SM_M01_Heavy007_Test_Arm_LOD1.fbx', sha256:'lod1' },
+    { role:'texture', normalizedName:'T_M01_Heavy007_Test_Arm_D.tga', sha256:'texture' }
+  ];
+  const part = {files, meshKinds:{staticMesh:true}, meshPreviews:{staticMesh:{previewUri:'front.png',
+    previewImages:['front','left','right','back'].map(view=>({uri:view+'.png',tags:['view:'+view]})),
+    previewRevision:JSON.stringify(files.map(file=>[file.role,file.sha256]).sort())}}};
+  assert.equal(needsCharacterMeshPreview(part, 'staticMesh'), false);
+  files[0].sha256='updated'; assert.equal(needsCharacterMeshPreview(part, 'staticMesh'), true);
+  files[0].sha256='base'; files[2].sha256='updated'; assert.equal(needsCharacterMeshPreview(part, 'staticMesh'), true);
+  part.meshPreviews.staticMesh.previewRevision=characterMeshPreviewRevision(files,'staticMesh');
+  files[1].sha256='new-lod1'; assert.equal(needsCharacterMeshPreview(part, 'staticMesh'), false);
+});
+
 test('suit preview status follows automatic view work and preserves manual directions', () => {
   const { characterSuitPendingPreviewViews } = require('../shared/characterComponents.mjs');
   const asset = { assetType: 'suit', previewImage: 'cover.png', meta: {
@@ -107,6 +166,38 @@ test("character model metrics read triangulated face counts from Maya ASCII", as
   assert.equal(await analyzeCharacterMayaTriangles(maya), 3);
 });
 
+test('UE rename reminders require a UE path and an English-name change', async t => {
+  const f = await fixture(t, true);
+  const rename = async (zh, en) => {
+    const current = await f.reload();
+    await updateCharacterNames({ ...f, displayNameZh: zh, displayNameEn: en, nameConfirmed: true,
+      expectedName: current.meta.character.displayNameZh || '', expectedEnglishName: current.meta.character.displayNameEn });
+    return (await f.reload()).meta;
+  };
+  let meta = await rename('南土铁卫', 'FirstName');
+  assert.equal(meta.character.ueNameSyncPending, undefined);
+  meta = await rename('南土铁卫', 'SecondName');
+  assert.equal(meta.character.ueNameSyncPending, undefined);
+  // Old versions could set a reminder before the first send. Clear it on save.
+  meta.character.ueNameSyncPending = 'legacy-false-reminder';
+  await fs.writeFile(f.asset.metaPath, JSON.stringify(meta));
+  meta = await rename('南土铁卫修订', 'SecondName');
+  assert.equal(meta.character.ueNameSyncPending, undefined);
+  meta.enginePath = '/Game/Characters/Hero/ExistingOutfit';
+  await fs.writeFile(f.asset.metaPath, JSON.stringify(meta));
+  meta = await rename('南土铁卫', 'SecondName');
+  assert.equal(meta.character.ueNameSyncPending, undefined, 'Chinese-only edits do not require UE');
+  meta = await rename('南土铁卫', 'ThirdName');
+  const pending = meta.character.ueNameSyncPending;
+  assert.ok(pending);
+  meta = await rename('南土铁卫修订', 'ThirdName');
+  assert.equal(meta.character.ueNameSyncPending, pending, 'Chinese edits preserve an earlier unsynced English rename');
+  assert.equal(meta.enginePath, '/Game/Characters/Hero/ExistingOutfit');
+  const { hasCharacterEnginePath } = require('../shared/characterNames.mjs');
+  assert.equal(hasCharacterEnginePath({ characterUnrealExports: { project: { targetRoot: '/Game/Planned', entries: {} } } }), false);
+  assert.equal(hasCharacterEnginePath({ characterUnrealExports: { project: { entries: { mesh: { lastSuccessPath: '/Game/Existing/Mesh' } } } } }), true);
+});
+
 test("confirmed English name renames managed files and preserves Chinese and source identity", async t => {
   const f = await fixture(t, true);
   await require("../electron/services/assetMetadata").updateAssetMetadataFile(f.asset.metaPath, meta => ({ ...meta, modelFiles: f.asset.modelFiles }));
@@ -127,9 +218,9 @@ test("confirmed English name renames managed files and preserves Chinese and sou
   const scanned = await require("../electron/services/assetScanner").getAssetDetailsByMetaPath(f.asset.metaPath);
   assert.equal(scanned.meta.character.displayNameZh, "蓑衣女");
   assert.equal(scanned.meta.character.displayNameEn, "OfficialOutfit");
-  assert.ok(scanned.meta.character.ueNameSyncPending, 'detail scan must retain the UE rename reminder');
+  assert.equal(scanned.meta.character.ueNameSyncPending, undefined, 'never-sent assets must not show a UE rename reminder');
   assert.equal(require("../electron/services/assetListRecord").toAssetListRecord(scanned).meta.character.ueNameSyncPending, scanned.meta.character.ueNameSyncPending);
-  assert.equal(scanned.meta.characterDisplaySchema, 1);
+  assert.equal(scanned.meta.characterDisplaySchema, 2);
   assert.equal(require("../electron/services/assetListRecord").toAssetListRecord(scanned).meta.character.displayNameZh, "蓑衣女");
   assert.equal(updated.meta.characterManifest.fields.displayNameEn, "OfficialOutfit");
   assert.equal(updated.meta.characterManifest.files.every(file => file.normalizedName.includes("M01_Heavy001_OfficialOutfit")), true);
@@ -384,7 +475,12 @@ test('rigging downloads copy the current whole suit or selected part without cha
   assert.equal(single.count, 1);
   assert.equal((await fs.readdir(path.join(single.path, 'Models'))).length, 1);
   assert.equal(await fs.stat(path.join(single.path, 'Textures')).catch(() => null), null);
-  const whole = await downloadCharacterRigFiles({ ...f, destination: f.temp });
+  const progress = [];
+  const whole = await downloadCharacterRigFiles({ ...f, destination: f.temp, onProgress: value => progress.push(value) });
+  assert.equal(progress[0], 0);
+  assert.equal(progress.at(-1), 100);
+  assert.equal(progress.filter(value => value > 10 && value < 100).length, 4);
+  assert.deepEqual(progress, [...progress].sort((a, b) => a - b));
   assert.equal(whole.count, 4);
   assert.equal((await fs.readdir(path.join(whole.path, 'Models'))).length, 4);
   assert.notEqual(whole.path, single.path);
@@ -395,6 +491,28 @@ test('rigging downloads copy the current whole suit or selected part without cha
   }
   assert.equal(await fs.readFile(f.asset.metaPath, 'utf8'), before);
   await assert.rejects(downloadCharacterRigFiles({ ...f, destination: f.asset.path }), /资源库以外/);
+});
+
+test('weapon rig download restores package English names for legacy L/R and keeps SM/SK and LOD identity', async t => {
+  const f = await fixture(t);
+  const name = 'PairedSwords001_CanCiJian';
+  const names = ['SM_PairedSwords001_L.fbx', 'SK_PairedSwords001_R.fbx', 'SK_PairedSwords001_R_LOD1.fbx'];
+  const files = names.map(normalizedName => ({ normalizedName, storedPath: 'Mesh/' + normalizedName,
+    role: normalizedName.startsWith('SK_') ? 'skeletalMesh' : 'staticMesh' }));
+  for (const file of files) await fs.writeFile(path.join(f.asset.path, file.storedPath), file.normalizedName);
+  Object.assign(f.asset, { name, assetType: 'weapon' });
+  Object.assign(f.asset.meta, { name, assetType: 'weapon', character: { weaponType: 'PairedSwords' }, characterManifest: { files } });
+  await fs.writeFile(f.asset.metaPath, JSON.stringify(f.asset.meta));
+  const before = await fs.readFile(f.asset.metaPath, 'utf8');
+  const result = await require('../electron/services/characterRigDownload').downloadCharacterRigFiles({ ...f, destination: f.temp });
+  assert.equal(result.count, 3);
+  const expected = names.map(value => value.replace('PairedSwords001', name));
+  assert.deepEqual((await fs.readdir(path.join(result.path, 'Models'))).sort(), expected.sort());
+  for (const file of files) {
+    assert.equal(await fs.readFile(path.join(result.path, 'Models', file.normalizedName.replace('PairedSwords001', name)), 'utf8'), file.normalizedName);
+    assert.equal(await fs.readFile(path.join(f.asset.path, file.storedPath), 'utf8'), file.normalizedName);
+  }
+  assert.equal(await fs.readFile(f.asset.metaPath, 'utf8'), before);
 });
 
 test('SK four-view completion and gallery edits preserve SM and suit images; revisions are independent', async t => {
@@ -1469,4 +1587,93 @@ test('an existing Groom without images can save its first automatic views once',
   assert.equal(updated.meta.previews.images.length,4);
   assert.ok(updated.meta.previewImage);
   await assert.rejects(()=>action({...options,asset:updated}),/过期|变化/);
+});
+
+test('adding and updating one LOD retains the primary and other levels', async t => {
+  const f = await fixture(t, true);
+  const { inspectCharacterUpdateInput } = require('../electron/services/characterPackageUpdates');
+  const part = listCharacterComponents(f.asset).find(p => /_Head$/i.test(p.name));
+  const sourceFolder = await f.makeSource([{ normalizedName: 'working_Head_LOD1.fbx' }]);
+  const inspected = await inspectCharacterUpdateInput({ ...f, sourceFolder });
+  assert.deepEqual(inspected.unmatchedFiles, []);
+  assert.match(inspected.replacements[0].storedPath, /^__new_character_lod__:staticMesh:1:/);
+  const options = { ...f, sourceFolder, replacements: inspected.replacements };
+  const plan = await prepareCharacterPackageUpdate(options);
+  assert.ok(plan.changes.some(row => /_LOD1/.test(row.name) && row.status === 'added'));
+  assert.ok(plan.changes.some(row => /_Head\.fbx/.test(row.name) && row.status === 'retained'));
+  await updateCharacterPackage({ ...options, token: plan.token, confirmWholePackage: true });
+  const updated = await f.reload();
+  const again = await inspectCharacterUpdateInput({ ...f, asset: updated, sourceFolder });
+  assert.deepEqual(again.unmatchedFiles, []);
+  assert.match(again.replacements[0].storedPath, /_LOD1\.fbx$/);
+  const base = part.files.find(file => /_Head\.fbx/.test(file.normalizedName));
+  await assert.rejects(prepareCharacterPackageUpdate({ ...f, asset: updated, sourceFolder, replacements: [{ sourcePath: path.join(sourceFolder,'working_Head_LOD1.fbx'), storedPath: base.storedPath }] }), /跨 LOD/);
+});
+
+test('targeted multi-LOD slots add levels together and retain base meshes, textures and unselected levels', async t => {
+  const f = await fixture(t, true);
+  const { characterLodUpdateTargets } = require('../shared/characterLodUpdateTargets.mjs');
+  const { characterModelUpdateGroups, activeCharacterFiles } = require('../shared/characterComponents.mjs');
+  const originalFiles = activeCharacterFiles(f.asset);
+  const targets = characterLodUpdateTargets(characterModelUpdateGroups(f.asset)).filter(row => /_Head$/.test(row.modelName));
+  assert.deepEqual(targets.map(row => row.lod), [1, 2, 3, 4, 5]);
+  const sourceFolder = await f.makeSource([1,2].map(index=>({normalizedName:`artist_Head_LOD${index}.fbx`})));
+  const replacements = targets.filter(row=>row.lod<=2).map(row=>({storedPath:row.storedPath,sourcePath:path.join(sourceFolder,`artist_Head_LOD${row.lod}.fbx`)}));
+  const options = {...f,sourceFolder,replacements};
+  const plan = await prepareCharacterPackageUpdate(options);
+  assert.equal(plan.changes.filter(row=>row.status==='added').length,2);
+  await updateCharacterPackage({...options,token:plan.token,confirmWholePackage:true});
+  const updated = await f.reload();
+  const newTargets = characterLodUpdateTargets(characterModelUpdateGroups(updated)).filter(row=>/_Head$/.test(row.modelName));
+  assert.deepEqual(newTargets.map(row=>row.isNew),[false,false,true,true,true]);
+  for (const file of originalFiles) {
+    assert(activeCharacterFiles(updated).some(row=>row.storedPath===file.storedPath));
+    assert.equal(await fs.readFile(path.join(f.asset.path,file.storedPath),'utf8'),file.normalizedName);
+  }
+  const replacementSource = await f.makeSource([{normalizedName:'artist_Head_LOD1.fbx'}],'-v2');
+  const replacementOptions = {...f,asset:updated,sourceFolder:replacementSource,replacements:[{storedPath:newTargets[0].storedPath,sourcePath:path.join(replacementSource,'artist_Head_LOD1.fbx')}]};
+  const replacementPlan = await prepareCharacterPackageUpdate(replacementOptions);
+  assert.equal(replacementPlan.changes.filter(row=>row.status==='changed').length,1);
+  assert(replacementPlan.changes.some(row=>/_LOD2/.test(row.name)&&row.status==='retained'));
+  await assert.rejects(prepareCharacterPackageUpdate({...options,replacements:[{...replacements[0],storedPath:targets[2].storedPath},{...replacements[1],storedPath:targets[3].storedPath}]}),/等级.*不一致/);
+});
+
+test('batch LOD updates distinguish monster body and weapon and add several skeletal levels', async t => {
+  const f = await fixture(t);
+  const { inspectCharacterUpdateInput } = require('../electron/services/characterPackageUpdates');
+  const names = ['SK_Test_01_LOD1.fbx','SK_Test_01_LOD2.fbx','SK_Test_01_WP_Axe_LOD1.fbx'];
+  const sourceFolder = await f.makeSource(names.map(normalizedName=>({normalizedName})));
+  const match = await inspectCharacterUpdateInput({...f,sourceFolder});
+  assert.deepEqual(match.unmatchedFiles,[]);
+  assert.equal(new Set(match.replacements.map(row=>row.storedPath)).size,3);
+  const options = {...f,sourceFolder,replacements:match.replacements};
+  const plan = await prepareCharacterPackageUpdate(options);
+  assert.equal(plan.changes.filter(row=>row.status==='added').length,3);
+  await updateCharacterPackage({...options,token:plan.token,confirmWholePackage:true});
+  const updated = await f.reload();
+  const again = await inspectCharacterUpdateInput({...f,asset:updated,sourceFolder});
+  assert.deepEqual(again.unmatchedFiles,[]);
+  assert(again.replacements.every(row=>!row.storedPath.startsWith('__new_')));
+});
+
+test('first rig upload accepts LOD0 and LOD1 together while preserving the static model', async t => {
+  const f = await fixture(t, true);
+  const { inspectCharacterUpdateInput } = require('../electron/services/characterPackageUpdates');
+  const analyzeModel = async () => ({meshKind:'skeletalMesh',hasSkeleton:true,hasSkin:true,boneCount:24,skinnedMeshCount:1});
+  const sourceFolder = await f.makeSource([{normalizedName:'SK_M01_Heavy001_Stone_Head.fbx'},{normalizedName:'SK_M01_Heavy001_Stone_Head_LOD1.fbx'}]);
+  const options = {...f,sourceFolder,analyzeModel};
+  const match = await inspectCharacterUpdateInput(options);
+  assert.deepEqual(match.unmatchedFiles,[]);
+  const replacements = match.replacements;
+  assert(replacements.some(row=>row.storedPath.startsWith('__new_character_mesh__:skeletalMesh:')));
+  assert(replacements.some(row=>row.storedPath.startsWith('__new_character_lod__:skeletalMesh:1:')));
+  const plan = await prepareCharacterPackageUpdate({...options,replacements});
+  assert.equal(plan.files.filter(row=>row.role==='skeletalMesh').length,2);
+  assert(plan.retainedFiles.some(row=>/_Head\.fbx/.test(row.normalizedName)));
+  await updateCharacterPackage({...options,replacements,token:plan.token,confirmWholePackage:true});
+  const updated = await f.reload();
+  const part = listCharacterComponents(updated).find(row=>/_Head$/i.test(row.name));
+  assert.equal(part.meshKinds.staticMesh,true);
+  assert.equal(part.meshKinds.skeletalMesh,true);
+  assert.equal(part.files.filter(row=>row.role==='skeletalMesh').length,2);
 });

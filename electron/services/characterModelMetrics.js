@@ -113,7 +113,7 @@ async function analyzeCharacterMayaTriangles(filePath, allowProcess = true) {
 
 function summarizeCharacterTriangles(files) {
   const primary = files.filter(file => ["model", "skeletalMesh", "staticMesh"].includes(file.role)
-    && !/_LOD\d+(?=\.[^.]+$)/i.test(file.normalizedName || file.storedPath || "")
+    && !/_LOD[1-9]\d*(?=\.[^.]+$)/i.test(file.normalizedName || file.storedPath || "")
     && CHARACTER_MODEL_EXTENSIONS.has(path.extname(file.normalizedName || file.storedPath || "").toLowerCase()));
   const known = primary.filter(file => Number.isFinite(file.triangleCount));
   const knownTriangleCount = known.reduce((sum, file) => sum + Math.max(0, Math.floor(file.triangleCount)), 0);

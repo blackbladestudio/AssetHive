@@ -2,7 +2,7 @@
 
 AssetHive 是面向 Unreal Engine 工作流的 Windows 桌面资产管理器。
 
-当前桌面版本为 **2.3.3**，使用 Electron 44、React 和 Vite。角色模块支持套装、怪物、NPC、武器、脸部、HairCard 和 Groom ABC。
+当前桌面版本为 **2.3.4**，使用 Electron 44、React 和 Vite。角色模块支持套装、怪物、NPC、武器、脸部、HairCard、Groom ABC 和玩法物件，并支持角色 LOD 文件管理与 UE 增量更新。
 
 ## 开发
 
@@ -27,7 +27,7 @@ npm run build
 
 桌面客户端和 UE 工程插件分别交付。当前 Windows 安装包不携带或覆盖工程插件；工程插件由团队维护者从已验证的插件源码同步到项目的 `Plugins/AssetHive`，按目标 UE 版本编译，再通过项目的版本管理分发。
 
-本仓库保留的 `UE/HiveTest/Plugins/AssetHive` 与 `AssetHive-UE-Plugin` 是历史 UE 5.5 源码／预编译目录，不作为当前工程插件更新源，也不会被打进 2.3.3 桌面安装包。不能把 UE 5.5 DLL 当成 UE 5.8 插件使用。
+本仓库保留的 `UE/HiveTest/Plugins/AssetHive` 与 `AssetHive-UE-Plugin` 是历史 UE 5.5 源码／预编译目录，不作为当前工程插件更新源，也不会被打进 2.3.4 桌面安装包。不能把 UE 5.5 DLL 当成 UE 5.8 插件使用。
 
 构建或发布桌面应用不会执行 P4 提交。桌面更新也不会代替工程插件更新。
 
@@ -60,7 +60,7 @@ node scripts/verify-release-package.cjs
 
 1. 同步经过验证的桌面源码，更新 `package.json`、`package-lock.json` 和 `docs/release-notes-<version>.md`。
 2. 完成检查、本地构建和安装包验证，提交到本仓库 `main`。
-3. 创建与版本完全一致的标签，例如 `2.3.3` 对应 `v2.3.3`，并推送该标签。
+3. 创建与版本完全一致的标签，例如 `2.3.4` 对应 `v2.3.4`，并推送该标签。
 4. Windows workflow 安装锁定依赖、检查类型与角色／更新测试、构建安装包、验证打包资源、计算 SHA-256，并创建 GitHub Release。
 5. 核对 Release 六个附件及校验值，再确认更新端可获取最新版本。
 

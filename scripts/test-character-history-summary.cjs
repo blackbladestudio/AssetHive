@@ -74,3 +74,11 @@ test('operation stays readable when a user note exists; failed sends remain appa
   assert.equal(characterHistoryAction('发送模型到 UE（部分未完成）'), '发送到 UE（部分未完成）');
   assert.equal(characterHistoryAction('自动更新预览图', 'en'), 'Automatically update previews');
 });
+
+test('source folder summary hides descendants but keeps sibling folders', () => {
+  const {characterImportSourceFolders}=require('../shared/characterHistorySummary.mjs');
+  assert.deepEqual(characterImportSourceFolders({characterManifest:{files:[
+    {originalPath:'C:/Art/scenes/Textures/T_D.tga'}, {originalPath:'C:/Art/scenes/body.fbx'},
+    {originalPath:'C:/Art/scenes2/rig.fbx'}
+  ]}}), ['C:\\Art\\scenes','C:\\Art\\scenes2']);
+});

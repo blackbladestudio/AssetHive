@@ -36,7 +36,7 @@ function toAssetListRecord(asset) {
     favorite: asset.favorite,
     meta: {
       // Character cards need their component inventory, not only environment tags.
-      ...(["monster", "suit", "npc", "weapon"].includes(asset.assetType) ? {
+      ...(["monster", "suit", "npc", "weapon", "item"].includes(asset.assetType) ? {
         character: meta.character,
         characterManifest: meta.characterManifest,
         characterMetrics: meta.characterMetrics,

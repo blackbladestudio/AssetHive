@@ -16,6 +16,12 @@ const characterUi = characterUiModule.exports;
 // bridge, so behaviour can be asserted without Electron, a library or any user
 // settings being touched.
 const FUNCTIONS = [
+  "setCharacterPackageFileIncluded",
+  "pruneCharacterImportFiles",
+  "characterPackageModelSlots",
+  "filterCharacterTextureEntries",
+  "characterImportLodFiles",
+  "characterImportLodsConfirmed",
   "buildImportPayload",
   "getAcceptedModelExtsForAssetType",
   "isModelFileAcceptedForType",
@@ -149,7 +155,9 @@ function buildScope(files, options = {}) {
     importForm: { assetType: "3d" },
     activeMenu: "environment",
     mapNodeIdToAssetTypes: () => [],
-    isCharacterAssetType: assetType => ["suit", "monster", "npc", "weapon"].includes(String(assetType || "").trim().toLowerCase()),
+    isCharacterAssetType: assetType => ["suit", "monster", "npc", "weapon", "item"].includes(String(assetType || "").trim().toLowerCase()),
+    classifyFamilyPackageFile: characterUi.classifyFamilyPackageFile,
+    classifyCharacterPackageFile: characterUi.classifyCharacterPackageFile,
     inferCharacterAssetType: () => "suit",
     inferCharacterFields: characterImport.inferCharacterFields,
     buildCharacterAssetName: characterUi.buildCharacterAssetName,
@@ -166,6 +174,9 @@ function buildScope(files, options = {}) {
     inferCharacterTextureType: characterImport.inferCharacterTextureType,
     partitionCharacterPackageFiles: require("../shared/characterFilePolicy.mjs").partitionCharacterPackageFiles,
     heroPartKind: heroRules.heroPartKind,
+    heroModelStem: heroRules.heroModelStem,
+    previewFamilyFileName: characterUi.previewFamilyFileName,
+    characterLodReviewToken: require('../shared/characterLodReview.mjs').characterLodReviewToken,
     partitionHeroSuitFiles: heroRules.partitionHeroSuitFiles,
     generateCharacterPreviewForForm: async draft => draft,
     getCharacterCategoryFromFields: characterImport.getCharacterCategoryFromFields,
@@ -209,7 +220,8 @@ function buildScope(files, options = {}) {
     resolveImportDestinationForType: () => ""
   };
   const api = new Function("scope", `with (scope) { ${compiled}; return { buildImportPayload, isModelFileAcceptedForType, applyQuickDropImport, detectTextureTypeFromFileName, getTextureTypeDisplayLabel, detectStandardAssetTagFromFolderPrefix, getStandardAssetTagOptions, getSelectedStandardAssetTags, switchImportTextureEntriesForAssetType, buildTaxonomyTagKeys, isTaxonomyTag, textureTypeOptions, parseTextureSlotToken, normalizeTextureEntries, getMissingRequiredTextureTypes }; }`)(scope);
-  return { state, ...api };
+  const selectionApi = new Function("scope", `with (scope) { ${compiled}; return {setCharacterPackageFileIncluded, pruneCharacterImportFiles}; }`)(scope);
+  return { state, ...api, ...selectionApi };
 }
 
 async function buildDrafts(files, options) {

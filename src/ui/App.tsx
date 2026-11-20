@@ -1,9 +1,12 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode, CSSProperties } from "react";
 import { removeAssetNameTags } from "../../shared/assetNameTags.mjs";
-import { normalizeCharacterNames, normalizeMonsterNames, syncCharacterNames, validCharacterChineseName, validCharacterEnglishName } from "../../shared/characterNames.mjs";
-import { heroPartKind, auditHeroPackage, heroModelStem, heroPackageModelFiles, heroPackageNeedsScopeReview, inferHeroPackageFileScopes, splitHeroPackageByScope, partitionHeroSuitFiles } from "../../shared/heroPackageRules.mjs";
-import { partitionCharacterPackageFiles } from "../../shared/characterFilePolicy.mjs";
+import { gameplayIdentity, gameplayUsesResourceId } from '../../shared/gameplayNaming.mjs';
+import { selectionLevels as gameplaySelectionLevels, filterLevels as gameplayFilterLevels, categories as gameplayLeafCategories } from '../../shared/gameplayCategories.mjs';
+import { normalizeCharacterNames, normalizeMonsterNames, syncCharacterNames, validCharacterChineseName, validCharacterEnglishName, hasCharacterEnginePath } from "../../shared/characterNames.mjs";
+import { reviewSuitMaterialSlots } from "../../shared/suitMaterialMatching.mjs";
+import { heroSuitPart, heroPartKind, auditHeroPackage, heroModelStem, heroPackageModelFiles, heroPackageNeedsScopeReview, inferHeroPackageFileScopes, splitHeroPackageByScope, partitionHeroSuitFiles } from "../../shared/heroPackageRules.mjs";
+import { partitionCharacterPackageFiles, isAllowedCharacterTextureFile } from "../../shared/characterFilePolicy.mjs";
 import type { AppSettings, AssetRecord, TextureAnalysis } from "../types";
 import { monsterBodyMetrics, characterDisplayName, componentParentId, characterComponentLabel, listCharacterComponents, characterModelPreviewComponents, characterMeshAssetRecord, componentAssetRecord, expandCharacterCards, activeCharacterFiles, characterRigProgress, characterRigReviewSignature, characterModelGroups, characterModelUpdateGroups } from "../../shared/characterComponents.mjs";
 import { WEAPON_TYPES, weaponCategory, splitWeaponPackage } from "../../shared/weaponRules.mjs";
@@ -21,11 +24,15 @@ import { DialogCloseButton } from "./DialogCloseButton";
 import { CharacterRigPanel } from './CharacterRigPanel';
 import { MonsterModelPanel } from './MonsterModelPanel';
 import { CharacterUpdateAssignments, CharacterUpdateChanges } from './CharacterUpdateReview';
+import { CharacterLodReview } from './CharacterLodReview';
+import { characterLodReview, characterLodReviewToken } from '../../shared/characterLodReview.mjs';
+import { characterLodUpdateTargets } from '../../shared/characterLodUpdateTargets.mjs';
 import { characterGalleryRevision } from '../../shared/characterPreviewRevision.mjs';
 import { characterHistorySummary, characterHistoryAction, characterHistoryGroupAction, groupCharacterHistoryEntries, characterImportSourceFolders } from '../../shared/characterHistorySummary.mjs';
 import { suitExportLocations } from "./suitExportLocations";
 import type { ThreeDCoatConnection } from "../threeDCoat";
 import { PreviewLoader } from "./previewLoader";
+import { AnimationCoverQueue, type AnimationCoverTarget } from "./animationCoverQueue";
 import { getPreviewUrl } from "./previewUrl";
 import { evaluateAnimationImportRules, getAnimationAssetNameIssue, getAnimationRuleErrors, type AnimationFbxStats } from "./animationRules";
 import { parseSearchTags } from "./assetSearch";
@@ -96,6 +103,60 @@ import threeDCoatWordmark from "./icons/wordmarks/3dcoat.svg";
 import unrealWordmark from "./icons/wordmarks/unrealengine.svg";
 
 const AnimationPreview = lazy(() => import("./AnimationPreview").then(module => ({ default: module.AnimationPreview })));
+
+function AnimationCoverWorker({ queue, loader, bridge, enabled }: {
+  queue: AnimationCoverQueue;
+  loader: PreviewLoader;
+  bridge: typeof window.arkhive;
+  enabled: boolean;
+}) {
+  const target = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
+  const [prepared, setPrepared] = useState<{ target: AnimationCoverTarget; key: string } | null>(null);
+  useEffect(() => {
+    const update = () => queue.setEnabled(Boolean(enabled && bridge?.getAnimationPreview && bridge.cacheAnimationPreview)
+      && document.visibilityState === "visible");
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      document.removeEventListener("visibilitychange", update);
+      queue.setEnabled(false);
+    };
+  }, [queue, bridge, enabled]);
+  useEffect(() => {
+    if (!target) return;
+    const { modelPath } = target;
+    let active = true;
+    void bridge?.getAnimationPreview?.(modelPath).then(preview => {
+      if (!active || queue.getSnapshot() !== target) return;
+      if (preview && !preview.path) {
+        setPrepared({ target, key: preview.key });
+      } else {
+        if (preview?.path) loader.setResolved(modelPath, preview.path);
+        queue.finish(target);
+      }
+    }).catch(() => queue.finish(target));
+    const timer = window.setTimeout(() => queue.finish(target), 20_000);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [queue, target, bridge, loader]);
+
+  if (!target || prepared?.target !== target) return null;
+  const { assetId, modelPath, skeletonPath, skeletalMeshPath } = target;
+  return <Suspense fallback={null}>
+    <AnimationPreview key={modelPath} filePath={modelPath} skeletonPath={skeletonPath} skeletalMeshPath={skeletalMeshPath}
+      emptyLabel="" playLabel="" pauseLabel="" failedLabel="" missingMeshLabel="" captureOnly
+      onMotionCapture={async capture => {
+        const blob = await capture();
+        if (!blob || blob.size < 32) return;
+        const bytes = await blob.arrayBuffer();
+        if (queue.getSnapshot() !== target) return;
+        const file = await bridge?.cacheAnimationPreview?.({ assetId, modelPath, key: prepared.key, bytes });
+        if (file) loader.setResolved(modelPath, file);
+      }}
+      onCaptureFinished={() => queue.finish(target)}
+    />
+  </Suspense>;
+}
+
 async function loadAnimationFbxStats(filePath: string, skeletonPath = "") {
   const module = await import("./animationFbxStats");
   return module.loadAnimationFbxStats(filePath, skeletonPath);
@@ -1252,7 +1313,8 @@ const categoryTree: CategoryNode[] = [
           { id: "character-suit", label: "套装", children: [] },
           { id: "character-monster", label: "怪物", children: [] },
           { id: "character-npc", label: "NPC", children: [] },
-          { id: "character-weapon", label: "武器", children: [] }
+          { id: "character-weapon", label: "武器", children: [] },
+          { id: "character-item", label: "玩法物件", children: [] }
         ]
       },
       {
@@ -1705,7 +1767,8 @@ const assetTypeDisplayLabels: Record<string, [string, string]> = {
   suit: ["套装", "Suit"],
   monster: ["怪物", "Monster"],
   npc: ["NPC", "NPC"],
-  weapon: ["武器", "Weapon"]
+  weapon: ["武器", "Weapon"],
+  item: ["玩法物件", "Gameplay Item"]
 };
 const LAST_IMPORT_DESTINATION_STORAGE_KEY = "assethive.lastImportDestination";
 const ANIMATION_PREVIEW_RIG_STORAGE_KEY = "assethive.animationPreviewRig";
@@ -1812,7 +1875,8 @@ const defaultImportRelativeDirByAssetType: Record<string, string> = {
   suit: "Character\\Hero",
   monster: "Character\\Monster",
   npc: "Character\\NPC",
-  weapon: "Character\\Weapon"
+  weapon: "Character\\Weapon",
+  item: "Character\\GameplayItem"
 };
 const defaultAnimationDestinationByAffiliation: Record<string, string> = {
   主角: "Animation\\Hero\\Male_01\\WP00_Unarm\\Locomotion",
@@ -1822,6 +1886,13 @@ const defaultAnimationDestinationByAffiliation: Record<string, string> = {
 
 function isAnimatedPreviewPath(filePath: string) {
   return /\.(webm|mp4|gif)$/i.test(String(filePath || "").trim());
+}
+
+function getAssetThumbnailSource(asset: AssetRecord) {
+  const preview = String(asset.previewImage || asset.preview || "").trim();
+  return asset.assetType === "animation" && !isAnimatedPreviewPath(preview)
+    ? getFirstFbxPath(asset.modelFiles || []) || preview
+    : preview;
 }
 
 function isMotionVideoPreviewPath(filePath: string) {
@@ -2439,8 +2510,8 @@ function getCharacterAssetInfo(asset: AssetRecord | null): CharacterAssetInfo | 
     (Array.isArray(asset.modelFiles) ? asset.modelFiles : []).forEach((filePath) => modelParts.push({ originalName: "", normalizedName: characterFileBaseName(filePath), storedPath: filePath, role: "model", materialName: "", textureGroup: "", textureType: "", size: 0, triangleCount: null }));
   }
   const textureItems = manifestFiles.filter((item) => item.role === "texture");
-  if (textureItems.length === 0) {
-    (Array.isArray(asset.textureFiles) ? asset.textureFiles : []).forEach((filePath) => textureItems.push({ originalName: "", normalizedName: characterFileBaseName(filePath), storedPath: filePath, role: "texture", materialName: "", textureGroup: "", textureType: "", size: 0, triangleCount: null }));
+  if (!Array.isArray(manifest?.files)) {
+    (Array.isArray(asset.textureFiles) ? asset.textureFiles : []).filter(isAllowedCharacterTextureFile).forEach((filePath) => textureItems.push({ originalName: "", normalizedName: characterFileBaseName(filePath), storedPath: filePath, role: "texture", materialName: "", textureGroup: "", textureType: "", size: 0, triangleCount: null }));
   }
   const textureGroups = new Map<string, CharacterTextureGroupInfo>();
   for (const item of textureItems) {
@@ -2455,7 +2526,7 @@ function getCharacterAssetInfo(asset: AssetRecord | null): CharacterAssetInfo | 
     textureGroups.set(key, group);
   }
   const rawMetrics = (meta.characterMetrics && typeof meta.characterMetrics === "object" ? meta.characterMetrics : manifest?.metrics) as Record<string, unknown> | undefined;
-  const primaryModels = modelParts.filter(item => !/_LOD\d+(?=\.[^.]+$)/i.test(item.normalizedName || item.storedPath));
+  const primaryModels = modelParts.filter(item => !/_LOD[1-9]\d*(?=\.[^.]+$)/i.test(item.normalizedName || item.storedPath));
   const knownTriangleCount = rawMetrics ? Math.max(0, Number(rawMetrics.knownTriangleCount) || 0)
     : primaryModels.reduce((sum, item) => sum + (item.triangleCount ?? 0), 0);
   const unknownModelCount = rawMetrics ? Math.max(0, Number(rawMetrics.unknownModelCount) || 0)
@@ -2505,6 +2576,39 @@ function filterCharacterTextureEntries(entries: TextureEntry[], files: string[])
   const pathKey = (value: string) => String(value || "").trim().replace(/\//g, "\\").toLowerCase();
   const accepted = new Set(files.map(pathKey));
   return entries.filter(entry => !entry.filePath || accepted.has(pathKey(entry.filePath)));
+}
+
+function setCharacterPackageFileIncluded(form: ImportFormState, filePath: string, included: boolean): ImportFormState {
+  const excluded = form.characterManualExclusions || [];
+  const saved = excluded.find(item => item.filePath === filePath);
+  if (included ? !saved || !partitionCharacterPackageFiles([filePath]).accepted.length : !form.characterPackageFiles.includes(filePath)) return form;
+  const files = included ? [...new Set([...form.characterPackageFiles, filePath])] : form.characterPackageFiles.filter(file => file !== filePath);
+  const textureEntries = included ? [...form.textureEntries, ...saved!.textureEntries] : filterCharacterTextureEntries(form.textureEntries, files);
+  const changesModels = /\.(fbx|obj|abc|gltf|glb)$/i.test(filePath);
+  const changesPreview = changesModels && !/_LOD[1-9]\d*\.[^.]+$/i.test(filePath) || /\.(png|jpe?g|tiff?|tga|webp|bmp|exr|hdr|dds)$/i.test(filePath);
+  const slots = changesModels ? characterPackageModelSlots(form.assetType, files) : form.modelSlots;
+  const automaticPreviews = [...Object.values(form.characterPreviewPaths), ...(form.characterPartPreviews || []).flatMap(part => Object.values(part.paths))];
+  return { ...form, characterPackageFiles: files, textureEntries,
+    characterManualExclusions: included ? excluded.filter(item => item !== saved) : [...excluded, {
+      filePath, textureEntries: form.textureEntries.filter(entry => !textureEntries.includes(entry))
+    }],
+    modelSlots: slots, enabledModelTypes: changesModels ? Object.keys(slots) : form.enabledModelTypes,
+    modelVariantKeys: changesModels ? {} : form.modelVariantKeys, modelLodFiles: changesModels ? {} : form.modelLodFiles,
+    characterLodConfirmation: '', characterFields: { ...form.characterFields, confirmed: false },
+    ...(changesPreview ? { characterPreviewPaths: {front: '', left: '', right: '', back: ''}, characterPartPreviews: [], characterPreviewError: '',
+      previewImagePath: automaticPreviews.includes(form.previewImagePath) ? '' : form.previewImagePath,
+      characterExtraPreviewPaths: form.characterExtraPreviewPaths?.filter(path => !automaticPreviews.includes(path)) } : {})
+  };
+}
+
+function pruneCharacterImportFiles(form: ImportFormState): ImportFormState {
+  if (!isCharacterAssetType(form.assetType)) return form;
+  const rejected = partitionCharacterPackageFiles(form.characterPackageFiles).excluded;
+  const staleExclusions = (form.characterManualExclusions || []).filter(item => !partitionCharacterPackageFiles([item.filePath]).accepted.length);
+  if (!rejected.length && !staleExclusions.length) return form;
+  const next = rejected.reduce((draft, file) => setCharacterPackageFileIncluded(draft, file, false), form);
+  return { ...next, characterExcludedFiles: [...new Set([...(form.characterExcludedFiles || []), ...rejected, ...staleExclusions.map(item => item.filePath)])],
+    characterManualExclusions: (next.characterManualExclusions || []).filter(item => partitionCharacterPackageFiles([item.filePath]).accepted.length > 0) };
 }
 
 function mapSubCategoryToOptionLabel(assetType: string, raw: string) {
@@ -2565,6 +2669,7 @@ function ResolutionAction({ summary, t }: { summary: TextureResolutionSummary | 
 const AssetCard = memo(({
   asset,
   previewLoader,
+  animationCoverQueue,
   isSelected,
   selectedMeshKind,
   isFavorite,
@@ -2588,6 +2693,7 @@ const AssetCard = memo(({
 }: {
   asset: AssetRecord;
   previewLoader: PreviewLoader;
+  animationCoverQueue?: AnimationCoverQueue;
   isSelected: boolean;
   selectedMeshKind?: "staticMesh" | "skeletalMesh";
   isFavorite: boolean;
@@ -2613,6 +2719,19 @@ const AssetCard = memo(({
   height: number;
 }) => {
   const sourcePath = String(asset.previewImage || asset.preview || "").trim();
+  const [failedAnimationCover, setFailedAnimationCover] = useState("");
+  const failedLegacyCover = Boolean(sourcePath && failedAnimationCover === sourcePath);
+  const thumbnailSource = failedLegacyCover ? getFirstFbxPath(asset.modelFiles || []) : getAssetThumbnailSource(asset);
+  const cardRef = useRef<HTMLElement>(null);
+  const animationModelPath = asset.source === "custom" && asset.assetType === "animation" && /\.fbx$/i.test(thumbnailSource)
+    ? thumbnailSource : "";
+  const { id: assetId, previewSkeletonPath, previewSkeletalMeshPath } = asset;
+  useEffect(() => {
+    if (!cardRef.current || !animationModelPath) return;
+    return animationCoverQueue?.observe(cardRef.current, {
+      assetId, modelPath: animationModelPath, skeletonPath: previewSkeletonPath, skeletalMeshPath: previewSkeletalMeshPath
+    });
+  }, [animationCoverQueue, animationModelPath, assetId, previewSkeletonPath, previewSkeletalMeshPath]);
   const cardPreviewItem = (asset.previewImages || []).find(item => item.tags.includes("cover")) || (asset.previewImages || []).find(item => item.path === sourcePath);
   const previewReloading = characterImageIsReloading(asset, cardPreviewItem?.tags);
   const actionLoading = !isFolderOnlyAsset(asset) && exportLoading;
@@ -2638,6 +2757,7 @@ const AssetCard = memo(({
   </article>;
   return (
     <article
+      ref={cardRef}
       id={`asset-card-${asset.id}`}
       data-character-component={componentView || asset.id.includes("::part::") ? "true" : undefined}
       title={cardAssetName}
@@ -2743,12 +2863,15 @@ const AssetCard = memo(({
             <div className="character-component-mesh-name" title={slotAssetName}>{slotAssetName}</div>
           </div>;
         }) : previewReloading ? <div className="character-preview-reloading">reloading</div> : <AssetThumbnail
-          key={sourcePath}
-          sourcePath={sourcePath}
+          key={`${thumbnailSource}:${sourcePath}`}
+          sourcePath={thumbnailSource}
+          originalPath={failedLegacyCover ? "" : sourcePath}
           loader={previewLoader}
           toUrl={getPreviewUrl}
           name={cardAssetName}
           cover={String(asset.assetType || "").trim().toLowerCase() === "hdri"}
+          onOriginalError={asset.assetType === "animation" && isAnimatedPreviewPath(sourcePath)
+            ? () => setFailedAnimationCover(sourcePath) : undefined}
           fallback={<div style={{ opacity: 0.7 }}><Icon name="image-preview" /></div>}
         />}
       </div>
@@ -3091,19 +3214,41 @@ type CharacterHistoryDisplayEntry = {
 };
 
 type CharacterUpdateMode = "whole" | "selective";
+function characterImportLodFiles(form: ImportFormState) {
+  const fields = form.characterFields;
+  const owner = buildCharacterAssetName(form.assetType, fields, form.subCategory);
+  const aliases = form.assetType === 'monster' ? auditMonsterPackage(form.characterPackageFiles, { expectedName: fields.name, modelAnalyses: form.characterModelAnalysis }).modelAliases : undefined;
+  return form.characterPackageFiles.filter(file => /\.fbx$/i.test(file)).map(file => {
+    const analysis = form.characterModelAnalysis[file];
+    const kind = analysis?.meshKind || 'staticMesh';
+    const index = Number(file.match(/_LOD(\d+)(?=\.[^.]+$)/i)?.[1] || 0);
+    const name = form.assetType === 'suit'
+      ? heroModelStem(owner, file, fields, kind) + (index ? `_LOD${index}` : '') + '.fbx'
+      : previewFamilyFileName(form.assetType, owner, file, fields.name, aliases).replace(/^(SK|SM)_/i, kind === 'skeletalMesh' ? 'SK_' : 'SM_');
+    return { name, sourcePath: file, sourceHash: analysis?.sourceHash, kind,
+      inspection: !analysis ? 'pending' as const : analysis.ok ? 'ready' as const : 'failed' as const, inspectionMessage: analysis?.message };
+  });
+}
+
+function characterImportLodsConfirmed(form: ImportFormState) {
+  const files = characterImportLodFiles(form);
+  return !files.length || form.characterLodConfirmation === characterLodReviewToken(files);
+}
 type CharacterUpdateModelRole = "staticMesh" | "skeletalMesh";
-type CharacterUpdateSection = CharacterUpdateModelRole | "texture";
-type CharacterUpdateDestination = { storedPath: string; fileName: string; role: CharacterUpdateSection; isNew?: boolean };
+type CharacterUpdateSection = CharacterUpdateModelRole | "texture" | "lod";
+type CharacterUpdateDestination = { storedPath: string; fileName: string; role: CharacterUpdateModelRole | "texture"; isNew?: boolean; lod?: number; modelName?: string };
 type CharacterUpdateBatchReport = { unmatchedFiles: string[]; conflictFiles: Array<{ storedPath: string; sourcePaths: string[] }>; excludedFiles: string[] };
 type CharacterUpdateInputRow = { sourcePath: string; role: string; storedPath: string; candidates: Array<{ storedPath: string; name: string }> };
 
 function characterUpdateDestinations(asset: AssetRecord | null): CharacterUpdateDestination[] {
   if (!asset) return [];
   const destinations: CharacterUpdateDestination[] = activeCharacterFiles(asset).flatMap(file => {
-    const role: CharacterUpdateSection | "" = file.role === "skeletalMesh" ? "skeletalMesh"
+    const role: CharacterUpdateDestination['role'] | "" = file.role === "skeletalMesh" ? "skeletalMesh"
       : ["model", "staticMesh"].includes(file.role) ? "staticMesh"
       : file.role === "texture" ? "texture" : "";
-    return role ? [{ storedPath: file.storedPath, fileName: file.normalizedName || characterFileBaseName(file.storedPath), role }] : [];
+    const fileName = file.normalizedName || characterFileBaseName(file.storedPath);
+    const lod = role !== 'texture' ? Number(fileName.match(/_LOD(\d+)(?=\.[^.]+$)/i)?.[1] || 0) : 0;
+    return role && !lod ? [{ storedPath: file.storedPath, fileName, role }] : [];
   });
   if (asset.meta.componentView) {
     for (const role of ["staticMesh", "skeletalMesh"] as const) if (!destinations.some(item => item.role === role)) {
@@ -3117,7 +3262,7 @@ function characterUpdateDestinations(asset: AssetRecord | null): CharacterUpdate
       }
     }
   }
-  return destinations;
+  return [...destinations, ...characterLodUpdateTargets(characterModelUpdateGroups(asset))];
 }
 
 function previewViewTag(tags: string[] | undefined) {
@@ -3761,6 +3906,7 @@ export function App() {
   const saveCompleteHideTimerRef = useRef<number | null>(null);
   const statusRef = useRef<string>("");
   const uiLanguage = settings.uiLanguage === "en" ? "en" : "zh";
+  useEffect(() => { setImportForm(current => pruneCharacterImportFiles(current)); }, [importForm, setImportForm]);
   const t = useCallback((zh: string, en: string) => (uiLanguage === "en" ? en : zh), [uiLanguage]);
 
   const importQueueSnapshot = useMemo(() => {
@@ -3841,20 +3987,23 @@ export function App() {
   const clearCharacterFilters = () => {
     if (characterContext) {
       setCharacterFiltersByScope(previous => ({ ...previous, [characterContext.key]: defaultCharacterFilters(characterContext) }));
-      if (characterContext.family !== "all" && !characterContext.key.includes(":")) setActiveMenu(`character-${characterContext.family}`);
+      if (characterContext.family !== "all") setActiveMenu(`character-${characterContext.family}`);
     }
   };
   const selectSuitSubcategory = (category: string) => {
     if (!characterContext || characterContext.family === "all") return;
     const directory = `character-${characterContext.family}`;
     setActiveMenu(category === "all" ? directory : `${directory}:${encodeURIComponent(category)}`);
-    setExpandedCategories(["home", "character", directory]);
+    const ancestors = characterContext.family === 'item' && category !== 'all'
+      ? category.split('/').map((_, index, parts) => `${directory}:${encodeURIComponent(parts.slice(0, index + 1).join('/'))}`)
+      : characterContext.family === 'suit' && ['Outfit', 'Male_01', 'Female_01'].includes(category) ? ['character-suit:Outfit'] : [];
+    setExpandedCategories(["home", "character", directory, ...ancestors]);
   };
-  const showCharacterSubcategories = Boolean(characterContext && characterContext.family !== "all" && !characterContext.key.includes(":"));
+  const showCharacterSubcategories = Boolean(characterContext && characterContext.family !== "all");
   const selectedSuitSubcategory = showCharacterSubcategories ? characterContext?.category || "" : "";
   const characterSubcategoryOptions = showCharacterSubcategories && characterContext
-    ? getCharacterCategoryNodes(characterContext.family, allAssets).map(node => decodeURIComponent(node.id.split(":")[1]))
-      .filter(category => characterContext.family !== "suit" || ["Male_01", "Female_01"].includes(category)) : [];
+    ? characterContext.family === 'suit' ? ['Outfit', 'Male_01', 'Female_01', 'Face', 'Hair']
+      : characterContext.family === "item" ? characterCategoryOptions.item : getCharacterCategoryNodes(characterContext.family, allAssets).map(node => decodeURIComponent(node.id.split(":")[1])) : [];
   const activeCharacterFilterFields = characterFilterFields.filter(field => characterFilters[field.key] !== "all");
   const characterScopeLabel = characterContext ? characterContext.category
     ? getCharacterCategoryDisplayLabel(characterContext.family, characterContext.category, uiLanguage)
@@ -3866,7 +4015,7 @@ export function App() {
       const cards = expandCharacterCards(groupMonsterCards(buildStaggeredOrder(assets, staggerOrderSeedRef.current)));
       const filtered = characterContext ? filterCharacterCards(cards, characterFilters, textSearch.ids) : cards;
       if (activeMenu !== "character" || characterFilters.display !== "all") return filtered;
-      const familyOrder = new Map(["suit", "monster", "npc", "weapon"].map((family, index) => [family, index]));
+      const familyOrder = new Map(["suit", "monster", "npc", "weapon", "item"].map((family, index) => [family, index]));
       return filtered.map((asset, index) => ({ asset, index })).sort((a, b) =>
         (familyOrder.get(a.asset.assetType) ?? familyOrder.size) - (familyOrder.get(b.asset.assetType) ?? familyOrder.size) || a.index - b.index
       ).map(item => item.asset);
@@ -3879,7 +4028,8 @@ export function App() {
     { id: "character-suit", label: t("套装", "Outfits"), assetTypes: ["suit"], icon: "file" },
     { id: "character-monster", label: t("怪物", "Monsters"), assetTypes: ["monster"], icon: "file" },
     { id: "character-npc", label: "NPC", assetTypes: ["npc"], icon: "file" },
-    { id: "character-weapon", label: t("武器", "Weapons"), assetTypes: ["weapon"], icon: "file" }
+    { id: "character-weapon", label: t("武器", "Weapons"), assetTypes: ["weapon"], icon: "file" },
+    { id: "character-item", label: t("玩法物件", "Gameplay Item"), assetTypes: ["item"], icon: "file" }
   ] : [
     { id: "3d-assets", label: t("3D 资产", "3D Assets"), assetTypes: ["3d"], icon: "cube" },
     { id: "3d-plants", label: t("3D 植物", "3D Plants"), assetTypes: ["3dplant"], icon: "leaf" },
@@ -3968,6 +4118,10 @@ export function App() {
     if (!bridgeAvailable || typeof bridge.getPreviewThumbnail !== "function") return path;
     return String(await bridge.getPreviewThumbnail(path) || path);
   }), [bridge, bridgeAvailable]);
+  const animationCoverQueue = useMemo(() => new AnimationCoverQueue(previewLoader, {
+    skeletonPath: animationPreviewRig.skeletonPath || DEFAULT_ANIMATION_SKELETON_PATH,
+    skeletalMeshPath: animationPreviewRig.skeletalMeshPath
+  }), [previewLoader, animationPreviewRig]);
   const characterDeletedRef = useRef<(payload: { assetId: string; paths: string[]; clearedDraftIds: string[] }) => void>(() => {});
   characterDeletedRef.current = payload => {
     previewLoader.invalidate(payload.paths);
@@ -3996,7 +4150,7 @@ export function App() {
     const bottom = top + assetStageMetrics.viewportHeight;
     previewLoader.setViewport(isAllOverviewView ? [] : assetGridLayout.visibleItems
       .filter(item => item.y + item.height > top && item.y < bottom)
-      .map(item => String(item.asset.previewImage || item.asset.preview || "").trim()));
+      .map(item => getAssetThumbnailSource(item.asset)));
   }, [assetGridLayout.visibleItems, assetStageMetrics.scrollTop, assetStageMetrics.viewportHeight, isAllOverviewView, previewLoader]);
 
   useEffect(() => {
@@ -4014,7 +4168,7 @@ export function App() {
     const forward = getAssetGridItemsInRange(assetGridLayout.items, down ? bottom : Math.max(0, top - distance), down ? bottom + distance : top);
     const backward = getAssetGridItemsInRange(assetGridLayout.items, down ? Math.max(0, top - distance / 2) : bottom, down ? top : bottom + distance / 2);
     const paths = [...visibleAssets, ...forward.map(item => item.asset), ...backward.map(item => item.asset)]
-      .map(asset => String(asset.previewImage || asset.preview || "").trim()).filter(Boolean);
+      .map(getAssetThumbnailSource).filter(path => path && !/\.fbx$/i.test(path));
     previewLoader.setPrefetch([...new Set(paths)].slice(0, 220 * factor));
   }, [assetGridLayout.cardHeight, assetGridLayout.items, assetStageMetrics.scrollTop, assetStageMetrics.viewportHeight, isAllOverviewView, previewLoader, visibleAssets]);
 
@@ -4372,6 +4526,7 @@ export function App() {
     if (normalized === "monster") return t("怪物", "Monster");
     if (normalized === "npc") return "NPC";
     if (normalized === "weapon") return t("武器", "Weapon");
+    if (normalized === "item") return t("玩法物件", "Gameplay Items");
     return normalized ? normalized.toUpperCase() : t("未知", "Unknown");
   }
 
@@ -4385,7 +4540,9 @@ export function App() {
 
   function getNodeDisplayLabel(nodeId: string, fallback: string) {
     const characterSelection = getCharacterNavigationSelection(nodeId);
+    if (characterSelection?.family === 'item' && characterSelection.category) return getCharacterCategoryDisplayLabel('item', characterSelection.category, uiLanguage).split(' / ').at(-1) || fallback;
     if (characterSelection?.category) return getCharacterCategoryDisplayLabel(characterSelection.family, characterSelection.category, uiLanguage);
+    if (characterSelection?.assembly) return getCharacterCategoryDisplayLabel('weapon', characterSelection.assembly, uiLanguage);
     if (nodeId === "home") return t("全部", "All");
     if (nodeId === "favorite") return t("收藏", "Favorite");
     if (nodeId === "environment") return t("环境", "Environment");
@@ -4439,6 +4596,10 @@ export function App() {
     };
     if (monsterLabels[key]) return t(...monsterLabels[key]);
     if (["Male_01", "Female_01", "Face", "Hair"].includes(key)) return getCharacterCategoryDisplayLabel("suit", key, uiLanguage);
+    for (const family of ['weapon', 'npc', 'item']) {
+      const label = getCharacterCategoryDisplayLabel(family, key, uiLanguage);
+      if (label !== key) return label;
+    }
     const animationLabel = ANIMATION_TYPE_DISPLAY_LABELS[key];
     if (animationLabel) return t(animationLabel[0], animationLabel[1]);
     const zh = subCategoryDisplayLabels[key];
@@ -4505,7 +4666,7 @@ export function App() {
     }
     const table: Record<string, string[]> = {
       environment: ["3d", "3dplant", "surface", "decal", "atlas", "imperfection", "displacement", "hdri"],
-      character: ["suit", "monster", "npc", "weapon"],
+      character: ["suit", "monster", "npc", "weapon", "item"],
       "character-suit": ["suit"],
       "character-monster": ["monster"],
       "character-npc": ["npc"],
@@ -4609,6 +4770,17 @@ export function App() {
     [selectedAsset]
   );
   const selectedCharacterCategory = selectedCharacterInfo && selectedAsset ? getCharacterLibraryCategory(selectedAsset) : "";
+  const selectedCharacterLodCounts = useMemo(() => {
+    if (!selectedCharacterInfo || !selectedAsset) return null;
+    const groups = characterLodReview(activeCharacterFiles(selectedAsset)
+      .filter(file => ['model', 'staticMesh', 'skeletalMesh'].includes(file.role))
+      .map(file => ({ name: file.normalizedName || file.storedPath, kind: file.role })));
+    if (!groups.length) return null;
+    const counts = groups.map(group => new Set(group.files.map(file => file.index)).size);
+    const min = Math.min(...counts), max = Math.max(...counts);
+    return { count: min === max ? String(min) : `${min}–${max}`, details: groups.map(group =>
+      `${group.name}: ${[...new Set(group.files.map(file => `LOD${file.index}`))].join(', ')}`).join('\n') };
+  }, [selectedAsset, selectedCharacterInfo]);
   const selectedDetailTags = selectedAsset ? removeAssetNameTags([...new Set([...(selectedAsset.tags || []), ...getAssetColorTags(selectedAsset)])], { ...selectedAsset.meta, name: selectedAsset.name }) : [];
   const selectedCharacterCategoryLabels = selectedCharacterInfo ? ["zh", "en"].map(language => getCharacterCategoryDisplayLabel(selectedCharacterInfo.family, selectedCharacterCategory, language)) : [];
   const visibleDetailTags = selectedCharacterInfo ? deduplicateCharacterCategoryTags(selectedDetailTags, selectedCharacterCategory, selectedCharacterCategoryLabels) : selectedDetailTags;
@@ -4795,50 +4967,28 @@ export function App() {
     return reading;
   }, [bridge, bridgeAvailable, setAllAssets, setAssets]);
 
-  const persistCapturedAnimationPreview = useCallback(async (key: string, blob: Blob, mode: "asset" | "import" | "edit") => {
-    if (!bridgeAvailable || typeof bridge.materializeDroppedFile !== "function") {
-      return;
-    }
-    const captureKey = `motion:${mode}:${key}`;
-    if (!blob || blob.size < 32 || animationPreviewCaptureKeysRef.current.has(captureKey)) {
-      return;
-    }
-    animationPreviewCaptureKeysRef.current.add(captureKey);
+  const captureEditAnimationPreview = useCallback(async (filePath: string, capture: () => Promise<Blob | null>) => {
+    if (!bridgeAvailable || animationPreviewCaptureKeysRef.current.has(filePath)) return;
+    animationPreviewCaptureKeysRef.current.add(filePath);
     try {
-      const bytes = await blob.arrayBuffer();
-      const tempPath = await bridge.materializeDroppedFile({
-        name: `${key.replace(/[\\/:*?"<>|]/g, "_") || "animation"}_preview.webm`,
-        bytes
+      const blob = await capture();
+      if (!blob || blob.size < 32) {
+        animationPreviewCaptureKeysRef.current.delete(filePath);
+        return;
+      }
+      const tempPath = await bridge.materializeDroppedFile?.({
+        name: `${filePath.replace(/[\\/:*?"<>|]/g, "_") || "animation"}_preview.webm`,
+        bytes: await blob.arrayBuffer()
       });
       if (!tempPath) {
-        animationPreviewCaptureKeysRef.current.delete(captureKey);
+        animationPreviewCaptureKeysRef.current.delete(filePath);
         return;
       }
-      if (mode === "import") {
-        setImportForm((prev) => isAnimatedPreviewPath(prev.previewImagePath) ? prev : { ...prev, previewImagePath: tempPath });
-        return;
-      }
-      if (mode === "edit") {
-        setEditForm((prev) => isAnimatedPreviewPath(prev.previewImagePath) ? prev : { ...prev, previewImagePath: tempPath });
-        return;
-      }
-      if (typeof bridge.updateCustomAsset !== "function") {
-        animationPreviewCaptureKeysRef.current.delete(captureKey);
-        return;
-      }
-      const result = await bridge.updateCustomAsset({
-        assetId: key,
-        previewImagePath: tempPath
-      });
-      if (!result?.ok) {
-        animationPreviewCaptureKeysRef.current.delete(captureKey);
-        return;
-      }
-      await refreshAssetFromDisk(key);
+      setEditForm((prev) => isAnimatedPreviewPath(prev.previewImagePath) ? prev : { ...prev, previewImagePath: tempPath });
     } catch {
-      animationPreviewCaptureKeysRef.current.delete(captureKey);
+      animationPreviewCaptureKeysRef.current.delete(filePath);
     }
-  }, [bridge, bridgeAvailable, refreshAssetFromDisk, setEditForm, setImportForm]);
+  }, [bridge, bridgeAvailable, setEditForm]);
 
   const [detailPreviewIndex, setDetailPreviewIndex] = useState(0);
   const detailPreviewAsset = selectedAsset;
@@ -4916,7 +5066,7 @@ export function App() {
       return [];
     }
     const relationGroupId = String(selectedAsset.meta?.characterImportGroupId || "").trim();
-    if (["monster", "suit", "npc", "weapon"].includes(selectedAsset.assetType) || relationGroupId) {
+    if (["monster", "suit", "npc", "weapon", "item"].includes(selectedAsset.assetType) || relationGroupId) {
       const ownerId = componentParentId(selectedAsset.id);
       if (ownerId !== selectedAsset.id) {
         const owner = allAssets.find(asset => asset.id === ownerId);
@@ -5074,7 +5224,7 @@ export function App() {
       // export controls. The request itself owns the exporting state.
       if (!exportInFlightRef.current) return;
       const nextPercent = Math.max(0, Math.min(100, Number(payload?.percent) || 0));
-      setExportProgress(nextPercent);
+      setExportProgress(previous => Math.max(previous, nextPercent));
       const rawMessage = String(payload?.message || "").trim();
       const compactMessage = rawMessage.replace(/\s+/g, "");
       const unreadableMessage = compactMessage.length > 0 && (/^\?+$/.test(compactMessage) || /�/.test(rawMessage) || /\?{2,}/.test(rawMessage));
@@ -5200,7 +5350,7 @@ export function App() {
       }
       const progress = Math.max(0, Math.min(100, Number(payload?.progress) || 0));
       if (characterBusyRef.current && String(payload?.message || '').startsWith('character-update:')) {
-        setCharacterOperationProgress({ progress, message: String(payload.message).slice(17) });
+        setCharacterOperationProgress(previous => ({ progress: Math.max(previous?.progress || 0, progress), message: String(payload.message).slice(17) }));
       }
       if (importSavingRef.current && String(payload?.message || '').startsWith('character:')) {
         setCharacterImportProgress({ progress, message: String(payload.message).slice(10) });
@@ -5599,7 +5749,7 @@ export function App() {
 
       // Known main categories
       const mainCategories = ["environment", "character", "animation", "3d-assets", "3d-plants", "surfaces", "decals", "atlases", "imperfections", "displacements", "hdri",
-        "character-suit", "character-monster", "character-npc", "character-weapon",
+        "character-suit", "character-monster", "character-npc", "character-weapon", "character-item",
         "animation-hero", "animation-monster", "animation-npc",
         "fav-3d", "fav-3dplant", "fav-surface", "fav-decal", "fav-atlas", "fav-imperfection", "fav-displacement", "fav-hdri", "fav-animation"];
 
@@ -5610,7 +5760,7 @@ export function App() {
         if (["animation-hero", "animation-monster", "animation-npc"].includes(id)) {
           return ["home", "animation", id];
         }
-        if (["character-suit", "character-monster", "character-npc", "character-weapon"].includes(id)) {
+        if (["character-suit", "character-monster", "character-npc", "character-weapon", "character-item"].includes(id)) {
           return ["home", "character", id];
         }
         if (["3d-assets", "3d-plants", "surfaces", "decals", "atlases", "imperfections", "displacements", "hdri"].includes(id)) {
@@ -5633,7 +5783,7 @@ export function App() {
 
   const [suitExportAssetIds, setSuitExportAssetIds] = useState<string[] | null>(null);
   const [suitExportHidden, setSuitExportHidden] = useState(false);
-  const selectedSuitOwnerId = selectedAsset && ['suit', 'weapon', 'monster'].includes(selectedAsset.assetType) ? componentParentId(selectedAsset.id) : '';
+  const selectedSuitOwnerId = selectedAsset && ['suit', 'weapon', 'monster', 'npc', 'item'].includes(selectedAsset.assetType) ? componentParentId(selectedAsset.id) : '';
   useEffect(() => {
     if (!selectedSuitOwnerId || !unrealConnected || suitExportAssetIds || !bridge.getSuitUnrealStatus) return;
     let disposed = false;
@@ -5658,7 +5808,7 @@ export function App() {
     if (suitExportAssetIds) { setSuitExportHidden(false); return; }
     const suits = assetIds.filter(id => {
       const asset = allAssets.find(item => item.id === componentParentId(id));
-      return ['weapon', 'monster', 'suit'].includes(asset?.assetType || '');
+      return ['weapon', 'monster', 'suit', 'npc', 'item'].includes(asset?.assetType || '');
     });
     if (assetIds.some(id => componentParentId(id) !== id) && (isBlenderTarget || isThreeDCoatTarget || suits.length !== assetIds.length)) { showStatus(t("此类型暂不支持部件独立导出", "This type does not support component export yet"), 8000); return; }
     if (busy || isExporting || pluginInstalling || exportInFlightRef.current) return;
@@ -6164,7 +6314,7 @@ export function App() {
     if (!bridgeAvailable || typeof bridge.materializeDroppedFile !== "function") {
       throw new Error(t("生成角色预览需要桌面端环境", "Character preview generation requires the desktop app"));
     }
-    const modelPaths = [...new Set(Object.values(draft.modelSlots).map((value) => String(value || "").trim()).filter((value) => /\.fbx$/i.test(value) && !/_LOD\d+\.fbx$/i.test(value)))];
+    const modelPaths = [...new Set(Object.values(draft.modelSlots).map((value) => String(value || "").trim()).filter((value) => /\.fbx$/i.test(value) && !/_LOD[1-9]\d*\.fbx$/i.test(value)))];
     if (modelPaths.length === 0) {
       const groom = draft.assetType === 'suit' && draft.characterFields.variant === 'Hair'
         ? Object.values(draft.modelSlots).find(file => /\.abc$/i.test(file)) : undefined;
@@ -6205,7 +6355,9 @@ export function App() {
       }, {
         partPaths: new Set(modelPaths.filter(file => draft.assetType === 'weapon' || draft.assetType === 'suit'
           || draft.assetType === 'monster' && /_WP_/i.test(file.split(/[\\/]/).pop() || ''))),
-        texturedOwner: draft.assetType !== 'suit' || Boolean(heroPartKind(draft.characterFields))
+        texturedOwner: draft.assetType !== 'suit' || Boolean(heroPartKind(draft.characterFields)),
+        heroPart: heroPartKind(draft.characterFields),
+        separateModels: draft.assetType === 'weapon'
       });
     const paths = { front: "", left: "", right: "", back: "" };
     for (const view of CHARACTER_PREVIEW_VIEWS) {
@@ -8056,7 +8208,10 @@ export function App() {
             .map((filePath) => normalizeLocalPath(filePath))
             .filter(Boolean)
         )];
-        const modelSourceFiles = hasSt9 && st9ModelFiles.length > 0
+        const characterModels = files.filter(file => /\.(fbx|obj|abc|gltf|glb)$/i.test(file));
+        const modelSourceFiles = isCharacterAssetType(inferredType)
+          ? characterModels.filter(file => !/_LOD[1-9]\d*(?=\.[^.]+$)/i.test(file))
+          : hasSt9 && st9ModelFiles.length > 0
           ? st9ModelFiles
           : (isPbrMaxAsset ? pbrMaxModelFiles : sourceModelCandidates);
         if (modelSourceFiles.length > 0) {
@@ -8068,12 +8223,20 @@ export function App() {
             nextEnabledModelTypes.push(slotKey);
           });
         }
-        const nextModelLodFiles = buildImportModelLodFiles(
+        let nextModelLodFiles = buildImportModelLodFiles(
           [...files, ...metadataModelFiles],
           metadataModelLods,
           nextModelSlots,
           nextModelVariantKeys
         );
+        if (isCharacterAssetType(inferredType)) {
+          nextModelLodFiles = {};
+          const identity = (file: string) => (file.replace(/\\/g, '/').split('/').pop() || '').replace(/_LOD\d+(?=\.[^.]+$)/i, '').toLowerCase();
+          for (const [slot, base] of Object.entries(nextModelSlots)) {
+            nextModelLodFiles[slot] = characterModels.filter(file => /_LOD[1-9]\d*(?=\.[^.]+$)/i.test(file) && identity(file) === identity(base))
+              .map(filePath => ({ filePath, lod: Number(filePath.match(/_LOD(\d+)(?=\.[^.]+$)/i)?.[1]) })).sort((a, b) => a.lod - b.lod);
+          }
+        }
         let nextTextureEntries: TextureEntry[] = [];
         if (inferredType === "hdri") {
           const metadataHdr = Array.isArray(metadata?.textureSlots)
@@ -8211,7 +8374,7 @@ export function App() {
         const familyIdentity = inferFamilyPackageIdentity(inferredType, filePaths[0] || characterSourcePackageName, [characterSourcePackageName, ...files]);
         if (familyIdentity) {
           resolvedGuessedName = familyIdentity.assetName || resolvedGuessedName;
-          nextSubCategory = familyIdentity.category;
+          if (familyIdentity.category || inferredType === 'monster') nextSubCategory = familyIdentity.category;
         }
         const inferredCharacterFields = isCharacterAssetType(inferredType)
           ? inferCharacterFields(inferredType, [characterSourcePackageName, assetFolderName, resolvedGuessedName, ...files])
@@ -8224,6 +8387,7 @@ export function App() {
           inferredCharacterFields.formIds = familyIdentity.formIds;
         }
         if (isCharacterAssetType(inferredType)) {
+          if (inferredType === 'item') inferredCharacterFields.displayNameZh = '';
           const sourceNames = (metadata as { character?: { displayNameZh?: string; displayNameEn?: string } } | null)?.character;
           if (sourceNames?.displayNameZh) inferredCharacterFields.displayNameZh = sourceNames.displayNameZh;
           if (sourceNames?.displayNameEn) inferredCharacterFields.displayNameEn = sourceNames.displayNameEn;
@@ -8306,6 +8470,7 @@ export function App() {
           subCategory: nextSubCategory,
           characterFields: inferredCharacterFields,
           characterPackageFiles: isCharacterAssetType(inferredType) ? [...new Set(files)] : [],
+          characterManualExclusions: [],
           characterDuplicateTextures: textureDedup.duplicates,
           characterExcludedFiles: isCharacterAssetType(inferredType) ? characterFilePartition.excluded : [],
           characterFileScopes: inferredType === "suit" ? inferHeroPackageFileScopes([...new Set(files)]) : {},
@@ -8367,7 +8532,7 @@ export function App() {
         const characterModelAnalysis: ImportFormState["characterModelAnalysis"] = Object.fromEntries(nonFbx.map(file => [file, {
           ok: true, meshKind: "staticMesh", hasSkeleton: false, hasSkin: false, boneCount: 0, skinnedMeshCount: 0
         }]));
-        const fbxFiles = modelFiles.filter(file => /\.fbx$/i.test(file));
+        const fbxFiles = draft.form.characterPackageFiles.filter(file => /\.fbx$/i.test(file));
         if (fbxFiles.length && bridge.analyzeCharacterModels) {
           const result = await bridge.analyzeCharacterModels(fbxFiles);
           Object.assign(characterModelAnalysis, result.analyses || {});
@@ -8700,6 +8865,11 @@ export function App() {
     if (['gender', 'bodyCode', 'suitClass', 'serial', 'weaponType', 'name', 'formIds', 'relatedAssetId'].some(key => key in patch)) characterFields.identityConfirmed = false;
     if (patch.displayNameZh !== undefined || patch.displayNameEn !== undefined) characterFields.nameConfirmed = false;
     Object.assign(characterFields, syncCharacterNames(form.assetType, characterFields));
+    if (form.assetType === 'item') {
+      const itemIdentity = gameplayIdentity(form.subCategory, characterFields.displayNameEn);
+      characterFields.name = itemIdentity.name;
+      characterFields.displayNameEn = itemIdentity.name;
+    }
     const previousEnglish = form.characterFields.displayNameEn ?? (form.assetType === 'suit' ? form.characterFields.suitName : form.characterFields.name);
     if (characterFields.displayNameEn !== previousEnglish) {
       characterFields.identityConfirmed = false;
@@ -8884,7 +9054,8 @@ export function App() {
   }
 
   function renderFamilyIdentityEditor() {
-    return <div className={`character-confirmation-editor${['weapon', 'monster'].includes(importForm.assetType) && importForm.characterPackageFiles.length && !importForm.characterFields.identityConfirmed ? ' character-identity-unconfirmed' : ''}`}>
+    if (importForm.assetType === 'item') return renderGameplayCategorySelectors();
+    return <div className={`character-confirmation-editor${['weapon', 'monster', 'npc'].includes(importForm.assetType) && importForm.characterPackageFiles.length && !importForm.characterFields.identityConfirmed ? ' character-identity-unconfirmed' : ''}`}>
       <div className="settings-row">
         <div className="settings-label">{t("类别", "Category")}</div>
         <DarkSelect className="settings-dark-select"
@@ -8900,8 +9071,8 @@ export function App() {
       <div className="settings-row">
                           <div className="settings-label">{t("结构化字段", "Structured Fields")}</div>
                           <div className="settings-field-col">
-                            <div className={importSelectionAssetType === "monster" ? "monster-identity-row" : "character-identity-inputs"}>
-                            {importSelectionAssetType !== "monster" && (
+                            <div className={['monster', 'npc'].includes(importSelectionAssetType) ? "monster-identity-row" : "character-identity-inputs"}>
+                            {importSelectionAssetType === "weapon" && (
                             <input
                               className="settings-input"
                               value={getImportSelectionValue((form) => form.characterFields.serial) ?? ""}
@@ -8909,10 +9080,10 @@ export function App() {
                               onChange={(event) => applyImportBatchPatch((form) => updateCharacterFields(form, { serial: event.target.value }))}
                             />
                             )}
-                            {importSelectionAssetType === "monster" ? (
+                            {['monster', 'npc'].includes(importSelectionAssetType) ? (
                               <>
                                 <label className="monster-identity-field">
-                                  <span className="monster-field-label">{t("怪物名称", "Monster Name")}{monsterFieldIssues.name && <small className="import-required-label">{t("待补全", "Required")}</small>}</span>
+                                  <span className="monster-field-label">{importSelectionAssetType === 'monster' ? t("怪物名称", "Monster Name") : t('NPC 名称', 'NPC Name')}{monsterFieldIssues.name && <small className="import-required-label">{t("待补全", "Required")}</small>}</span>
                                   <input className={`settings-input${monsterFieldIssues.name ? " import-field-required" : ""}`} readOnly
                                     aria-invalid={monsterFieldIssues.name || undefined}
                                     value={getImportSelectionValue((form) => normalizeMonsterNames(form.characterFields).name) ?? ""}
@@ -8933,22 +9104,22 @@ export function App() {
                             ) : (
                               <input className="settings-input"
                                 value={getImportSelectionValue((form) => form.characterFields.name || "") ?? ""}
-                                readOnly placeholder={t("与英文名同步", "Follows English Name")}
+                                readOnly placeholder={importSelectionAssetType === 'item' && gameplayUsesResourceId(importForm.subCategory) ? t('与资源 ID 同步', 'Follows Resource ID') : t("与英文名同步", "Follows English Name")}
                                 />
                             )}
                             </div>
-                            {importSelectionAssetType === "monster" && (
+                            {['monster', 'npc'].includes(importSelectionAssetType) && (
                               <>
                               {monsterFieldIssues.name && <div id="monster-name-guidance" className="settings-field-hint monster-name-guidance">{t("名称以字母开头，仅含字母、数字、下划线；不含 SK_ 和形态编号。", "Use letters, digits and underscores, starting with a letter; omit SK_ and the form number.")}</div>}
                               <div className="settings-field-hint">
                                 {t("初始编号从主体识别，可修改；入库以确认值为准。", "Initially detected from the body; editable. The confirmed number is used for import.")}
                               </div>
-                              {getMonsterFormSummary(importForm.characterPackageFiles, importForm.characterModelAnalysis).length > 1 && (
+                              {importSelectionAssetType === 'monster' && getMonsterFormSummary(importForm.characterPackageFiles, importForm.characterModelAnalysis).length > 1 && (
                                 <div className="settings-field-hint" style={{ color: "var(--warning)" }}>
                                   {t("本包包含多个主体形态，请每个形态分别选择文件夹导入；每个形态保留独立卡片。", "This package contains multiple body forms. Select each form's folder separately; each form gets its own card.")}
                                 </div>
                               )}
-                              <DarkSelect
+                              {importSelectionAssetType === 'monster' && <DarkSelect
                                 value={getImportSelectionValue((form) => form.characterFields.relatedAssetId || "") ?? ""}
                                 ariaLabel={t("关联怪物", "Monster association")}
                                 className="settings-dark-select"
@@ -8961,30 +9132,60 @@ export function App() {
                                   }))
                                 ]}
                                 onChange={(value) => applyImportBatchPatch((form) => updateCharacterFields(form, { relatedAssetId: value }))}
-                              />
-                              <div className="settings-field-hint">
+                              />}
+                              {importSelectionAssetType === 'monster' && <div className="settings-field-hint">
                                 {monsterLinkCandidates.length
                                   ? t("发现同名同类别怪物。若这是它的新形态，请选择关联；同名的另一只怪物仍选独立建档。", "Matching monsters found. Link a new form to its monster, or keep a different same-name monster independent.")
                                   : t("本次独立建档；以后导入新形态时，可选择关联到此怪物。", "Create this monster now; link later forms to it when importing them.")}
                                 {" "}{t("关联后各形态仍独立存储，不覆盖已有文件。", "Linked forms remain separately stored without replacing existing files.")}
-                              </div>
+                              </div>}
                               </>
                             )}
                             <div className="settings-field-hint">
-                              {importSelectionAssetType === "monster" ? t("UE 资产名预览", "UE Asset Name Preview") : t("规范资产名", "Standard asset name")}：{importSelectionAssetType === "monster"
-                                ? buildMonsterAssetName(normalizeMonsterNames(importForm.characterFields).name, importForm.characterFields.formIds) || t("请填写怪物名称并识别形态", "Enter the monster name and detect its form")
+                              {['monster', 'npc'].includes(importSelectionAssetType) ? t("规范资产名预览", "Standard Asset Name Preview") : t("规范资产名", "Standard asset name")}：{['monster', 'npc'].includes(importSelectionAssetType)
+                                ? buildCharacterAssetName(importSelectionAssetType, importForm.characterFields, importForm.subCategory) || t("请填写英文名并确认两位形态", "Enter the English name and confirm the two-digit form")
                                 : buildCharacterAssetName(importSelectionAssetType, importForm.characterFields, importForm.subCategory) || t("请补齐类别、编号和名称", "Enter category, index, and name")}
                             </div>
                           </div>
                         </div>
-      {['weapon', 'monster'].includes(importForm.assetType) && <label className="character-identity-confirm">
+      {['weapon', 'monster', 'npc'].includes(importForm.assetType) && <label className="character-identity-confirm">
         <input type="checkbox" checked={importForm.characterFields.identityConfirmed === true}
           onChange={event => { const checked = event.target.checked; applyImportBatchPatch(form => updateCharacterFields(form, { identityConfirmed: checked })); }} />
-        {importForm.assetType === 'monster' ? t('我已核对怪物名称、形态和关联', 'I have checked the monster name, form and relationship') : t('我已核对武器类别和编号', 'I have checked the weapon type and number')}
+        {importForm.assetType === 'monster' ? t('我已核对怪物名称、形态和关联', 'I have checked the monster name, form and relationship')
+          : importForm.assetType === 'npc' ? t('我已核对 NPC 类别、名称和形态', 'I have checked the NPC category, name and form')
+          : t('我已核对武器类别和编号', 'I have checked the weapon type and number')}
       </label>}
     </div>;
   }
 
+
+  function gameplayLevelLabel(index: number) {
+    return [t('资源类型', 'Resource type'), t('分类', 'Category'), t('子分类', 'Subcategory'), t('细分类型', 'Subtype')][index] || t('子分类', 'Subcategory');
+  }
+
+  function renderGameplayCategorySelectors() {
+    return <div className="gameplay-category-selectors">{gameplaySelectionLevels(importForm.subCategory).map((level, index) => <div className="settings-row" key={index}>
+      <div className="settings-label">{gameplayLevelLabel(index)}</div>
+      <div className="settings-field-col"><DarkSelect className="settings-dark-select" value={level.value}
+        ariaLabel={gameplayLevelLabel(index)}
+        options={[{ value: '', label: t('请选择…', 'Select…') }, ...level.options.map(option => ({ value: option.value, label: uiLanguage === 'zh' ? option.label : option.code }))]}
+        onChange={value => applyImportBatchPatch(form => {
+          const category = value || level.options[0].value.split('/').slice(0, -1).join('/');
+          return { ...updateCharacterFields({ ...form, subCategory: category }, { confirmed: false, nameConfirmed: false }),
+            destinationPath: getDefaultImportDestinationPath(form.assetType, '', category) };
+        })} /></div>
+    </div>)}</div>;
+  }
+
+  function characterImportMaterialRows(form: ImportFormState) {
+    if (form.assetType !== 'suit' || heroPartKind(form.characterFields)) return [];
+    const names = Object.values(form.materialNames || {});
+    const groups = names.length ? names : form.characterPackageFiles.filter(file => classifyCharacterPackageFile(file) === 'texture').map(inferCharacterTextureGroup);
+    const rows = reviewSuitMaterialSlots(heroPackageModelFiles(form.characterPackageFiles).filter(file => /\.fbx$/i.test(file)).map(file => ({
+      file, part: heroSuitPart(file), slots: form.characterModelAnalysis[file]?.materialNames
+    })), groups, form.characterFields.materialSlotMappings);
+    return [...new Map(rows.map(row => [row.id, row])).values()];
+  }
 
   function renderCharacterImportConfirmation() {
     const form = importForm;
@@ -8992,33 +9193,49 @@ export function App() {
     const names = normalizeCharacterNames(fields);
     const rows = [
       [t("资产类型", "Asset Type"), getAssetTypeOptionsForForm(form.assetType).find(item => item.value === (heroPartKind(fields) || form.assetType))?.label],
-      [t("分类", "Category"), form.subCategory ? getSubCategoryDisplayLabel(form.subCategory) : ""],
+      ...(form.assetType === 'item' ? [] : [[t("分类", "Category"), form.subCategory ? getSubCategoryDisplayLabel(form.subCategory) : ""]]),
       ...(!heroPartKind(fields) ? [[t("中文名", "Chinese Name"), validCharacterChineseName(fields.displayNameZh) ? fields.displayNameZh : ""],
-      [t("英文名", "English Name"), names.displayNameEn]] : []),
+      [form.assetType === 'item' && gameplayUsesResourceId(form.subCategory) ? t('资源 ID', 'Resource ID') : t("英文名", "English Name"), names.displayNameEn]] : []),
       [t("规范入库名称", "Archive Name"), buildCharacterAssetName(form.assetType, fields, form.subCategory)],
-      ...(form.assetType === "monster" ? [[t("形态", "Form"), displayMonsterFormNumbers(fields.formIds)]] : []),
+      ...(['monster', 'npc'].includes(form.assetType) ? [[t("形态", "Form"), displayMonsterFormNumbers(fields.formIds)]] : []),
       [t("制作状态", "Status"), characterStatus(fields.maturity).zh],
       [t("目标位置", "Destination"), form.subCategory ? form.destinationPath : ""]
     ];
-    const models = heroPackageModelFiles(form.characterPackageFiles);
+    const materialRows = characterImportMaterialRows(form);
+    // FBX names and source files are reviewed together with their LODs below.
+    const models = heroPackageModelFiles(form.characterPackageFiles).filter(file => !/\.fbx$/i.test(file));
     return <div className="character-import-confirmation">
       <strong>{t("入库信息确认", "Confirm Import Information")}</strong>
       {form.assetType === "suit" && renderHeroIdentityEditor()}
-      {["monster", "npc", "weapon"].includes(form.assetType) && renderFamilyIdentityEditor()}
+      {["monster", "npc", "weapon", "item"].includes(form.assetType) && renderFamilyIdentityEditor()}
       {rows.map(([label, value]) => <div className="character-import-summary-row" key={label}>
         <span>{label}</span><span className={value ? "" : "character-import-missing"}>{value || t("待补充 / 未识别", "Missing / not detected")}</span>
       </div>)}
-      <details><summary>{t("查看模型与规范名称", "Models and normalized names")} · {models.length}</summary>
+      {form.assetType === 'weapon' && <p className="character-import-hint">{t('左右手使用上面确认的同一个整套英文名，只用 _L / _R 区分；弓箭使用各自部位后缀。', 'Left and right share the confirmed package English name, distinguished only by _L / _R. Bows use component suffixes.')}</p>}
+      {!!materialRows.length && <details className="character-material-review" open={materialRows.some(row => !row.key || row.corrected) || undefined}>
+        <summary>{t('模型材质匹配', 'Model materials')} · {materialRows.length}{materialRows.some(row => !row.key) ? t(' · 待确认', ' · Needs review') : ''}</summary>
+        {materialRows.map(row => <div className="character-material-review-row" key={row.id}>
+          <div><span title={row.file}>{row.file.replaceAll('\\', '/').split('/').pop()}</span><strong title={row.slot}>{row.slot}</strong></div>
+          <DarkSelect value={row.key} ariaLabel={row.slot} options={[{ value: '', label: t('请选择对应贴图组', 'Choose texture group') }, ...row.groups.map(group => ({ value: group.key, label: group.name }))]}
+            onChange={value => applyImportBatchPatch(current => updateCharacterFields(current, { confirmed: false, materialSlotMappings: { ...current.characterFields.materialSlotMappings, [row.id]: value } }))} />
+          {row.corrected && <small>{t('已兼容 hari → hair；原 FBX 保持不变。', 'Recognized hari as hair; source FBX unchanged.')}</small>}
+        </div>)}
+      </details>}
+      {!(models.length && !characterImportLodFiles(form).length) && <CharacterLodReview showEmpty files={characterImportLodFiles(form)} t={t} confirmed={characterImportLodsConfirmed(form)}
+        onConfirm={value => setImportForm(current => ({ ...current, characterLodConfirmation: value ? characterLodReviewToken(characterImportLodFiles(current)) : '', characterFields: { ...current.characterFields, confirmed: false } }))} />
+      }
+      {models.length > 0 && <details><summary>{t("查看 Groom 模型与规范名称", "Groom models and normalized names")} · {models.length}</summary>
         {models.length ? models.map(file => {
           const original = file.replace(/\\/g, "/").split("/").pop() || "";
           const analysis = form.characterModelAnalysis[file];
           const meshKind = analysis?.meshKind;
-          const target = form.assetType === "suit" ? heroModelStem(buildCharacterAssetName("suit", fields), file, fields, meshKind || "staticMesh") : previewFamilyFileName(form.assetType, form.assetName, file, fields.name, monsterImportAudit?.modelAliases).replace(/\.[^.]+$/, "").replace(/^(SK|SM)_/i, meshKind === 'skeletalMesh' ? 'SK_' : 'SM_');
+          const target = form.assetType === "suit" ? heroModelStem(buildCharacterAssetName("suit", fields), file, fields, meshKind || "staticMesh") + (Number(file.match(/_LOD(\d+)(?=\.[^.]+$)/i)?.[1]) > 0 ? `_LOD${Number(file.match(/_LOD(\d+)(?=\.[^.]+$)/i)?.[1])}` : '') : previewFamilyFileName(form.assetType, form.assetName, file, fields.name, monsterImportAudit?.modelAliases).replace(/\.[^.]+$/, "").replace(/^(SK|SM)_/i, meshKind === 'skeletalMesh' ? 'SK_' : 'SM_');
           const kindLabel = fields.variant === 'Hair' && /\.abc$/i.test(file) ? 'Groom ABC' : meshKind === "skeletalMesh" ? t("骨骼", "Skeletal") : meshKind === "staticMesh" ? t("静态", "Static") : t("检查失败", "Inspection failed");
           return <div key={file} className={`character-import-model-name${analysis?.ok ? "" : " character-import-missing"}`}><span>{kindLabel}</span> · {target || original.replace(/\.[^.]+$/, "")}<div className="settings-field-hint">{t("来源", "Source")}：{original}{target && target !== original.replace(/\.[^.]+$/, "") ? t(" → 入库副本将按以上名称保存（原文件不变）", " → the managed copy will use the name above (source unchanged)") : ""}{analysis?.ok && /\.fbx$/i.test(file) ? ` · ${t("骨骼", "Bones")} ${analysis.boneCount || 0} · ${t("蒙皮网格", "Skinned meshes")} ${analysis.skinnedMeshCount || 0}` : ""}</div>{!analysis?.ok && <div className="settings-field-hint error">{analysis?.message || t("无法读取模型内容", "Could not inspect model contents")}</div>}</div>;
         })
           : <span className="character-import-missing">{t("请先选择资产包并识别模型", "Select a package to detect models")}</span>}
-      </details>
+        <p className="settings-field-hint">{t('Groom ABC 使用 UE 自身的 Groom LOD 设置，无需核对独立 FBX LOD。', 'Groom ABC uses UE Groom LOD settings, not separate FBX LOD files.')}</p>
+      </details>}
       {fields.editedFields?.some(key => ['gender', 'bodyCode', 'variant', 'serial', 'suitClass', 'weaponType', 'formIds', 'displayNameZh', 'displayNameEn'].includes(key)) && <div className="settings-field-hint" style={{ color: 'var(--warning)', fontSize: 12 }}>{t('如与源文件名称不同，将以此处确认的信息入库，原文件不变。', 'If source names differ, the confirmed fields above define the imported asset. Source files stay unchanged.')}</div>}
       {form.assetType === "suit" && !heroPackageNeedsScopeReview(form.characterPackageFiles, form.characterScopesConfirmed) && auditHeroPackage(form.characterPackageFiles, fields, { modelAnalyses: form.characterModelAnalysis }).map(issue => <div role="alert" className="character-import-missing" key={issue} style={{ whiteSpace: "pre-wrap" }}>{issue}</div>)}
       {!!form.characterExcludedFiles?.length && <details><summary>{t('不入库文件', 'Excluded files')} · {form.characterExcludedFiles.length}</summary>
@@ -9037,10 +9254,13 @@ export function App() {
     const form = importForm;
     const fields = form.characterFields;
     const issues: string[] = [];
+    if (form.assetType === 'item' && /^(Gameplay|Item)(?:\/|$)/.test(form.subCategory) && !gameplayLeafCategories.includes(form.subCategory)) issues.push(t('请选择完整的子分类', 'Select the final subcategory'));
+    if (characterImportMaterialRows(form).some(row => !row.key)) issues.push(t('请选择未匹配材质槽对应的贴图组', 'Choose texture groups for unmatched material slots'));
     if (!form.characterPackageFiles.length) issues.push(t('选择文件夹并完成检查', 'Select and inspect a folder'));
+    if (!characterImportLodsConfirmed(form)) issues.push(t('核对各部件的 LOD 模型文件并勾选确认', 'Review and confirm the model files for each component and LOD'));
     if (!heroPartKind(fields) && !validCharacterChineseName(fields.displayNameZh)) issues.push(t('填写中文名', 'Enter a Chinese name'));
-    if (!heroPartKind(fields) && !validCharacterEnglishName(fields.displayNameEn)) issues.push(t('填写英文名（字母、数字、下划线）', 'Enter an English name (letters, numbers, underscores)'));
-    if (!heroPartKind(fields) && !fields.nameConfirmed) issues.push(t('核对中文名、英文名并勾选确认', 'Check and confirm the Chinese and English names'));
+    if (!heroPartKind(fields) && !(form.assetType === 'item' ? gameplayIdentity(form.subCategory, fields.displayNameEn).assetName : validCharacterEnglishName(fields.displayNameEn))) issues.push(form.assetType === 'item' && gameplayUsesResourceId(form.subCategory) ? t('填写数字资源 ID', 'Enter the numeric resource ID') : t('填写英文名（字母、数字、下划线）', 'Enter an English name (letters, numbers, underscores)'));
+    if (!heroPartKind(fields) && !fields.nameConfirmed) issues.push(form.assetType === 'item' && gameplayUsesResourceId(form.subCategory) ? t('核对中文名、资源 ID 并勾选确认', 'Check and confirm the Chinese name and resource ID') : t('核对中文名、英文名并勾选确认', 'Check and confirm the Chinese and English names'));
     if (['suit', 'weapon'].includes(form.assetType) && !fields.identityConfirmed) issues.push(form.assetType === 'weapon'
       ? t('核对武器类别和编号', 'Confirm the weapon type and number')
       : t('核对体型、套装规格和编号', 'Confirm the body, suit class and number'));
@@ -9079,6 +9299,9 @@ export function App() {
             ? t("请先确认每个 FBX 属于套装还是武器；贴图自动跟随对应 FBX，检查通过后才会生成四视图", "Assign each FBX to Outfit or Weapon first. Textures follow their FBX; four views render only after validation")
             : t("扫描检查通过后会自动生成正／左／右／后四张预览", "Four views are generated automatically after the package passes validation")}</div>
       )}
+      {showFourViews && !hasCompleteCharacterPreview(importForm.characterPreviewPaths) && <button type="button" className="browse-btn"
+        disabled={quickDropBusy || characterPreviewGenerating || importModalLocked}
+        onClick={() => void refreshSelectedCharacterPreview()}>{characterPreviewGenerating ? t('正在生成预览…', 'Generating previews…') : t('按当前文件重新生成预览', 'Regenerate previews from selected files')}</button>}
       <div className="character-custom-cover">
         <PreviewDropSlot t={t} previewImagePath={importForm.previewImagePath}
           emptyLabel={t("+ 自定义上传主图", "+ Upload custom cover")}
@@ -9104,6 +9327,28 @@ export function App() {
         onClick={() => void addCharacterImportImages()}>{t('+ 加入新图片', '+ Add image')}</button>
       {!importForm.previewImagePath && <div className="settings-field-hint character-import-missing">{t("默认使用正面；也可上传自定义主图。贴图不会冒充预览。", "Front is the default cover; you may upload a custom cover. Texture maps are never used as previews.")}</div>}
     </div>;
+  }
+
+  async function refreshSelectedCharacterPreview() {
+    if (quickDropBusy || characterPreviewGenerating || importModalLocked) return;
+    if (importForm.assetType === 'suit' && heroPackageNeedsScopeReview(importForm.characterPackageFiles, importForm.characterScopesConfirmed)) {
+      showStatus(t('请先确认套装与武器的文件归属', 'Confirm outfit and weapon file ownership first'), 8000); return;
+    }
+    const draft = importForm;
+    const requestId = `file-selection-${Date.now()}`;
+    quickDropRequestIdRef.current = requestId;
+    setCharacterPreviewGenerating(true);
+    try {
+      const rendered = await generateCharacterPreviewForForm(draft, requestId);
+      if (quickDropRequestIdRef.current !== requestId) return;
+      setImportForm(current => current.queueId !== draft.queueId || current.characterPackageFiles !== draft.characterPackageFiles ? current : {
+        ...current, characterPreviewPaths: rendered.characterPreviewPaths, characterPartPreviews: rendered.characterPartPreviews,
+        previewImagePath: current.previewImagePath || rendered.previewImagePath, characterPreviewError: ''
+      });
+    } catch (error) {
+      const message = String(error instanceof Error ? error.message : error);
+      setImportForm(current => current.characterPackageFiles !== draft.characterPackageFiles ? current : { ...current, characterPreviewError: message });
+    } finally { setCharacterPreviewGenerating(false); }
   }
 
   function renderImportAnimationFileRow() {
@@ -10619,6 +10864,7 @@ export function App() {
       textureFingerprint?: string;
     };
   }) {
+    if (isCharacterAssetType(form.assetType)) form = pruneCharacterImportFiles(form);
     if (!form.assetName.trim()) {
       throw new Error(t("请先填写资产名", "Enter an asset name first"));
     }
@@ -10641,7 +10887,7 @@ export function App() {
       if (form.characterPackageFiles.length === 0) {
         throw new Error(t("角色资产包中没有可入库文件", "The character package has no files to archive"));
       }
-      const uncheckedModel = heroPackageModelFiles(form.characterPackageFiles).find(file => {
+      const uncheckedModel = [...new Set([...heroPackageModelFiles(form.characterPackageFiles), ...form.characterPackageFiles.filter(file => /\.fbx$/i.test(file))])].find(file => {
         const analysis = form.characterModelAnalysis[file];
         return !analysis?.ok || !["staticMesh", "skeletalMesh"].includes(String(analysis.meshKind || ""));
       });
@@ -10658,18 +10904,24 @@ export function App() {
       if (form.characterFields.confirmed !== true) {
         throw new Error(t("请先确认结构化字段、文件清单和目标路径", "Confirm the structured fields, file list, and destination first"));
       }
+      if (!characterImportLodsConfirmed(form)) throw new Error(t('请核对各部件的 LOD 模型文件并勾选确认', 'Review and confirm every component and LOD model file'));
       if (form.assetType === 'suit' && !form.characterFields.identityConfirmed) throw new Error(t('请核对并确认体型、套装规格和编号', 'Confirm the body, suit class and number'));
       if (form.assetType === 'monster' && !form.characterFields.identityConfirmed) throw new Error(t('请核对并确认怪物名称、形态和关联', 'Confirm the monster name, form and relationship'));
-      if (!heroPartKind(form.characterFields) && !validCharacterEnglishName(form.characterFields.displayNameEn)) throw new Error(t('请填写有效的英文名', 'Enter a valid English name'));
+      if (form.assetType === 'npc' && !form.characterFields.identityConfirmed) throw new Error(t('请核对并确认 NPC 类别、名称和形态', 'Confirm the NPC category, name and form'));
+      if (!heroPartKind(form.characterFields) && !(form.assetType === 'item' ? gameplayIdentity(form.subCategory, form.characterFields.displayNameEn).assetName : validCharacterEnglishName(form.characterFields.displayNameEn))) throw new Error(t('请填写有效的英文名或数字资源 ID', 'Enter a valid English name or numeric resource ID'));
       if (!heroPartKind(form.characterFields) && !form.characterFields.nameConfirmed) throw new Error(t('请核对中文名和英文名并勾选确认', 'Check and confirm the Chinese and English names'));
       if (form.assetType === 'weapon' && !form.characterFields.identityConfirmed) throw new Error(t('请核对并确认武器类别和编号', 'Confirm the weapon type and number'));
       if (form.assetType !== "suit") {
         const expectedName = buildCharacterAssetName(form.assetType, form.characterFields, form.subCategory);
-        if (form.assetType === "monster" && !expectedName) {
-          throw new Error(t("请确认怪物类别和自动识别的名称；无法识别名称时再补填", "Confirm the monster category and detected name; enter a name only if detection failed"));
+        if (['monster', 'npc'].includes(form.assetType) && !expectedName) {
+          throw new Error(form.assetType === 'monster'
+            ? t("请确认怪物类别和自动识别的名称；无法识别名称时再补填", "Confirm the monster category and detected name; enter a name only if detection failed")
+            : t('请确认 NPC 类别、英文名和两位形态编号', 'Confirm the NPC category, English name, and two-digit form'));
         }
         if (form.assetType !== "monster" && (!expectedName || form.assetName.trim().toLowerCase() !== expectedName.toLowerCase())) {
-          throw new Error(t("请核对类别、三位编号和名称，资产名须与规范目录名一致", "Check category, three-digit index, and name; the asset name must match the standard package name"));
+          throw new Error(form.assetType === 'npc'
+            ? t('请核对 NPC 类别、英文名和两位形态，资产名须与规范名称一致', 'Check the NPC category, English name, and two-digit form; the asset name must match the standard name')
+            : t("请核对类别、三位编号和名称，资产名须与规范目录名一致", "Check category, three-digit index, and name; the asset name must match the standard package name"));
         }
       }
       if (form.assetType === "suit") {
@@ -10763,7 +11015,7 @@ export function App() {
           ? partitionCharacterPackageFiles(form.characterPackageFiles).accepted
           : undefined,
         characterModelAnalysis: isCharacterAssetType(form.assetType)
-          ? form.characterModelAnalysis
+          ? Object.fromEntries(Object.entries(form.characterModelAnalysis).filter(([file]) => form.characterPackageFiles.includes(file)))
           : undefined,
         characterAnalysisSourcePaths: isCharacterAssetType(form.assetType)
           ? [...form.characterPackageFiles, ...(form.characterExcludedFiles || [])].filter(file => /\.(ma|mb)$/i.test(file))
@@ -11543,6 +11795,7 @@ export function App() {
     }
     setBusy(true);
     setDeletionPlan(null);
+    setCharacterOperationProgress({ progress: 0, message: t('正在核对删除范围…', 'Checking deletion scope…') });
     try {
       const result = await bridge.previewAssetDeletion({ assetId: asset.id });
       if (!result.ok || !result.plan) throw new Error(result.message || t("删除预检失败", "Deletion preflight failed"));
@@ -11561,6 +11814,7 @@ export function App() {
     const wasSelected = String(selectedAssetId || "") === String(asset.id);
     setDeleteConfirmAsset(null);
     setBusy(true);
+    setCharacterOperationProgress({ progress: 0, message: t('正在准备删除…', 'Preparing deletion…') });
     // 删除前先收起该资产的预览，释放 Windows 上 file:// 预览图/模型的文件句柄，避免删除时报占用。
     setSelectedAssetId((prev) => (componentParentId(prev || "") === asset.id ? null : prev));
     await new Promise((resolve) => setTimeout(resolve, 220));
@@ -11660,6 +11914,11 @@ export function App() {
 
   async function validateCharacterUpdateModelSource(destination: CharacterUpdateDestination, sourcePath: string) {
     if (destination.role === "texture") return true;
+    const sourceLevel = Number(sourcePath.match(/_LOD(\d+)(?=\.[^.]+$)/i)?.[1] || 0);
+    if (sourceLevel !== (destination.lod || 0)) {
+      setCharacterUpdateError(t(`请选择 LOD${destination.lod || 0} 文件；当前文件识别为 LOD${sourceLevel}`, `Choose LOD${destination.lod || 0}; this file is LOD${sourceLevel}`));
+      return false;
+    }
     const extension = sourcePath.match(/\.[^.\\/]+$/)?.[0]?.toLowerCase() || "";
     if (extension !== ".fbx") {
       if (destination.role === "skeletalMesh") {
@@ -11693,6 +11952,7 @@ export function App() {
     if (!picked.length) return;
     if (picked.length !== 1) { setCharacterUpdateError(t("每个目标文件请只上传一个替换文件", "Upload exactly one replacement for each target file")); return; }
     const sourcePath = picked[0];
+    setCharacterUpdatePlan(null); setCharacterUpdateConfirmed(false);
     if (!(await validateCharacterUpdateModelSource(destination, sourcePath))) return;
     const nextSources = { ...characterUpdateReplacementSources, [destination.storedPath]: sourcePath };
     setCharacterUpdateReplacementSources(nextSources);
@@ -11795,9 +12055,10 @@ export function App() {
 
   function renderCharacterOperationProgress() {
     if (!busy) return null;
+    const percent = Math.round(characterOperationProgress?.progress || 0);
     return <div className="character-operation-progress" role="status" aria-live="polite">
-      <span>{characterOperationProgress?.message || t('正在处理，请稍候…', 'Working, please wait…')}</span>
-      <progress aria-label={t('操作进度', 'Operation progress')} max={100} value={characterOperationProgress?.progress} />
+      <div className="character-operation-progress-heading"><span>{characterOperationProgress?.message || t('正在处理，请稍候…', 'Working, please wait…')}</span><strong>{percent}%</strong></div>
+      <progress aria-label={t('操作进度', 'Operation progress')} max={100} value={percent} />
     </div>;
   }
 
@@ -11812,8 +12073,10 @@ export function App() {
     const editor = characterNameEditor;
     if (!editor || busy || !bridge?.updateCharacter) return;
     const value = editor.value.trim();
-    if (!validCharacterChineseName(value) || !validCharacterEnglishName(editor.english) || !editor.confirmed) {
-      setCharacterNameEditor({ ...editor, error: t("请填写中英文名并勾选确认", "Enter both names and check the confirmation box.") });
+    const identityInfo = getCharacterAssetInfo(editor.target);
+    const validIdentity = identityInfo?.family === 'item' ? gameplayIdentity(identityInfo.category, editor.english).assetName : validCharacterEnglishName(editor.english);
+    if (!validCharacterChineseName(value) || !validIdentity || !editor.confirmed) {
+      setCharacterNameEditor({ ...editor, error: t("请填写中文名、英文名或资源 ID，并勾选确认", "Enter the Chinese name and English name or resource ID, then confirm.") });
       return;
     }
     setBusy(true);
@@ -12287,7 +12550,8 @@ export function App() {
       }
 
       const isAlwaysExpanded = node.id === "home";
-      const isCharacterCategory = Boolean(getCharacterNavigationSelection(node.id)?.category);
+      const characterSelection = getCharacterNavigationSelection(node.id);
+      const isCharacterCategory = Boolean(characterSelection?.category || characterSelection?.assembly);
       const isExpanded = isAlwaysExpanded || expandedCategories.includes(node.id);
       const hasChildren = node.children && node.children.length > 0;
       const isActive = activeMenu === node.id;
@@ -12308,8 +12572,21 @@ export function App() {
       const NON_ROOT_TREE_LINE_OFFSET = 8;
       const ROOT_TREE_LINE_OFFSET = 13;
       const INDENT_STEP = 32;
-      const indentPixels = 16 + depth * INDENT_STEP - (isCharacterCategory ? 16 : 0);
-      const parentIndentPixels = 16 + (depth - 1) * INDENT_STEP;
+      const navigationIndent = (id: string | null | undefined, level: number) => {
+        const selection = getCharacterNavigationSelection(id || '');
+        if (selection?.family === 'item' && selection.category) {
+          const categoryDepth = selection.category.split('/').length;
+          return 16 + (level - categoryDepth) * INDENT_STEP + categoryDepth * 12;
+        }
+        // The additional weapon grouping must not consume another full 32px.
+        if (selection?.family === 'weapon' && selection.assembly) {
+          const extraLevels = selection.category ? 2 : 1;
+          return 16 + (level - extraLevels) * INDENT_STEP + extraLevels * 16;
+        }
+        return 16 + level * INDENT_STEP - (selection?.category ? 16 : 0);
+      };
+      const indentPixels = navigationIndent(node.id, depth);
+      const parentIndentPixels = navigationIndent(parentNodeId, depth - 1);
       const isThisRootWithIcon = isHomeNode || node.id === "favorite" || isFavNode;
       const isParentRootWithIcon =
         parentNodeId === "home" ||
@@ -12332,7 +12609,7 @@ export function App() {
       return (
         <div key={node.id} className={`nav-group ${isHovered ? "hovered" : ""}`}>
           <div
-            className={`left-item ${isActive ? "active" : ""}`}
+            className={`left-item ${isActive ? "active" : ""}${characterSelection?.family === 'weapon' ? ' weapon-navigation-item' : ''}`}
             style={{ paddingLeft: `${indentPixels}px` }}
             onMouseEnter={(e) => {
               e.stopPropagation();
@@ -12988,14 +13265,14 @@ export function App() {
                         {appUpdateTotalBytes > 0 ? ` / ${(appUpdateTotalBytes / 1024 / 1024).toFixed(1)} MB` : ""}
                       </span>
                       <div
-                        className={`update-download-progress ${appUpdateDownloadProgress == null ? "is-indeterminate" : ""}`}
+                        className="update-download-progress"
                         role="progressbar"
                         aria-label={t("下载更新", "Download Update")}
                         aria-valuemin={0}
                         aria-valuemax={100}
-                        aria-valuenow={appUpdateDownloadProgress ?? undefined}
+                        aria-valuenow={appUpdateDownloadProgress ?? 0}
                       >
-                        <span className="update-download-fill" style={{ width: appUpdateDownloadProgress == null ? undefined : `${appUpdateDownloadProgress}%` }} />
+                        <span className="update-download-fill" style={{ width: `${appUpdateDownloadProgress ?? 0}%` }} />
                         <span className="update-download-label">
                           {t("下载中", "Downloading")}{appUpdateDownloadProgress != null ? ` ${Math.round(appUpdateDownloadProgress)}%` : "..."}
                         </span>
@@ -13095,7 +13372,7 @@ export function App() {
                         {importDrafts.length > 1 && <span className="import-asset-number">{displayIndex + 1}</span>}
                         <ImportPreviewThumbnail sourcePath={previewThumbPath} loader={previewLoader}
                           fallback={<span className="import-asset-thumb-empty"><Icon name="image-preview" /></span>} />
-                        <span className="import-asset-name"><span className="import-asset-title">{name}</span><small>{({ "3d": t("3D 资产", "3D Asset"), "3dplant": t("3D 植物", "3D Plant"), surface: t("表面材质", "Surface"), decal: t("贴花", "Decal"), atlas: t("图集", "Atlas"), imperfection: t("瑕疵贴图", "Imperfection"), displacement: t("置换贴图", "Displacement"), hdri: "HDRI", animation: t("动画", "Animation"), suit: t("套装", "Suit"), monster: t("怪物", "Monster"), npc: "NPC", weapon: t("武器", "Weapon") } as Record<string, string>)[form.assetType] || t("未分类", "Uncategorized")}</small>
+                        <span className="import-asset-name"><span className="import-asset-title">{name}</span><small>{({ "3d": t("3D 资产", "3D Asset"), "3dplant": t("3D 植物", "3D Plant"), surface: t("表面材质", "Surface"), decal: t("贴花", "Decal"), atlas: t("图集", "Atlas"), imperfection: t("瑕疵贴图", "Imperfection"), displacement: t("置换贴图", "Displacement"), hdri: "HDRI", animation: t("动画", "Animation"), suit: t("套装", "Suit"), monster: t("怪物", "Monster"), npc: "NPC", weapon: t("武器", "Weapon") , item: t("玩法物件", "Gameplay Item") } as Record<string, string>)[form.assetType] || t("未分类", "Uncategorized")}</small>
                         {characterTaskWorkspace && <span className={`character-task-state${characterTaskIds.includes(form.queueId || '') ? ' running' : ''}`}>
                           {characterTaskIds.includes(form.queueId || '') ? t('正在入库', 'Importing') : t('待导入 · 可继续填写', 'Pending · editable')}
                         </span>}</span>
@@ -13203,7 +13480,7 @@ export function App() {
                     {!isAnimationAssetImportType(importSelectionAssetType) && (
                       <div className="settings-row">
                         <div className="settings-label">{t("资产类型", "Asset Type")}</div>
-                        <div className={`settings-field-col import-type-category-row${isCharacterAssetType(importSelectionAssetType) ? " character-type-category-row" : ""}`}>
+                        <div className={`settings-field-col import-type-category-row${isCharacterAssetType(importSelectionAssetType) ? " character-type-category-row" : ""}${importSelectionAssetType === 'item' ? ' gameplay-asset-type-row' : ''}`}>
                           <div style={{ display: "contents" }}>
                           <DarkSelect
                             value={getImportSelectionValue((form) => heroPartKind(form.characterFields) || form.assetType) ?? ""}
@@ -13214,7 +13491,7 @@ export function App() {
                             onChange={handleImportAssetTypeChange}
                           />
                           </div>
-                          {getSubCategoryOptions(importSelectionAssetType).length > 0 && importSelectionAssetType !== "weapon" && !heroPartKind(importForm.characterFields) && !isAnimationAssetImportType(importSelectionAssetType) && (
+                          {getSubCategoryOptions(importSelectionAssetType).length > 0 && !['weapon', 'item'].includes(importSelectionAssetType) && !heroPartKind(importForm.characterFields) && !isAnimationAssetImportType(importSelectionAssetType) && (
                             <>
                               <span className={`inline-text-label${importForm.characterPackageFiles.length > 0 && importSelectionAssetType === "monster" && monsterFieldIssues.category ? " import-required-label" : ""}`}>{importForm.characterPackageFiles.length > 0 && importSelectionAssetType === "monster" && monsterFieldIssues.category ? t("分类 · 待选择", "Category · required") : t("分类", "Category")}</span>
                               <DarkSelect
@@ -13268,10 +13545,7 @@ export function App() {
                             <DarkSelect value={importForm.characterFields.weaponType || importForm.subCategory} ariaLabel={t('武器类型', 'Weapon type')}
                               options={[{ value: '', label: t('选择武器类型', 'Select weapon type') }, ...WEAPON_TYPES.map(value => ({ value, label: value === 'Arrow' ? t('箭（归入弓 / 箭分类）', 'Arrow (Bow category)') : getCharacterCategoryDisplayLabel('weapon', value, uiLanguage) }))]}
                               onChange={value => applyImportBatchPatch(form => updateCharacterFields({ ...form, subCategory: weaponCategory(value), destinationPath: getDefaultImportDestinationPath('weapon', '', weaponCategory(value)) }, { weaponType: value, identityConfirmed: false }))} />
-                            {(importForm.characterFields.weaponType || importForm.subCategory) === 'Bow' && <DarkSelect
-                              value={importForm.characterFields.relatedAssetId || ''} ariaLabel={t('配套箭', 'Compatible arrow')}
-                              options={[{ value: '', label: t('配套箭：暂不关联', 'Compatible arrow: none') }, ...allAssets.filter(asset => asset.assetType === 'weapon' && (getCharacterAssetInfo(asset)?.fields.weaponType === 'Arrow' || /^Arrow\d{3}_/.test(asset.name))).map(asset => ({ value: asset.id, label: characterDisplayName(asset) }))]}
-                              onChange={value => applyImportBatchPatch(form => updateCharacterFields(form, { relatedAssetId: value }))} />}
+                            <span className="settings-field-hint">{t('部件按模型名称识别：弓 / 箭 / 箭袋，或左 / 右。下方检查各模型名称；共享贴图只需一份。', 'Parts follow model names: Bow / Arrow / Arrowbag or L / R. Check names below; textures may be shared.')}</span>
                           </>}
                           {importSelectionAssetType === "npc" && (
                             <>
@@ -13294,6 +13568,7 @@ export function App() {
                         </div>
                       </div>
                     )}
+                    {importSelectionAssetType === 'item' && renderGameplayCategorySelectors()}
                     {isCharacterAssetType(importSelectionAssetType) && (
                       <div className="settings-row character-package-scan-row">
                         <div className="settings-label">{t("资产包检查", "Package Inspection")}</div>
@@ -13312,8 +13587,8 @@ export function App() {
                           </button>
                           <span className="muted">{t("或拖入文件夹到这里", "Or drop a folder here")}</span>
                           </div>
-                          {quickDropBusy && <div className="character-package-scan-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={quickDropProgressKnown ? Math.round(quickDropProgress) : undefined}>
-                            <div className={quickDropProgressKnown ? "" : "indeterminate"} style={quickDropProgressKnown ? { width: `${Math.round(quickDropProgress)}%` } : undefined} />
+                          {quickDropBusy && <div className="character-package-scan-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(quickDropProgress)}>
+                            <div style={{ width: `${Math.round(quickDropProgress)}%` }} />
                             <span>{quickDropStage === "Previewing" ? characterPreviewProgress.total ? t(`正在准备预览 ${characterPreviewProgress.done}/${characterPreviewProgress.total}`, `Preparing previews ${characterPreviewProgress.done}/${characterPreviewProgress.total}`) : t('正在准备模型与贴图…', 'Preparing models and textures…') : t("正在读取并分析文件", "Reading and analyzing files")}{quickDropProgressKnown && characterPreviewProgress.total > 0 ? ` · ${Math.round(quickDropProgress)}%` : ""}</span>
                           </div>}
                         </div>
@@ -13327,24 +13602,26 @@ export function App() {
                           <div className="settings-field-col">
                             <input className="settings-input character-chinese-name-input" maxLength={32}
                               value={getImportSelectionValue(form => form.characterFields.displayNameZh) ?? ""}
-                              placeholder={t("未识别到时请填写中文名", "Enter the Chinese name if not detected")}
+                              placeholder={importSelectionAssetType === 'item' ? t('请手动填写中文显示名', 'Enter a Chinese display name') : t("未识别到时请填写中文名", "Enter the Chinese name if not detected")}
                               onChange={event => { const value = event.target.value; applyImportBatchPatch(form => updateCharacterFields(form, { displayNameZh: value })); }} />
+                            {importSelectionAssetType === 'item' && <span className="character-field-help">{t('请手动填写中文名，仅用于 AssetHive 显示，不影响文件名和 UE 命名。', 'Enter the Chinese name for AssetHive display only; file and UE names stay unchanged.')}</span>}
                           </div>
                         </div>
                         <div className="settings-row">
-                          <div className="settings-label">{t("英文名 · 必填", "English Name · Required")}</div>
+                          <div className="settings-label">{importSelectionAssetType === 'item' && gameplayUsesResourceId(importForm.subCategory) ? t('资源 ID · 必填', 'Resource ID · Required') : t("英文名 · 必填", "English Name · Required")}</div>
                           <div className="settings-field-col">
                             <input className="settings-input"
                               value={getImportSelectionValue(form => form.characterFields.displayNameEn) ?? ""}
-                              placeholder={t("英文字母开头，可含数字和下划线", "Start with a letter; letters, numbers and underscores")}
+                              placeholder={importSelectionAssetType === 'item' && gameplayUsesResourceId(importForm.subCategory) ? t('填写资源 ID，例如 901010001', 'Resource ID, e.g. 901010001') : t("英文字母开头，可含数字和下划线", "Start with a letter; letters, numbers and underscores")}
                               onChange={event => { const value = event.target.value; applyImportBatchPatch(form => updateCharacterFields(form, { displayNameEn: value })); }} />
+                            {importSelectionAssetType === 'suit' && !heroPartKind(importForm.characterFields) && <span className="character-field-help">{t('英文名格式：SuitName，每个单词首字母大写，例如 BuQiang。只填写套装名称。', 'English name: SuitName, with each word capitalized, e.g. BuQiang. Enter only the outfit name.')}</span>}
                           </div>
                         </div>
                             <label className="character-name-confirm character-identity-confirm">
                               <input type="checkbox" checked={getImportSelectionValue(form => form.characterFields.nameConfirmed === true) === true}
-                                disabled={!validCharacterChineseName(getImportSelectionValue(form => form.characterFields.displayNameZh)) || !validCharacterEnglishName(getImportSelectionValue(form => form.characterFields.displayNameEn))}
+                                disabled={!validCharacterChineseName(getImportSelectionValue(form => form.characterFields.displayNameZh)) || !(importSelectionAssetType === 'item' ? gameplayIdentity(importForm.subCategory, getImportSelectionValue(form => form.characterFields.displayNameEn)).assetName : validCharacterEnglishName(getImportSelectionValue(form => form.characterFields.displayNameEn)))}
                                 onChange={event => { const checked = event.target.checked; applyImportBatchPatch(form => updateCharacterFields(form, { nameConfirmed: checked })); }} />
-                              <span>{t("我已核对中文名和英文名", "I have checked the Chinese and English names")}</span>
+                              <span>{importSelectionAssetType === 'item' && gameplayUsesResourceId(importForm.subCategory) ? t('我已核对中文名和资源 ID', 'I have checked the Chinese name and resource ID') : t("我已核对中文名和英文名", "I have checked the Chinese and English names")}</span>
                             </label>
                         </div>}
                         <div className="settings-row">
@@ -13364,14 +13641,12 @@ export function App() {
                             />
                           </div>
                         </div>
-                        <div className="settings-row">
+                        <div className="settings-row character-import-review-row">
                           <div className="settings-label">{t("入库检查", "Archive Check")}</div>
                           <div className="settings-field-col">
                             <div className="settings-field-hint">
-                              {heroPartKind(importForm.characterFields) ? t(`已识别 ${importForm.characterPackageFiles.length} 个可入库文件。`, `${importForm.characterPackageFiles.length} supported files detected.`) : importSelectionAssetType === "monster" ? t(`允许格式 ${importForm.characterPackageFiles.length} 个；资源归属与版本检查通过后才能入库。`, `${importForm.characterPackageFiles.length} allowed files; resolve ownership and version conflicts before importing.`) : t(
-                                `允许格式 ${importForm.characterPackageFiles.length} 个；未归档资源仅在符合角色格式白名单时保存到 ${importSelectionAssetType === "suit" ? "SourceFiles" : "OtherFiles"}。`,
-                                `${importForm.characterPackageFiles.length} allowed files; unassigned resources are kept in ${importSelectionAssetType === "suit" ? "SourceFiles" : "OtherFiles"} only when their format is allowlisted.`
-                              )}
+                              {t(`待入库 ${importForm.characterPackageFiles.length} 个文件。点击 × 可排除，源文件不变。`, `${importForm.characterPackageFiles.length} files selected. Click × to exclude; source files stay unchanged.`)}
+                              <div>{t('角色只收录模型和贴图；SPP 等工程文件及文档自动排除。', 'Characters accept models and textures only; project files such as SPP and documents are excluded.')}</div>
                             </div>
                             {monsterImportAudit && importForm.characterPackageFiles.length > 0 && (
                               <div role={monsterImportAudit.ok ? "status" : "alert"} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, marginBottom: 8 }}>
@@ -13404,10 +13679,18 @@ export function App() {
                                     : t('不符合角色文件白名单', 'Outside the character file allowlist')}</span></div>)}
                               </details>
                             )}
+                            {!!importForm.characterManualExclusions?.length && <details className="character-excluded-files" open>
+                              <summary>{t('手动排除', 'Manually excluded')} · {importForm.characterManualExclusions.length}</summary>
+                              {importForm.characterManualExclusions.map(({filePath}) => <div className="character-file-selection-row" key={filePath}>
+                                <span title={filePath}>{getFileBaseName(filePath)}</span>
+                                <button type="button" className="character-file-restore" disabled={quickDropBusy || characterPreviewGenerating || importModalLocked}
+                                  onClick={() => setImportForm(form => setCharacterPackageFileIncluded(form, filePath, true))}>{t('恢复', 'Restore')}</button>
+                              </div>)}
+                            </details>}
                             {importForm.assetType === 'suit' && heroPackageNeedsScopeReview(importForm.characterPackageFiles, importForm.characterScopesConfirmed) && (
                               <div className="character-scope-review" role="alert">
                                 <strong>{t(`检测到 ${heroPackageModelFiles(importForm.characterPackageFiles).filter(file => /\.fbx$/i.test(file)).length} 个 FBX，请先标注模型归属`, `Detected ${heroPackageModelFiles(importForm.characterPackageFiles).filter(file => /\.fbx$/i.test(file)).length} FBX models. Assign model scopes first`)}</strong>
-                                <p>{t("只需标注 FBX 属于套装或武器；贴图与源文件自动跟随对应 FBX。套装仍最多四个部件；确认归属并通过检查后才生成四视图。", "Only assign each FBX to Outfit or Weapon; textures and source files follow their related FBX. Outfits still allow up to four parts. Four-view rendering starts after validation.")}</p>
+                                <p>{t("只需标注 FBX 属于套装或武器；贴图自动跟随对应 FBX。套装仍最多四个部件；确认归属并通过检查后才生成四视图。", "Only assign each FBX to Outfit or Weapon; textures follow their related FBX. Outfits still allow up to four parts. Four-view rendering starts after validation.")}</p>
                               </div>
                             )}
                             {importForm.characterPackageFiles.length > 0 && (
@@ -13444,7 +13727,7 @@ export function App() {
                                   };
                                   const label = roleLabels[role] || roleLabels.other;
                                   return (
-                                    <div key={filePath} title={filePath} style={{ display: "flex", gap: "8px", alignItems: "center", minHeight: "24px", fontSize: "12px", color: "var(--text-2)" }}>
+                                    <div className="character-file-selection-row" key={filePath} title={filePath}>
                                       <span style={{ minWidth: "56px", flexShrink: 0, color: role === "other" ? "var(--warning)" : "var(--text-1)" }}>{t(label[0], label[1])}</span>
                                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                         {getFileBaseName(filePath)}{normalizedName !== getFileBaseName(filePath) ? ` → ${normalizedName}` : ""}
@@ -13466,6 +13749,10 @@ export function App() {
                                           characterFields: { ...form.characterFields, confirmed: false }
                                         }))}
                                       />}
+                                      <button type="button" className="character-file-exclude" aria-label={t(`排除 ${getFileBaseName(filePath)}`, `Exclude ${getFileBaseName(filePath)}`)}
+                                        title={t('从本次入库排除，不删除源文件', 'Exclude from this import; keep the source file')}
+                                        disabled={quickDropBusy || characterPreviewGenerating || importModalLocked}
+                                        onClick={() => setImportForm(form => setCharacterPackageFileIncluded(form, filePath, false))}>×</button>
                                     </div>
                                   );
                                 })}
@@ -13483,9 +13770,6 @@ export function App() {
                               && <div className="settings-field-hint" style={{ color: "var(--warning)" }}>
                                 {t("未识别到骨骼网格或静态网格；请检查文件清单", "No skeletal or static mesh found; check the file list")}
                               </div>}
-                            <div className="settings-field-hint" title={importForm.destinationPath}>
-                              {t("目标位置", "Destination")}：{importForm.destinationPath}
-                            </div>
                             {renderCharacterImportConfirmation()}
                             {renderCharacterImportPreview()}
                             <label style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "8px", color: "var(--text-2)", fontSize: "13px" }}>
@@ -13795,9 +14079,9 @@ export function App() {
                               </span>
                             </div>
                           ) : cutoutBusy ? (
-                            <div className="batch-cutout-progress batch-cutout-progress--indeterminate" role="progressbar" aria-label={t("正在去背景", "Removing background")}>
-                              <div className="batch-cutout-progress-fill" />
-                              <span className="batch-cutout-progress-label">{t("正在去背景…", "Removing background…")}</span>
+                            <div className="batch-cutout-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={0} aria-label={t("正在去背景", "Removing background")}>
+                              <div className="batch-cutout-progress-fill" style={{ width: '0%' }} />
+                              <span className="batch-cutout-progress-label">{t("0% · 正在去背景…", "0% · Removing background…")}</span>
                             </div>
                           ) : null}
                         </div>
@@ -14463,9 +14747,7 @@ export function App() {
                               failedLabel={t("动画预览加载失败", "Failed to load animation preview")}
                               missingMeshLabel={t("当前文件没有可显示的网格，请选择骨骼 Mesh", "This file has no visible mesh. Choose a skeletal mesh")}
                               onMotionCapture={!isAnimatedPreviewPath(editForm.previewImagePath)
-                                ? (blob) => {
-                                  void persistCapturedAnimationPreview(editAnimationFile, blob, "edit");
-                                }
+                                ? (capture) => captureEditAnimationPreview(editAnimationFile, capture)
                                 : undefined}
                             />
                             </Suspense>
@@ -14490,9 +14772,9 @@ export function App() {
                             isPathMissing={isPathMissing}
                           />
                           {cutoutBusy && !batchCutoutProgress && (
-                            <div className="batch-cutout-progress batch-cutout-progress--indeterminate" role="progressbar" aria-label={t("正在去背景", "Removing background")}>
-                              <div className="batch-cutout-progress-fill" />
-                              <span className="batch-cutout-progress-label">{t("正在去背景…", "Removing background…")}</span>
+                            <div className="batch-cutout-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={0} aria-label={t("正在去背景", "Removing background")}>
+                              <div className="batch-cutout-progress-fill" style={{ width: '0%' }} />
+                              <span className="batch-cutout-progress-label">{t("0% · 正在去背景…", "0% · Removing background…")}</span>
                             </div>
                           )}
                         </div>
@@ -15059,6 +15341,8 @@ export function App() {
       </aside>
 
       <main className="center">
+        <AnimationCoverWorker queue={animationCoverQueue} loader={previewLoader} bridge={bridge}
+          enabled={!busy && !importOpen && !editOpen && !importSaving && !isExporting} />
         <header className="top-strip">
           <div className="search-wrap">
             <Icon name="search" />
@@ -15181,7 +15465,7 @@ export function App() {
               }}
             >
               {quickDropBusy && (
-                <div className={`import-cta-progress${quickDropProgressKnown ? "" : " import-cta-progress--indeterminate"}`} aria-hidden="true">
+                <div className="import-cta-progress" aria-hidden="true">
                   <span
                     className="import-cta-progress-fill"
                     style={{ width: `${Math.round(Math.max(0, Math.min(100, quickDropProgress)))}%` }}
@@ -15219,9 +15503,21 @@ export function App() {
 
         {characterContext ? <>
           <div className="filter-bar character-filter-bar">
-            {showCharacterSubcategories && <DarkSelect className="filter-select" value={selectedSuitSubcategory || "all"}
+            {characterContext.family === 'item' && gameplayFilterLevels(selectedSuitSubcategory).map((level, index) => {
+              const legacyCategory = index === 0 && !level.value && selectedSuitSubcategory;
+              return <DarkSelect
+              key={`gameplay-${index}`} className="filter-select" ariaLabel={gameplayLevelLabel(index)}
+              value={legacyCategory || level.value || level.allValue} disabled={level.disabled}
+              options={[{ value: level.allValue, label: level.disabled
+                ? level.terminal ? t('无子分类', 'No subcategories') : t('请先选择上级', 'Select a parent first')
+                : t(`所有${gameplayLevelLabel(index)}`, ['All resource types', 'All categories', 'All subcategories', 'All subtypes'][index] || 'All subcategories') },
+                ...level.options.map(option => ({ value: option.value, label: uiLanguage === 'zh' ? option.label : option.code })),
+                ...(legacyCategory ? [{value: legacyCategory, label: getCharacterCategoryDisplayLabel('item', legacyCategory, uiLanguage)}] : [])]}
+              onChange={value => selectSuitSubcategory(value || 'all')} />;
+            })}
+            {showCharacterSubcategories && characterContext.family !== 'item' && <DarkSelect className="filter-select" value={selectedSuitSubcategory || "all"}
               ariaLabel={t("子分类", "Subcategory")}
-              options={[{ value: "all", label: t(`所有${getAssetTypeLabel(characterContext.family)}`, `All ${getAssetTypeLabel(characterContext.family)}`) }, ...characterSubcategoryOptions.map(category => ({ value: category, label: getCharacterCategoryDisplayLabel(characterContext.family, category, uiLanguage) }))]}
+              options={[{ value: "all", label: characterContext.family === "suit" ? t("所有套装相关", "All outfit-related assets") : t(`所有${getAssetTypeLabel(characterContext.family)}`, `All ${getAssetTypeLabel(characterContext.family)}`) }, ...characterSubcategoryOptions.map(category => ({ value: category, label: getCharacterCategoryDisplayLabel(characterContext.family, category, uiLanguage) }))]}
               onChange={selectSuitSubcategory} />}
             {characterFilterFields.map(field => <DarkSelect key={field.key} className="filter-select" value={characterFilters[field.key]}
               ariaLabel={t(field.zh, field.en)}
@@ -15391,6 +15687,7 @@ export function App() {
                           monsterFormCounter={monsterFormCounters.get(asset.id)}
                           x={x} y={y} width={width} height={height}
                           previewLoader={previewLoader}
+                          animationCoverQueue={animationCoverQueue}
                           isSelected={selectedAssetId === asset.id || selectedIdSet.has(asset.id)}
                           selectedMeshKind={selectedComponentMesh?.assetId === asset.id ? selectedComponentMesh.kind : undefined}
                           isFavorite={favoriteIds.has(asset.id)}
@@ -15452,6 +15749,7 @@ export function App() {
                           monsterFormCounter={monsterFormCounters.get(asset.id)}
                               x={x} y={y} width={width} height={height}
                               previewLoader={previewLoader}
+                              animationCoverQueue={animationCoverQueue}
                               isSelected={selectedAssetId === asset.id || selectedIdSet.has(asset.id)}
                               selectedMeshKind={selectedComponentMesh?.assetId === asset.id ? selectedComponentMesh.kind : undefined}
                               isFavorite={favoriteIds.has(asset.id)}
@@ -15483,7 +15781,7 @@ export function App() {
               <section className="asset-grid asset-grid-virtual" style={{ height: `${assetGridLayout.totalHeight}px` }}>
               {packedAssetGrid.sectionHeaders.map(section => (
                 <div key={`${section.family}:${section.y}`} className="character-grid-section-heading" style={{ top: section.y }}>
-                  {section.family === "suit" ? t("套装", "Outfits") : section.family === "monster" ? t("怪物", "Monsters") : section.family === "npc" ? "NPC" : section.family === "weapon" ? t("武器", "Weapons") : section.family}
+                  {section.family === "suit" ? t("套装", "Outfits") : section.family === "monster" ? t("怪物", "Monsters") : section.family === "npc" ? "NPC" : section.family === "weapon" ? t("武器", "Weapons") : section.family === "item" ? t("玩法物件", "Gameplay Items") : section.family}
                 </div>
               ))}
               {packedAssetGrid.outfitGroups.filter(group => group.y + group.height >= assetStageMetrics.scrollTop - packedAssetGrid.cardHeight
@@ -15525,6 +15823,7 @@ export function App() {
                           monsterFormCounter={monsterFormCounters.get(asset.id)}
                   x={x} y={y} width={width} height={height}
                   previewLoader={previewLoader}
+                  animationCoverQueue={animationCoverQueue}
                   isSelected={selectedAssetId === asset.id || selectedIdSet.has(asset.id)}
                   selectedMeshKind={selectedComponentMesh?.assetId === asset.id ? selectedComponentMesh.kind : undefined}
                   isFavorite={favoriteIds.has(asset.id)}
@@ -15570,11 +15869,6 @@ export function App() {
                         pauseLabel={t("暂停", "Pause")}
                         failedLabel={t("动画预览加载失败", "Failed to load animation preview")}
                         missingMeshLabel={t("当前文件没有可显示的网格，请选择骨骼 Mesh", "This file has no visible mesh. Choose a skeletal mesh")}
-                        onMotionCapture={selectedAsset && !isAnimatedPreviewPath(String(selectedAsset.previewImage || selectedAsset.preview || ""))
-                          ? (blob) => {
-                            void persistCapturedAnimationPreview(selectedAsset.id, blob, "asset");
-                          }
-                          : undefined}
                       />
                       </Suspense>
                     ) : (
@@ -15721,8 +16015,8 @@ export function App() {
                       <span className="character-info-label">{selectedCharacterInfo.family === 'suit' && !heroPartKind(selectedCharacterInfo.fields) ? t("套装中文名：", "Suit Chinese name: ") : t('中文名：', 'Chinese name: ')}</span><strong>{selectedCharacterInfo.fields.displayNameZh || t("未填写", "Not set")}</strong>
                       <button type="button" className="character-name-edit" onClick={() => openCharacterNameEditor(selectedAsset)}>{t("修改名字", "Edit Name")}</button>
                     </div>}
-                    {selectedCharacterInfo && !heroPartKind(selectedCharacterInfo.fields) && !selectedPartView && <div className="character-display-name-row"><span className="character-info-label">{selectedCharacterInfo.family === 'suit' ? t("套装英文名：", "Suit English name: ") : t("英文名：", "English name: ")}</span><strong>{selectedCharacterInfo.fields.displayNameEn || t("未填写", "Not set")}</strong></div>}
-                    {selectedCharacterInfo?.fields.ueNameSyncPending && !selectedPartView && <div className="character-name-sync-hint" role="status">{t("当前已改名，请点击「发送到 UE」同步 UE 文件名称。", "Names changed. Send to UE to sync UE filenames.")}</div>}
+                    {selectedCharacterInfo && !heroPartKind(selectedCharacterInfo.fields) && !selectedPartView && <div className="character-display-name-row"><span className="character-info-label">{selectedCharacterInfo.family === 'item' && gameplayUsesResourceId(selectedCharacterInfo.category) ? t('资源 ID：', 'Resource ID: ') : selectedCharacterInfo.family === 'suit' ? t("套装英文名：", "Suit English name: ") : t("英文名：", "English name: ")}</span><strong>{selectedCharacterInfo.fields.displayNameEn || t("未填写", "Not set")}</strong></div>}
+                    {selectedCharacterInfo?.fields.ueNameSyncPending && hasCharacterEnginePath(selectedAsset.meta) && !selectedPartView && <div className="character-name-sync-hint" role="status">{t("当前已改名，请点击「发送到 UE」同步 UE 文件名称。", "Names changed. Send to UE to sync UE filenames.")}</div>}
                     {selectedCharacterInfo && <div className="character-last-update-row">
                       <div className="settings-field-hint"><span className="character-info-label">{t("最后更新时间：", "Last updated: ")}</span>{(() => {
                         const manifest = selectedAsset.meta.characterManifest as { contentUpdatedAt?: string; confirmedAt?: string; lastUpdateSummary?: string } | undefined;
@@ -15731,6 +16025,10 @@ export function App() {
                         return date && Number.isFinite(date.getTime()) ? `${date.toLocaleString(uiLanguage === "en" ? "en-US" : "zh-CN")}${manifest?.lastUpdateSummary ? ` · ${manifest.lastUpdateSummary}` : ""}` : t("暂无记录", "Not recorded");
                       })()}</div>
                       {!selectedPartView && <button type="button" className="character-history-open" disabled={busy} onClick={() => { void openCharacterHistory(selectedAsset); }}>{t("更新历史", "Update History")}</button>}
+                    </div>}
+                    {selectedCharacterLodCounts && <div className="settings-field-hint" title={selectedCharacterLodCounts.details}>
+                      <span className="character-info-label">{t('LOD 数量：', 'LOD count: ')}</span>
+                      {selectedCharacterLodCounts.count}{t(' 级（已入库，含 LOD0）', ' levels (stored, including LOD0)')}
                     </div>}
                     {selectedAssetSourceAssetId ? (
                       <div className="asset-subline" style={{ marginTop: 4, color: "var(--text-2)", fontWeight: 500, fontSize: "12px", textTransform: "none", letterSpacing: "0.02em" }}>
@@ -16048,7 +16346,7 @@ export function App() {
 
                   {selectedCharacterInfo && (
                     <div className="detail-list character-detail">
-                      {["monster", "suit", "npc", "weapon"].includes(selectedCharacterInfo.family) && <>
+                      {["monster", "suit", "npc", "weapon", "item"].includes(selectedCharacterInfo.family) && <>
                         <div className="character-detail-actions">
                           <button className="browse-btn character-update-primary" disabled={busy} {...characterFileDropProps(paths => dropCharacterUpdateFiles(selectedAsset, paths))} title={t('点击打开，或拖入更新文件/文件夹', 'Click to open, or drop update files/folders')} onClick={() => openCharacterUpdate(selectedAsset)}>{selectedPartView ? t("更新此部件", "Update This Part") : t("更新此资产", "Update This Asset")}</button>
                           <button className="browse-btn" disabled={busy} {...characterFileDropProps(paths => changeCharacterPreview(selectedAsset, paths))} title={t('点击管理，或拖入图片加入新槽位', 'Click to manage, or drop images into new slots')} onClick={() => { void changeCharacterPreview(selectedAsset); }}>{t("更新预览图", "Update Preview")}</button>
@@ -16131,6 +16429,7 @@ export function App() {
                       {selectedCharacterInfo.family === 'suit' && <>
                         {!selectedPartView && <div className="character-component-list">{listCharacterComponents(selectedAsset).map(part => <div key={part.id} className="character-part-entry"><button className="character-part-link" aria-label={`${characterComponentLabel(part, uiLanguage)} · ${part.name}`} onClick={() => handleSelectCharacterRelation(part.id)}><span className="character-part-link-kind">{part.role === "weapon" ? t("武器", "Weapon") : t("部件", "Part")}</span><span className="character-part-link-name">{characterComponentLabel(part, uiLanguage)}</span><span className="character-part-link-arrow" aria-hidden="true">→</span></button><div className="character-part-fullname"><span>{part.name}</span></div></div>)}</div>}
                       </>}
+                      <div className="character-file-sections">
                       <details className="character-file-section">
                         <summary>{t(`模型文件（${selectedCharacterInfo.modelParts.length}）`, `Model Files (${selectedCharacterInfo.modelParts.length})`)}</summary>
                         <p className="settings-field-hint">{t("可将新文件拖到对应条目，预检并确认更新。", "Drop a new file onto its row to preview and confirm an update.")}</p>
@@ -16180,10 +16479,13 @@ export function App() {
                           ))}
                         </div>
                       </details>
+                      <CharacterLodReview compact t={t} onReveal={storedPath => { void revealCharacterModel(selectedAsset, storedPath); }} files={activeCharacterFiles(selectedAsset)
+                    .filter(file => ['model', 'staticMesh', 'skeletalMesh'].includes(file.role))
+                    .map(file => ({ name: file.normalizedName || file.storedPath, sourcePath: file.storedPath, kind: file.role === 'skeletalMesh' ? 'skeletalMesh' : 'staticMesh' }))} />
+                      </div>
                     </div>
                   )}
-
-                  {selectedAssetModelLods.length > 0 && (
+                  {!isCharacterAssetType(selectedAsset.assetType) && selectedAssetModelLods.length > 0 && (
                     <div className="detail-list model-lod-detail">
                       <h3>{t("模型 LOD", "Model LODs")}</h3>
                       <div className="model-lod-detail-list">
@@ -16499,23 +16801,26 @@ export function App() {
         )}
         {characterNameEditor && (() => {
           const info = getCharacterAssetInfo(characterNameEditor.target);
+          const resourceId = info?.family === 'item' && gameplayUsesResourceId(info.category);
           const englishName = characterNameEditor.english.trim();
+          const needsNameSync = hasCharacterEnginePath(characterNameEditor.target.meta)
+            && englishName !== String(info?.fields.displayNameEn ?? info?.fields.suitName ?? info?.fields.name ?? '');
           const formalName = info ? buildCharacterAssetName(info.family, { ...info.fields, displayNameZh: characterNameEditor.value, displayNameEn: englishName, suitName: englishName, name: englishName } as CharacterImportFields, info.category) : "";
           return <div className="confirm-overlay recycle-overlay" role="dialog" aria-modal="true" aria-label={t("修改角色中英文名", "Edit Character Names")}>
             <div className="confirm-dialog character-name-dialog dialog-has-close">
               <DialogCloseButton onClick={() => setCharacterNameEditor(null)} disabled={busy} label={t("关闭", "Close")} />
               <h3>{t("修改名字", "Edit Name")}</h3>
               <p className="character-name-current">{characterDisplayName(characterNameEditor.target)}</p>
-              <p>{t("英文名联动文件名称，修改后需重新发送到 UE。", "The English name controls filenames. Send to UE again after renaming.")}</p>
+              <p>{t('中文名仅用于 AssetHive 显示。', 'The Chinese name is only used for display in AssetHive.')}{needsNameSync && (resourceId ? t('资源 ID 已修改，保存后需重新发送到 UE。', 'The resource ID has changed. Send to UE again after saving.') : t('英文名已修改，保存后需重新发送到 UE。', 'The English name has changed. Send to UE again after saving.'))}</p>
               <div className={`character-confirmation-editor character-name-confirmation${characterNameEditor.confirmed ? '' : ' character-identity-unconfirmed'}`}>
               <label className="character-name-field"><span>{t("中文名", "Chinese Name")}</span><input autoFocus className="settings-input" maxLength={32} value={characterNameEditor.value} onChange={event => setCharacterNameEditor({ ...characterNameEditor, value: event.target.value, confirmed: false, error: "" })} /></label>
-              <label className="character-name-field"><span>{t("英文名", "English Name")}</span><input className="settings-input" value={characterNameEditor.english} onChange={event => setCharacterNameEditor({ ...characterNameEditor, english: event.target.value, confirmed: false, error: "" })} /></label>
-              <label className="character-name-confirm character-identity-confirm"><input type="checkbox" checked={characterNameEditor.confirmed} disabled={!validCharacterChineseName(characterNameEditor.value) || !validCharacterEnglishName(englishName)} onChange={event => setCharacterNameEditor({ ...characterNameEditor, confirmed: event.target.checked })} />{t("我已核对中文名和英文名", "I have checked the Chinese and English names")}</label>
+              <label className="character-name-field"><span>{resourceId ? t("资源 ID", "Resource ID") : t("英文名", "English Name")}</span><input className="settings-input" value={characterNameEditor.english} onChange={event => setCharacterNameEditor({ ...characterNameEditor, english: event.target.value, confirmed: false, error: "" })} /></label>
+              <label className="character-name-confirm character-identity-confirm"><input type="checkbox" checked={characterNameEditor.confirmed} disabled={!validCharacterChineseName(characterNameEditor.value) || !(info?.family === 'item' ? gameplayIdentity(info.category, englishName).assetName : validCharacterEnglishName(englishName))} onChange={event => setCharacterNameEditor({ ...characterNameEditor, confirmed: event.target.checked })} />{resourceId ? t("我已核对中文名和资源 ID", "I have checked the Chinese name and resource ID") : t("我已核对中文名和英文名", "I have checked the Chinese and English names")}</label>
               <div className="character-name-preview"><span>{t("新规范资产名", "New Formal Asset Name")}</span><strong>{formalName || "—"}</strong></div>
               </div>
               {characterNameEditor.error && <div role="alert" className="settings-field-hint error character-update-error">{characterNameEditor.error}</div>}
               {renderCharacterOperationProgress()}
-              <div className="confirm-actions"><button className="confirm-btn ghost" disabled={busy} onClick={() => setCharacterNameEditor(null)}>{t("取消", "Cancel")}</button><button className="confirm-btn" disabled={busy || !validCharacterChineseName(characterNameEditor.value) || !validCharacterEnglishName(englishName) || !characterNameEditor.confirmed || !formalName} onClick={() => { void saveCharacterChineseName(); }}>{busy ? t("正在重命名…", "Renaming…") : t("确认并重命名", "Confirm and Rename")}</button></div>
+              <div className="confirm-actions"><button className="confirm-btn ghost" disabled={busy} onClick={() => setCharacterNameEditor(null)}>{t("取消", "Cancel")}</button><button className="confirm-btn" disabled={busy || !validCharacterChineseName(characterNameEditor.value) || !(info?.family === 'item' ? gameplayIdentity(info.category, englishName).assetName : validCharacterEnglishName(englishName)) || !characterNameEditor.confirmed || !formalName} onClick={() => { void saveCharacterChineseName(); }}>{busy ? t("正在重命名…", "Renaming…") : t("确认并重命名", "Confirm and Rename")}</button></div>
             </div>
           </div>;
         })()}
@@ -16525,8 +16830,8 @@ export function App() {
         {!busy && (partPreviews.activeOwnerId || partPreviews.activeId) && <div className="character-operation-toast">
           <div className="character-operation-progress" role="status" aria-live="polite">
             <span>{partPreviews.progress.message || t('正在生成预览…', 'Generating previews…')}{partPreviews.progress.total > 0 && ` · ${partPreviews.progress.done}/${partPreviews.progress.total}`}</span>
-            <progress aria-label={t('预览生成进度', 'Preview progress')} max={partPreviews.progress.total || 1}
-              value={partPreviews.progress.total && !partPreviews.progress.message.startsWith('正在保存') ? partPreviews.progress.done : undefined} />
+            <progress aria-label={t('预览生成进度', 'Preview progress')} max={100}
+              value={partPreviews.progress.message.startsWith('正在保存') ? 95 : Math.round(partPreviews.progress.done / Math.max(1, partPreviews.progress.total) * 90)} />
           </div>
         </div>}
         {characterHistoryTarget && (
@@ -16538,7 +16843,9 @@ export function App() {
                   <div style={{ color: 'var(--text-1)', marginBottom: 4 }}>{t('文件导入前源地址', 'Original import locations')}</div>
                   {(() => {
                     const folders = characterImportSourceFolders(characterHistoryTarget.meta);
-                    return folders.length ? folders.map(folder => <div key={folder} title={folder}>{folder}</div>)
+                    return folders.length ? folders.map(folder => <div className="character-history-source" key={folder}>
+                      <span title={folder}>{folder}</span><button type="button" className="character-name-edit" onClick={() => { void bridge.openFolder(folder); }}>{t('打开位置', 'Open folder')}</button>
+                    </div>)
                       : <div>{t('未记录原始来源', 'Original source not recorded')}</div>;
                   })()}
                 </div>
@@ -16613,6 +16920,8 @@ export function App() {
           </div>
         )}
         {suitExportAssetIds && <SuitExportDialog assetIds={suitExportAssetIds} weapon={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === id)?.assetType === 'weapon')} monster={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === id)?.assetType === 'monster')} settings={settings} t={t}
+          npc={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === componentParentId(id))?.assetType === 'npc')}
+          item={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === componentParentId(id))?.assetType === 'item')}
           heroPart={['Hair', 'Face'].find(part => suitExportAssetIds.every(id => heroPartKind(getCharacterAssetInfo(allAssets.find(asset => asset.id === id) || null)?.fields || {}) === part)) || ''}
           onProjectSettings={() => { setSuitExportAssetIds(null); setSettingsTab('export'); setSettingsOpen(true); }}
           hidden={suitExportHidden} onHide={() => setSuitExportHidden(true)} onShow={() => setSuitExportHidden(false)}
@@ -16650,8 +16959,8 @@ export function App() {
                 {characterUpdateInputRows.length > 0 && !characterUpdatePlan && <CharacterUpdateAssignments
                   rows={characterUpdateInputRows} disabled={busy} onChange={assignCharacterUpdateInput} t={t} />}
               </> : <div className="character-update-selective">
-                {(["staticMesh", "skeletalMesh", "texture"] as const).map(section => {
-                  const destinations = characterUpdateDestinations(characterUpdateTarget).filter(item => item.role === section);
+                {(["staticMesh", "skeletalMesh", "lod", "texture"] as const).map(section => {
+                  const destinations = characterUpdateDestinations(characterUpdateTarget).filter(item => section === 'lod' ? Boolean(item.lod) : !item.lod && item.role === section);
                   const existingCount = destinations.filter(item => !item.isNew).length;
                   const open = characterUpdateSections.includes(section);
                   const selectedCount = destinations.filter(item => characterUpdateSelectedFiles.includes(item.storedPath)).length;
@@ -16661,16 +16970,17 @@ export function App() {
                     <div className="character-update-section-header">
                       <button type="button" className="character-update-section-toggle" aria-expanded={open} onClick={() => toggleCharacterUpdateSection(section)}>
                         <span aria-hidden="true">{open ? "▾" : "▸"}</span>
-                        <strong>{section === "staticMesh" ? t("模型文件（静态）", "Model Files (Static)") : section === "skeletalMesh" ? t("模型文件（骨骼）", "Model Files (Skeletal)") : t("材质／贴图文件", "Material / Texture Files")}</strong>
-                        {existingCount === 0 && <small className="character-update-empty-hint">{t("当前暂无资产可更新", "No existing assets to update")}</small>}
+                        <strong>{section === "staticMesh" ? t("模型文件（静态）", "Model Files (Static)") : section === "skeletalMesh" ? t("模型文件（骨骼）", "Model Files (Skeletal)") : section === 'lod' ? t("LOD 文件", "LOD Files") : t("材质／贴图文件", "Material / Texture Files")}</strong>
+                        {existingCount === 0 && <small className="character-update-empty-hint">{section === 'lod' && destinations.length ? t('可补充 LOD', 'Add LODs') : t("当前暂无资产可更新", "No existing assets to update")}</small>}
                         <span>{existingCount}</span>
                       </button>
                       <label className="character-update-select-all" onClick={event => event.stopPropagation()}>
-                        <input type="checkbox" checked={allSelected} ref={node => { if (node) node.indeterminate = partlySelected; }} disabled={!destinations.length} onChange={() => toggleCharacterUpdateSectionFiles(destinations)} />
+                        <input type="checkbox" checked={allSelected} ref={node => { if (node) node.indeterminate = partlySelected; }} disabled={busy || !destinations.length} onChange={() => toggleCharacterUpdateSectionFiles(destinations)} />
                         <span>{allSelected ? t("取消全选", "Clear all") : t("全选", "Select all")}</span>
                       </label>
                     </div>
                     {open && <div className="character-update-target-list">
+                      {section === 'lod' && <div className="settings-field-hint">{t('可同时勾选多个等级，逐项上传。已有等级替换，空槽新增；未上传的等级保留。新增等级须与库内文件连续衔接。', 'Select multiple levels and upload each file. Existing levels are replaced, empty slots added; omitted levels are kept. Added levels must form a continuous chain with library files.')}</div>}
                       {section === "texture" && <div className="character-update-texture-batch" {...characterFileDropProps(paths => matchCharacterTextureBatch(paths))}>
                         <strong>{t("批量匹配贴图", "Batch Match Textures")}</strong>
                         <span>{t("拖入多张贴图或文件夹；系统按部件与贴图类型匹配，无法唯一判断的不会自动替换。", "Drop texture files or a folder. Matching uses part and map semantics; ambiguous files are never replaced automatically.")}</span>
@@ -16678,14 +16988,16 @@ export function App() {
                           <button type="button" className="browse-btn" disabled={busy} onClick={async () => { const files = await bridge.pickCharacterUpdateFiles(); if (files.length) void matchCharacterTextureBatch(files); }}>{t("选择文件", "Choose Files")}</button>
                         </div>
                       </div>}
-                      {destinations.map(destination => {
+                      {destinations.map((destination, destinationIndex) => {
                       const selected = characterUpdateSelectedFiles.includes(destination.storedPath);
                       const sourcePath = characterUpdateReplacementSources[destination.storedPath] || "";
-                      return <div key={destination.storedPath} className={`character-update-target${selected ? " selected" : ""}`} {...characterFileDropProps(paths => uploadCharacterSelectiveReplacement(destination, paths))} title={t('拖入一个文件更新此项', 'Drop one file to update this item')}>
-                        <label><input type="checkbox" checked={selected} onChange={() => toggleCharacterUpdateFile(destination.storedPath)} /><span title={destination.fileName}>{destination.fileName}</span></label>
+                      return <div key={destination.storedPath} className="character-update-target-entry">
+                        {section === 'lod' && destination.modelName !== destinations[destinationIndex - 1]?.modelName && <div className="character-update-lod-model" title={destination.modelName}>{destination.modelName}</div>}
+                        <div className={`character-update-target${selected ? " selected" : ""}`} {...characterFileDropProps(paths => uploadCharacterSelectiveReplacement(destination, paths))} title={t('拖入一个文件更新此项', 'Drop one file to update this item')}>
+                        <label><input type="checkbox" checked={selected} disabled={busy} onChange={() => toggleCharacterUpdateFile(destination.storedPath)} /><span title={destination.fileName}>{section === 'lod' ? `LOD${destination.lod} · ${destination.isNew ? t('新增', 'Add') : t('替换', 'Replace')}` : destination.fileName}</span></label>
                         {selected && <button type="button" className="browse-btn" disabled={busy} onClick={() => { void uploadCharacterSelectiveReplacement(destination); }}>{t("选择文件", "Choose Files")}</button>}
-                        {selected && <div className="recycle-path">{sourcePath || t("源文件名和位置不限；确认后写入正式规范路径", "Any source name or location; confirmation writes to the formal managed path")}</div>}
-                      </div>;
+                        {selected && <div className="recycle-path">{sourcePath || (destination.lod ? t(`选择以 _LOD${destination.lod}.fbx 结尾的文件`, `Choose a file ending in _LOD${destination.lod}.fbx`) : t("源文件名和位置不限；确认后写入正式规范路径", "Any source name or location; confirmation writes to the formal managed path"))}</div>}
+                      </div></div>;
                     })}{!destinations.length && <div className="settings-field-hint">{t("当前没有此类可更新文件", "No updatable files in this category")}</div>}</div>}
                   </div>;
                 })}
@@ -16700,10 +17012,12 @@ export function App() {
               {characterUpdatePlan && <>
                 <CharacterUpdateChanges changes={characterUpdatePlan.changes} replacements={characterUpdatePlan.replacements}
                   excludedFiles={[...new Set([...(characterUpdatePlan.excludedFiles || []), ...(characterUpdateBatchReport?.excludedFiles || [])])]} t={t} />
+                <CharacterLodReview files={characterUpdatePlan.changes.map(file => ({ ...file }))} t={t}
+                  confirmed={characterUpdateConfirmed} onConfirm={setCharacterUpdateConfirmed} disabled={busy || characterUpdatePlan.unchanged} />
                 {characterUpdatePlan.unchanged ? <p>{t("所有文件与库内一致，无需更新。", "All files match the library. No update needed.")}</p> : <>
                   <div className="settings-field-hint">{t("更新后自动重拍受影响的模型预览和套装四视图，手动上传的图片保持不变。", "Affected model previews and suit views refresh automatically. Manually uploaded images are preserved.")}</div>
                   <label className={`character-update-note${!characterUpdateNote.trim() ? " import-required-label" : ""}`}><span>{t("更新备注 · 必填", "Update note · required")}</span><textarea className="settings-input" maxLength={240} rows={3} value={characterUpdateNote} placeholder={t("请说明本次更新内容", "Describe this update")} onChange={event => setCharacterUpdateNote(event.target.value)} disabled={busy} /></label>
-                  <label className={`character-update-confirm${!characterUpdateConfirmed ? " import-required-label" : ""}`}><input type="checkbox" checked={characterUpdateConfirmed} onChange={event => setCharacterUpdateConfirmed(event.target.checked)} disabled={busy} />{t("我已确认本次更新内容", "I have reviewed this update")}</label>
+                  {!characterUpdatePlan.changes.some(file => /\.fbx$/i.test(file.name)) && <label className={`character-update-confirm${!characterUpdateConfirmed ? " import-required-label" : ""}`}><input type="checkbox" checked={characterUpdateConfirmed} onChange={event => setCharacterUpdateConfirmed(event.target.checked)} disabled={busy} />{t("我已确认本次更新内容", "I have reviewed this update")}</label>}
                 </>}
               </>}
               <div className="confirm-actions"><button className="confirm-btn ghost" disabled={busy} onClick={() => setCharacterUpdateTarget(null)}>{t("取消", "Cancel")}</button><button className="confirm-btn" disabled={busy || !characterUpdatePlan || characterUpdatePlan.unchanged || !characterUpdateConfirmed || !characterUpdateNote.trim()} onClick={() => { void confirmCharacterUpdate(); }}>{t("确认更新", "Confirm Update")}</button></div>

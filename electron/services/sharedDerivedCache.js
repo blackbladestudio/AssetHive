@@ -24,12 +24,15 @@ function createSharedDerivedCache({ libraryRoot, localRoot, onFailure, canWarm =
   const warmer = createCacheProcess({ timeoutMs: Math.max(30000, sourceTimeoutMs),
     concurrency: Math.max(1, Math.min(8, Math.trunc(Number(warmConcurrency) || 1))), onFailure });
   const pending = new Map();
+  const animationReads = new Map();
+  const animationPublications = new Set();
+  const sharedAnimationPreviews = new Set();
   let foregroundAt = 0;
   const warmThumbnail = (sourcePath, options = {}) => sharedDir
     ? warmer.run("warmThumbnail", { sourcePath, root, localDir, sharedDir, verify: Boolean(options.verify) })
     : Promise.resolve({ status: "skipped", reason: "no-library" });
   const warmup = createThumbnailWarmup({ ensure: warmThumbnail,
-    canRun: () => pending.size === 0 && Date.now() - foregroundAt > 2000 && canWarm(), onProgress: onWarmProgress });
+    canRun: () => pending.size === 0 && animationReads.size === 0 && Date.now() - foregroundAt > 2000 && canWarm(), onProgress: onWarmProgress });
 
   async function thumbnail(sourcePath) {
     const probe = await source.run("probeThumbnail", { sourcePath, root, localDir });
@@ -46,6 +49,32 @@ function createSharedDerivedCache({ libraryRoot, localRoot, onFailure, canWarm =
       void publisher.run("writeThumbnail", { sharedDir, localFile: generated, key: probe.key });
     }
     return generated;
+  }
+
+  function rememberSharedAnimation(key) {
+    sharedAnimationPreviews.add(key);
+    if (sharedAnimationPreviews.size > 2048) sharedAnimationPreviews.delete(sharedAnimationPreviews.values().next().value);
+  }
+
+  function publishAnimation(key, localFile) {
+    if (!sharedDir || sharedAnimationPreviews.has(key) || animationPublications.has(key)) return;
+    animationPublications.add(key);
+    void publisher.run("publishAnimationPreview", { sharedDir, localFile, key }).then(file => {
+      animationPublications.delete(key);
+      if (file) rememberSharedAnimation(key);
+    });
+  }
+
+  async function readAnimation(sourcePath) {
+    const probe = await source.run("probeAnimationPreview", { sourcePath, root, localDir });
+    if (!probe) return null;
+    if (probe.path) {
+      publishAnimation(probe.key, probe.path);
+      return probe;
+    }
+    const file = sharedDir ? await shared.run("readAnimationPreview", { sharedDir, localDir, key: probe.key }) : null;
+    if (file) rememberSharedAnimation(probe.key);
+    return { key: probe.key, path: file || "" };
   }
 
   return {
@@ -71,6 +100,22 @@ function createSharedDerivedCache({ libraryRoot, localRoot, onFailure, canWarm =
       pending.set(sourcePath, task);
       void task.finally(() => pending.delete(sourcePath));
       return task;
+    },
+    animationPreview(sourcePath) {
+      foregroundAt = Date.now();
+      const resolvedPath = path.resolve(sourcePath);
+      const pendingRead = animationReads.get(resolvedPath);
+      if (pendingRead) return pendingRead;
+      const task = readAnimation(resolvedPath).finally(() => animationReads.delete(resolvedPath));
+      animationReads.set(resolvedPath, task);
+      return task;
+    },
+    async saveAnimationPreview(sourcePath, key, bytes) {
+      const probe = await source.run("probeAnimationPreview", { sourcePath, root, localDir });
+      if (!probe || probe.key !== key) return null;
+      const file = probe.path || await source.run("saveAnimationPreview", { directory: localDir, key, bytes });
+      if (file) publishAnimation(key, file);
+      return file;
     },
     dispose() { warmup.dispose(); source.dispose(); renderer.dispose(); shared.dispose(); publisher.dispose(); snapshots.dispose(); warmer.dispose(); }
   };

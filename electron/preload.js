@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld("arkhive", {
   pickAssetFile: (kind) => ipcRenderer.invoke("assets:pickFile", kind),
   pickCharacterUpdateFiles: () => ipcRenderer.invoke("character:pickUpdateFiles"),
   materializeDroppedFile: (payload) => ipcRenderer.invoke("assets:materializeDroppedFile", payload),
+  getAnimationPreview: (modelPath) => ipcRenderer.invoke("assets:getAnimationPreview", modelPath),
+  cacheAnimationPreview: (payload) => ipcRenderer.invoke("assets:cacheAnimationPreview", payload),
   readClipboardImage: () => ipcRenderer.invoke("assets:readClipboardImage"),
   resolveDroppedItems: (payload) => ipcRenderer.invoke("assets:resolveDroppedItems", payload),
   cancelResolveDroppedItems: (payload) => ipcRenderer.invoke("assets:cancelResolveDroppedItems", payload),
@@ -111,6 +113,11 @@ contextBridge.exposeInMainWorld("arkhive", {
     const subscription = (event, payload) => callback(payload);
     ipcRenderer.on("assets:scanProgress", subscription);
     return () => ipcRenderer.removeListener("assets:scanProgress", subscription);
+  },
+  onRigDownloadProgress: (callback) => {
+    const listener = (_, payload) => callback(payload);
+    ipcRenderer.on('character:rigDownloadProgress', listener);
+    return () => ipcRenderer.removeListener('character:rigDownloadProgress', listener);
   },
   onCustomSaveProgress: (callback) => {
     const subscription = (event, payload) => callback(payload);

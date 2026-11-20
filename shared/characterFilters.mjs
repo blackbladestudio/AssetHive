@@ -1,5 +1,4 @@
 // Character-only view state. Never changes the legacy environment/animation search.
-import { WEAPON_TYPES } from './weaponRules.mjs';
 import { characterRigProgress } from './characterComponents.mjs';
 export function characterStatus(value) {
   const key = String(value || "").toLowerCase();
@@ -12,7 +11,7 @@ export const DEFAULT_CHARACTER_FILTERS = Object.freeze({ family: "all", display:
 export function defaultCharacterFilters(context) {
   return { ...DEFAULT_CHARACTER_FILTERS, display: context && !/^suit:(face|hair)$/.test(context.key) ? "parents" : "all" };
 }
-const families = new Set(["suit", "monster", "npc", "weapon"]);
+const families = new Set(["suit", "monster", "npc", "weapon", "item"]);
 const normalizeCategoryTag = value => String(value || "").trim().toLowerCase().replace(/[\s_-]+/gu, "");
 export function matchesCharacterCategoryTag(tag, category, labels = []) {
   return Boolean(category && [category, ...labels].some(alias => normalizeCategoryTag(alias) === normalizeCategoryTag(tag)));
@@ -28,7 +27,7 @@ export function deduplicateCharacterCategoryTags(tags, category, labels = []) {
 }
 export function characterFilterContext(node) {
   if (node === "character") return { family: "all", category: "", key: "all" };
-  const match = String(node).match(/^character-(suit|monster|npc|weapon)(?::(.+))?$/);
+  const match = String(node).match(/^character-(suit|monster|npc|weapon|item)(?::(.+))?$/);
   if (!match) return null;
   let category;
   try { category = decodeURIComponent(match[2] || ""); } catch { return null; }
@@ -89,16 +88,11 @@ export function filterCharacterCards(cards, filters = DEFAULT_CHARACTER_FILTERS,
 const option = (value, zh, en) => ({ value, zh, en });
 export function characterFilterDefinitions(context, cards) {
   const defs = [];
-  if (context.family === "all") defs.push({ key: "family", zh: "角色类型", en: "Character type", options: [option("all", "所有角色类型", "All character types"), option("suit", "套装", "Outfits"), option("monster", "怪物", "Monsters"), option("npc", "NPC", "NPC"), option("weapon", "武器", "Weapons")] });
+  if (context.family === "all") defs.push({ key: "family", zh: "角色类型", en: "Character type", options: [option("all", "所有角色类型", "All character types"), option("suit", "套装", "Outfits"), option("monster", "怪物", "Monsters"), option("npc", "NPC", "NPC"), option("weapon", "武器", "Weapons"), option("item", "玩法物件", "Gameplay Items")] });
   const isOutfit = context.family === "suit" && !/^(face|hair)$/i.test(context.category);
   if (context.family === 'suit' && /^(face|hair)$/i.test(context.category)) {
     defs.push({ key: 'gender', zh: '性别', en: 'Gender', options: [option('all', '所有性别', 'All genders'), option('Male', '男', 'Male'), option('Female', '女', 'Female')] });
     if (/^hair$/i.test(context.category)) defs.push({ key: 'hairType', zh: '头发类型', en: 'Hair type', options: [option('all', '所有头发类型', 'All hair types'), option('haircard', 'HairCard', 'HairCard'), option('groom', 'Groom', 'Groom')] });
-  }
-  if (context.family === 'weapon') {
-    const labels = { Bow: '弓', Arrow: '箭', GreatAxe: '巨斧', Jade: '玉器', LongSword: '长剑', PairedSwords: '双剑', ShieldAxe: '盾斧', Spear: '长枪', Sword: '短剑' };
-    defs.push({ key: 'weaponType', zh: '武器类别', en: 'Weapon type', options: [option('all', '所有武器', 'All weapons'), ...WEAPON_TYPES.map(type => option(type, labels[type], type))] });
-    defs.push({ key: 'rigging', zh: '绑定状态', en: 'Rigging', options: [option('all', '所有绑定状态', 'All rigging states'), option('pending', '待绑定 / 待确认', 'Pending rigging / review'), option('complete', '绑定已完成', 'Rigging complete')] });
   }
   if (isOutfit) defs.push({ key: "suitClass", zh: "套装规格", en: "Outfit class", options: [option("all", "所有套装规格", "All outfit classes"), option("Light", "轻甲", "Light"), option("Medium", "中甲", "Medium"), option("Heavy", "重甲", "Heavy")] });
   if (isOutfit || context.family === 'all') defs.push({ key: "display", zh: "展示内容", en: "Show", options: [option("all", "主体及部件", "Owners and parts"), option("parents", "仅主体", "Owners only"), option("staticParts", "仅部件（Static）", "Parts only (Static)"), option("skeletalParts", "仅部件（Skeletal）", "Parts only (Skeletal)")] });
@@ -108,6 +102,7 @@ export function characterFilterDefinitions(context, cards) {
     for (const card of cards) { const kind = characterPartKind(card); if (kind && !kinds.includes(kind)) kinds.push(kind); }
     defs.push({ key: "part", zh: "部件", en: "Part", options: [option("all", "所有部件", "All parts"), ...kinds.map(kind => option(kind, ...(labels[kind] || [kind, kind])))] });
   }
+  defs.push({ key: 'rigging', zh: '绑定状态', en: 'Rigging', options: [option('all', '所有绑定状态', 'All rigging states'), option('pending', '待绑定 / 待确认', 'Pending rigging / review'), option('complete', '绑定已完成', 'Rigging complete')] });
   defs.push({ key: "maturity", zh: "制作状态", en: "Status", options: [option("all", "所有制作状态", "All statuses"), ...["needs_rig", "rigged", "wip", "approved"].map(characterStatus)] });
   return defs;
 }

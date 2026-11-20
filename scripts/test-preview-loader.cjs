@@ -3,21 +3,83 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
 const { setImmediate } = require("node:timers/promises");
+const { setTimeout: delay } = require("node:timers/promises");
 const { pathToFileURL } = require("node:url");
 const ts = require("typescript");
 const { Buffer } = require("node:buffer");
 
-function load(file) {
+function load(file, globals = {}) {
   const sourcePath = path.join(__dirname, "../src/ui", file);
   const source = fs.readFileSync(sourcePath, "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const exports = {};
   const localRequire = request => request.startsWith(".") ? require(path.resolve(path.dirname(sourcePath), request)) : require(request);
-  new Function("require", "exports", compiled)(localRequire, exports);
+  new Function("require", "exports", ...Object.keys(globals), compiled)(localRequire, exports, ...Object.values(globals));
   return exports;
 }
 const { PreviewLoader } = load("previewLoader.ts");
 const { getPreviewUrl } = load("previewUrl.ts");
+
+test("visible animation cards generate a missing cover one at a time without opening details", async () => {
+  let reportVisibility;
+  const { AnimationCoverQueue } = load("animationCoverQueue.ts", { IntersectionObserver: class {
+    constructor(callback) { reportVisibility = callback; }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } });
+  const loader = new PreviewLoader(async file => file === "cached.fbx" ? "cached.webm" : file);
+  const queue = new AnimationCoverQueue(loader, { skeletonPath: "default-rig.fbx" });
+  const targets = ["cached", "first", "second", "offscreen"].map(assetId => ({ assetId, modelPath: `${assetId}.fbx` }));
+  const cards = targets.map(() => ({}));
+  const cleanup = targets.map((target, index) => queue.observe(cards[index], target));
+  const show = (index, visible) => reportVisibility([{ target: cards[index], isIntersecting: visible, intersectionRect: { width: 100, height: 100 } }]);
+  try {
+    queue.setEnabled(true);
+    show(0, true);
+    show(1, true);
+    show(2, true);
+    await delay(200);
+    const first = queue.getSnapshot();
+    assert.equal(first.assetId, "first");
+    assert.equal(first.skeletonPath, "default-rig.fbx");
+    assert.equal(loader.get("cached.fbx"), "cached.webm");
+    assert.equal(loader.get("offscreen.fbx"), "");
+    loader.setResolved("first.fbx", "first.webm");
+    queue.finish(first);
+    await delay(200);
+    const second = queue.getSnapshot();
+    assert.equal(second.assetId, "second");
+    show(2, false);
+    await delay(200);
+    assert.equal(queue.getSnapshot(), null);
+  } finally {
+    queue.setEnabled(false);
+    cleanup.forEach(unobserve => unobserve());
+  }
+});
+
+test("animation cover cache misses retry on remount and a recorded cover beats a late lookup", async () => {
+  const file = "Animation/AS_Walk.fbx";
+  let attempts = 0;
+  let finish;
+  const loader = new PreviewLoader(async () => {
+    if (++attempts === 1) return file;
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const unmount = loader.subscribe(file, () => {});
+  await setImmediate();
+  assert.equal(loader.get(file), file);
+  unmount();
+  const remount = loader.subscribe(file, () => {});
+  await setImmediate();
+  assert.equal(attempts, 2);
+  loader.setResolved(file, "cache/AS_Walk.webm");
+  finish(file);
+  await setImmediate();
+  assert.equal(loader.get(file), "cache/AS_Walk.webm");
+  remount();
+});
 
 test('deleting a character invalidates pending thumbnails without restarting the loader', async () => {
   let finish;

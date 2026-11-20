@@ -70,6 +70,11 @@ async function analyzeFbx(filePath) {
   const materialNames = new Set();
   const bones = new Map();
   object.traverse((child) => {
+    const candidates = [child.name, child.userData?.originalName, child.userData?.name, child.geometry?.name];
+    if (candidates.some((candidate) => COLLISION_NODE_PATTERN.test(String(candidate || "").trim()))) {
+      nodeCount += 1;
+      return; // Collision materials/faces are not render materials/faces.
+    }
     const geometry = child.geometry;
     if (geometry?.isBufferGeometry) {
       const used = Array.isArray(child.material)
@@ -80,10 +85,6 @@ async function analyzeFbx(filePath) {
       }
       const elementCount = geometry.index?.count ?? geometry.getAttribute("position")?.count ?? 0;
       triangleCount += Math.floor(elementCount / 3);
-    }
-    const candidates = [child.name, child.userData?.originalName, child.userData?.name, child.geometry?.name];
-    if (candidates.some((candidate) => COLLISION_NODE_PATTERN.test(String(candidate || "").trim()))) {
-      nodeCount += 1;
     }
     if (child.isBone || child.type === "Bone") {
       boneNames.add(String(child.name || `bone-${boneNames.size + 1}`));

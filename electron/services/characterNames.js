@@ -5,11 +5,12 @@ const { loadParent } = require("./characterComponents");
 const { updateAssetMetadataFile } = require("./assetMetadata");
 const { withRecycleLock } = require("./libraryRecycle");
 const { transactionalFs, withFileTransaction } = require("./assetFileTransaction");
-const { normalizeCharacterNames, validCharacterChineseName } = require("../../shared/characterNames.mjs");
+const { normalizeCharacterNames, validCharacterChineseName, hasCharacterEnginePath } = require("../../shared/characterNames.mjs");
 const { buildCharacterAssetName } = require("./characterImport");
+const { gameplayIdentity, gameplayPrefix } = require('../../shared/gameplayNaming.mjs');
 const { appendCharacterUpdateHistory } = require("./characterUpdateHistory");
 
-const sourceIdentityKeys = new Set(["originalName", "originalPath", "sourcePath", "sourcePaths", "assetID", "id", "entityKey", "relatedAssetIds", "enginePath", "characterUnrealExports"]);
+const sourceIdentityKeys = new Set(["originalName", "originalPath", "sourcePath", "sourcePaths", "assetID", "id", "entityKey", "relatedAssetIds", "enginePath", "characterUnrealExports", "characterUEIntake"]);
 const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const normalizeRelative = value => String(value || "").replace(/\\/g, "/");
 
@@ -65,9 +66,12 @@ function remapManagedMetadata(value, key, oldName, newName, parentPath, relative
 async function updateCharacterNames(options) {
   if (!validCharacterChineseName(options.displayNameZh)) throw new Error("中文名必须包含汉字，且不超过32字");
   const names = normalizeCharacterNames(options);
-  if (!require('../../shared/characterNames.mjs').validCharacterEnglishName(names.displayNameEn)) throw new Error('请填写有效的英文名，仅使用字母、数字和下划线');
   if (options.nameConfirmed !== true) throw new Error('请核对中文名和英文名并勾选确认');
-  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon"]);
+  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon", "item"]);
+  const modernItem = parent.assetType === 'item' && Boolean(gameplayPrefix(parent.meta.category));
+  const itemIdentity = modernItem ? gameplayIdentity(parent.meta.category, names.displayNameEn) : null;
+  if (modernItem ? !itemIdentity.assetName : !require('../../shared/characterNames.mjs').validCharacterEnglishName(names.displayNameEn)) throw new Error('请填写有效的英文名或数字资源 ID');
+  if (itemIdentity) names.displayNameEn = itemIdentity.name;
   const previousFields = parent.meta.character || {};
   const independentPart = parent.assetType === 'suit' && ['Hair', 'Face'].includes(previousFields.variant);
   const namingFields = independentPart ? names : { ...names, [parent.assetType === 'suit' ? 'suitName' : 'name']: names.displayNameEn };
@@ -76,9 +80,9 @@ async function updateCharacterNames(options) {
   if (!oldAssetName) throw new Error("当前角色资产缺少规范资产名，请刷新或先修复元数据");
   // Hair/Face keep their independent numbered identity. Other families keep
   // their category/serial/form identity while changing only the name token.
-  const oldToken = parent.assetType === 'suit' ? oldAssetName : String(previousFields.name || '').trim();
+  const oldToken = parent.assetType === 'suit' || modernItem ? oldAssetName : String(previousFields.name || '').trim();
   if (!oldToken) throw new Error('缺少原名称字段，无法确定改名范围');
-  const newToken = parent.assetType === 'suit' ? buildCharacterAssetName('suit', nextFields) : names.displayNameEn;
+  const newToken = parent.assetType === 'suit' ? buildCharacterAssetName('suit', nextFields) : modernItem ? itemIdentity.assetName : names.displayNameEn;
   const newAssetName = parent.assetType === 'suit' ? newToken : oldAssetName.replace(new RegExp(escapeRegExp(oldToken), 'ig'), newToken);
   if (!newAssetName) throw new Error("英文名无法生成有效的规范资产名称");
   if (options.expectedAssetName && oldAssetName !== options.expectedAssetName) throw new Error("资产名称已变化，请刷新后重试");
@@ -95,8 +99,9 @@ async function updateCharacterNames(options) {
       const remapped = remapManagedMetadata({ ...meta, characterUpdateHistory: undefined }, "", oldToken, newToken, parent.path, relativeRenames, absoluteRenames);
       remapped.name = newAssetName;
       remapped.character = { ...remapped.character, ...namingFields };
-      if (names.displayNameZh !== String(meta.character?.displayNameZh || "")
-        || names.displayNameEn !== String(meta.character?.displayNameEn || "")) {
+      if (!hasCharacterEnginePath(meta)) {
+        delete remapped.character.ueNameSyncPending;
+      } else if (names.displayNameEn !== String(meta.character?.displayNameEn ?? meta.character?.suitName ?? meta.character?.name ?? "")) {
         remapped.character.ueNameSyncPending = randomUUID();
       }
       if (remapped.characterManifest) remapped.characterManifest = { ...remapped.characterManifest, fields: { ...remapped.characterManifest.fields, ...namingFields } };

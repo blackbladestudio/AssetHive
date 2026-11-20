@@ -29,8 +29,16 @@ function characterIdentity(type, fields = {}, name = "") {
     if (!/^(Hair|Face)$/.test(variant)) values.push(fields.suitClass);
     return values.every(Boolean) ? [type, ...values.map(token)].join(":") : "";
   }
-  if (["npc", "weapon"].includes(type)) {
-    const category = type === 'weapon' ? fields.weaponType || fields.category : fields.category;
+  if (type === 'npc') {
+    if (fields.category && fields.name && fields.formIds?.length === 1) {
+      return [type, token(fields.category), token(fields.name), token(fields.formIds[0])].join(':');
+    }
+    // Existing NPC records keep their legacy category + serial identity until
+    // they are explicitly re-imported under the form-based rule.
+    return fields.category && fields.serial ? [type, token(fields.category), token(fields.serial)].join(':') : (name ? `${type}:${token(name)}` : '');
+  }
+  if (type === "weapon") {
+    const category = fields.weaponType || fields.category;
     return category && fields.serial ? [type, token(category), token(fields.serial)].join(":") : (name ? `${type}:${token(name)}` : "");
   }
   if (type === "monster") return fields.name && fields.formIds?.length ? [type, token(fields.name), ...fields.formIds.map(token)].join(":") : "";

@@ -14,11 +14,14 @@ type AnimationPreviewProps = {
   pauseLabel: string;
   failedLabel: string;
   missingMeshLabel: string;
-  onMotionCapture?: (blob: Blob) => void;
+  onMotionCapture?: (capture: () => Promise<Blob | null>) => Promise<void>;
+  captureOnly?: boolean;
+  onCaptureFinished?: () => void;
 };
 
-function recordCanvasToWebm(canvas: HTMLCanvasElement, durationMs: number) {
+function recordCanvasToWebm(canvas: HTMLCanvasElement, durationMs: number, signal: AbortSignal) {
   return new Promise<Blob>((resolve, reject) => {
+    signal.throwIfAborted();
     if (typeof canvas.captureStream !== "function" || typeof MediaRecorder === "undefined") {
       reject(new Error("motion preview capture is not supported"));
       return;
@@ -33,29 +36,46 @@ function recordCanvasToWebm(canvas: HTMLCanvasElement, durationMs: number) {
     }
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 700000 });
     const chunks: BlobPart[] = [];
+    const stop = () => { if (recorder.state !== "inactive") recorder.stop(); };
+    const timer = window.setTimeout(stop, Math.max(700, durationMs));
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      signal.removeEventListener("abort", stop);
+      stream.getTracks().forEach(track => track.stop());
+    };
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
     };
     recorder.onerror = () => {
-      stream.getTracks().forEach((track) => track.stop());
+      cleanup();
       reject(new Error("motion preview record failed"));
     };
     recorder.onstop = () => {
-      stream.getTracks().forEach((track) => track.stop());
+      cleanup();
       resolve(new Blob(chunks, { type: "video/webm" }));
     };
-    recorder.start(120);
-    window.setTimeout(() => {
-      if (recorder.state === "recording") {
-        recorder.stop();
-      }
-    }, Math.max(700, durationMs));
+    try {
+      recorder.start(120);
+      signal.addEventListener("abort", stop, { once: true });
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
   });
 }
 
-function loadFbx(filePath: string) {
+function loadFbx(filePath: string, signal?: AbortSignal) {
+  const url = getPreviewUrl(filePath);
+  if (signal) {
+    return fetch(url, { signal }).then(async response => {
+      if (!response.ok && response.status !== 0) throw new Error(`FBX load failed: ${response.status}`);
+      const bytes = await response.arrayBuffer();
+      signal.throwIfAborted();
+      return new FBXLoader().parse(bytes, THREE.LoaderUtils.extractUrlBase(url));
+    });
+  }
   return new Promise<THREE.Group>((resolve, reject) => {
-    new FBXLoader().load(getPreviewUrl(filePath), resolve, undefined, reject);
+    new FBXLoader().load(url, resolve, undefined, reject);
   });
 }
 
@@ -113,12 +133,16 @@ export function AnimationPreview({
   pauseLabel,
   failedLabel,
   missingMeshLabel,
-  onMotionCapture
+  onMotionCapture,
+  captureOnly = false,
+  onCaptureFinished
 }: AnimationPreviewProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const playingRef = useRef(true);
   const onMotionCaptureRef = useRef(onMotionCapture);
   onMotionCaptureRef.current = onMotionCapture;
+  const onCaptureFinishedRef = useRef(onCaptureFinished);
+  onCaptureFinishedRef.current = onCaptureFinished;
   const [status, setStatus] = useState<"idle" | "loading" | "ready" | "failed">("idle");
   const [playing, setPlaying] = useState(true);
   const [clipName, setClipName] = useState("");
@@ -144,6 +168,7 @@ export function AnimationPreview({
     }
 
     let cancelled = false;
+    const abort = new AbortController();
     let disposeLoaded: (() => void) | null = null;
     setStatus("loading");
     setPlaying(true);
@@ -153,13 +178,20 @@ export function AnimationPreview({
 
     void (async () => {
       try {
-        const animationObject = await loadFbx(animationSource);
+        const signal = captureOnly ? abort.signal : undefined;
+        const animationObject = await loadFbx(animationSource, signal);
         if (cancelled || !host.isConnected) {
           disposeObject(animationObject);
           return;
         }
-        const visualSource = meshSource || skeletonSource;
-        const visual = visualSource ? await loadFbx(visualSource) : animationObject;
+        const visualSource = captureOnly && countRenderableMeshes(animationObject) > 0 ? "" : meshSource || skeletonSource;
+        let visual: THREE.Group;
+        try {
+          visual = visualSource ? await loadFbx(visualSource, signal) : animationObject;
+        } catch (error) {
+          disposeObject(animationObject);
+          throw error;
+        }
         if (cancelled || !host.isConnected) {
           if (visual !== animationObject) disposeObject(visual);
           disposeObject(animationObject);
@@ -186,6 +218,15 @@ export function AnimationPreview({
         scene.add(visual);
 
         const meshCount = countRenderableMeshes(visual);
+        const clips = (animationObject.animations || []).length > 0
+          ? animationObject.animations
+          : (visual.animations || []);
+        if (captureOnly && (!meshCount || !clips.length)) {
+          if (visual !== animationObject) disposeObject(animationObject);
+          disposeObject(visual);
+          onCaptureFinishedRef.current?.();
+          return;
+        }
         const helper = meshCount === 0 ? new THREE.SkeletonHelper(visual) : null;
         if (helper) {
           scene.add(helper);
@@ -196,7 +237,7 @@ export function AnimationPreview({
         const height = Math.max(1, host.clientHeight);
         const camera = new THREE.PerspectiveCamera(35, width / height, 0.05, 200);
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setPixelRatio(captureOnly ? 1 : Math.min(window.devicePixelRatio || 1, 2));
         renderer.setSize(width, height, false);
         renderer.outputColorSpace = THREE.SRGBColorSpace;
         host.replaceChildren(renderer.domElement);
@@ -207,9 +248,6 @@ export function AnimationPreview({
         controls.enablePan = true;
         frameObject(camera, controls, visual);
 
-        const clips = (animationObject.animations || []).length > 0
-          ? animationObject.animations
-          : (visual.animations || []);
         const mixer = clips.length > 0 ? new THREE.AnimationMixer(visual) : null;
         if (mixer && clips[0]) {
           mixer.clipAction(clips[0]).reset().play();
@@ -247,11 +285,13 @@ export function AnimationPreview({
             captureAfterFrames -= 1;
             if (captureAfterFrames === 0 && onMotionCaptureRef.current) {
               const notify = onMotionCaptureRef.current;
-              void recordCanvasToWebm(renderer.domElement, captureDurationMs)
-                .then((blob) => {
-                  if (!cancelled && blob.size > 0) notify(blob);
-                })
-                .catch(() => void 0);
+              void notify(async () => {
+                if (cancelled) return null;
+                const blob = await recordCanvasToWebm(renderer.domElement, captureDurationMs, abort.signal);
+                return !cancelled && blob.size > 0 ? blob : null;
+              }).catch(() => void 0).finally(() => {
+                if (!cancelled && captureOnly) onCaptureFinishedRef.current?.();
+              });
             }
           }
           frameId = window.requestAnimationFrame(tick);
@@ -268,6 +308,7 @@ export function AnimationPreview({
           mixer?.uncacheRoot(visual);
           controls.dispose();
           renderer.dispose();
+          if (captureOnly) renderer.forceContextLoss();
           renderer.domElement.remove();
           helper?.geometry.dispose();
           if (visual !== animationObject) {
@@ -280,16 +321,22 @@ export function AnimationPreview({
           setStatus("failed");
           setClipName("");
           setMissingMesh(false);
+          if (captureOnly) onCaptureFinishedRef.current?.();
         }
       }
     })();
 
     return () => {
       cancelled = true;
+      abort.abort();
       disposeLoaded?.();
       host.replaceChildren();
     };
-  }, [filePath, skeletonPath, skeletalMeshPath]);
+  }, [filePath, skeletonPath, skeletalMeshPath, captureOnly]);
+
+  if (captureOnly) return <div className="animation-cover-capture" aria-hidden="true">
+    <div ref={hostRef} className="animation-preview-stage" />
+  </div>;
 
   const showCanvas = Boolean(filePath) && status !== "failed";
 

@@ -1,22 +1,27 @@
-const { heroPartKind, heroPartName, inferHeroPart, auditHeroPackage, cleanSuitName, heroModelStem } = require("../../shared/heroPackageRules.mjs");
+const { heroSuitPart, heroPartKind, heroPartName, inferHeroPart, auditHeroPackage, cleanSuitName, heroModelStem } = require("../../shared/heroPackageRules.mjs");
 const { heroTextureSuffix } = require('../../shared/heroMaterialRules.mjs');
+const { reviewSuitMaterialSlots } = require('../../shared/suitMaterialMatching.mjs');
+const gameplay = require('../../shared/gameplayCategories.mjs');
+const { gameplayIdentity, gameplayCategoryFromName } = require('../../shared/gameplayNaming.mjs');
 const { CHARACTER_MODEL_EXTENSIONS } = require("../../shared/characterFilePolicy.mjs");
 const { inferCharacterChineseName } = require("../../shared/characterNames.mjs");
-const CHARACTER_ASSET_TYPES = Object.freeze(["suit", "monster", "npc", "weapon"]);
+const CHARACTER_ASSET_TYPES = Object.freeze(["suit", "monster", "npc", "weapon", "item"]);
 const CHARACTER_ASSET_TYPE_SET = new Set(CHARACTER_ASSET_TYPES);
 
 const CHARACTER_DEFAULT_CATEGORIES = Object.freeze({
   suit: "Male_01",
   monster: "4_NormalMonster",
   npc: "Other",
-  weapon: "Other"
+  weapon: "Other",
+  item: "Interactable"
 });
 
 const CHARACTER_FAMILY_FOLDERS = Object.freeze({
   suit: ["Character", "Hero"],
   monster: ["Character", "Monster"],
   npc: ["Character", "NPC"],
-  weapon: ["Character", "Weapon"]
+  weapon: ["Character", "Weapon"],
+  item: ["Character", "GameplayItem"]
 });
 
 const SUIT_CLASS_BY_CODE = Object.freeze({ M: "Medium", H: "Heavy", L: "Light" });
@@ -65,14 +70,18 @@ function getCharacterDefaultCategory(assetType) {
 function buildCharacterRelativeRoot(assetType, category) {
   const normalizedType = String(assetType || "").trim().toLowerCase();
   if (!isCharacterAssetType(normalizedType)) return [];
+  if (normalizedType === 'item' && gameplay.categories.includes(gameplay.normalizeCategory(category))) return [...CHARACTER_FAMILY_FOLDERS.item, ...gameplay.normalizeCategory(category).split('/')];
   const safeCategory = normalizeCharacterToken(category) || getCharacterDefaultCategory(normalizedType);
   return [...CHARACTER_FAMILY_FOLDERS[normalizedType], safeCategory];
 }
 
 function inferCharacterAssetType(values = []) {
+  if (values.some(gameplayCategoryFromName)) return 'item';
+  if (gameplay.inferCategory(values)) return 'item';
   const text = values.map((value) => String(value || "")).join(" ");
-  if (/(?:^|[\\/_\s-])(weapon|bow|arrow|greatAxe|jade|longSword|pairedSwords|shieldAxe|sword|blade|spear|shield|axe|gun)\d*(?:$|[\\/_\s.-])/i.test(text)
-    || /(?:^|[_.-])(?:SK|SM|T|MI)_?(?:Bow|Arrow|GreatAxe|Jade|LongSword|PairedSwords|ShieldAxe|Sword|Spear|Shield|Axe)/i.test(text)) return "weapon";
+  if (/(?:^|[\\/])(?:GameplayItems?|Chest|FormationFlag|Interactable|ThrowingKnife|Consumable|DroppedGear)(?:[\\/]|$)/i.test(text)) return 'item';
+  if (/(?:^|[\\/_\s-])(weapon|bow|arrow|dagger|dualhands|dualaxe|greataxe|greatsword|jade|longsword|pairedswords|shieldaxe|sword|blade|spear|shield|axe|gun)\d*(?:$|[\\/_\s.-])/i.test(text)
+    || /(?:^|[_.-])(?:SK|SM|T|MI)_?(?:Bow|Arrow|Dagger|DualHands|DualAxe|GreatAxe|GreatSword|Jade|LongSword|PairedSwords|ShieldAxe|Sword|Spear|Shield|Axe)/i.test(text)) return "weapon";
   if (/(?:^|[\\/_\s-])(npc|merchant|keeper|vendor)\d*(?:$|[\\/_\s.-])/i.test(text)) return "npc";
   if (/(?:^|[\\/_\s-])(monster|boss|miniboss|elite|minion)(?:$|[\\/_\s.-])/i.test(text)) return "monster";
   return "suit";
@@ -150,13 +159,13 @@ function inferCharacterSourcePackageName(folderName, files = []) {
 
 function inferCharacterTextureType(filePath) {
   const stem = String(filePath || "").replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") || "";
-  const hairChannel = /_(Opacity|Alpha|Root|ID|Height|Depth|Tangent|Flow)$/i.test(stem) ? require('../../shared/heroMaterialRules.mjs').heroTextureChannel(filePath) : '';
+  const hairChannel = /_(Opacity|Alpha|Root|ID|Height|Depth|Tangent|Flow|Scatter|SRMF|Mask)$/i.test(stem) ? require('../../shared/heroMaterialRules.mjs').heroTextureChannel(filePath) : '';
   return hairChannel || (/(?:^|_)A$/i.test(stem) ? "Opacity" : "");
 }
 
 function inferCharacterTextureGroup(filePath) {
   const stem = String(filePath || "").replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") || "";
-  const withoutMap = stem.replace(/_(?:ORM|D|N|A)$/i, "");
+  const withoutMap = require('../../shared/characterFilePolicy.mjs').characterTextureChannel(filePath) ? stem.slice(0, stem.lastIndexOf('_')) : stem;
   if (!withoutMap || withoutMap === stem) return "";
   const suitPart = withoutMap.match(/(?:^|_)[MHL]\d{3}_[MF]\d{2}_(.+)$/i)?.[1];
   const canonicalPart = withoutMap.match(/^T_[MF]\d{2}_(?:Light|Medium|Heavy)\d{3}_[^_]+_(.+)$/i)?.[1];
@@ -198,10 +207,8 @@ function inferCharacterModelPart(filePath, assetName = "", suitName = "") {
 }
 
 function normalizeCharacterTextureMapCode(textureType, filePath = "") {
-  const stem = String(filePath || "").replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") || "";
-  const sourceCode = stem.match(/_(ORM|D|N|A)$/i)?.[1]?.toLowerCase() || "";
   const typeCode = String(textureType || "").replace(/[^a-z]/gi, "").toLowerCase();
-  return CHARACTER_TEXTURE_MAP_CODES[sourceCode] || CHARACTER_TEXTURE_MAP_CODES[typeCode] || "MAP";
+  return require('../../shared/characterFilePolicy.mjs').characterTextureChannel(filePath, typeCode) || CHARACTER_TEXTURE_MAP_CODES[typeCode] || "MAP";
 }
 
 function buildCharacterModelBaseName(assetName, sourcePath, fields = {}, meshKind = "staticMesh") {
@@ -228,13 +235,20 @@ function normalizeCharacterFields(assetType, input = {}) {
   return {
     ...require("../../shared/characterNames.mjs").normalizeCharacterNames(input),
     family,
+    ...(family === 'suit' && input.materialSlotMappings ? { materialSlotMappings: Object.fromEntries(Object.entries(input.materialSlotMappings).filter(([key, value]) => key.includes('|') && typeof value === 'string' && /^[a-z0-9]+$/.test(value))) } : {}),
     gender: normalizeCharacterToken(input.gender),
     bodyCode: normalizeCharacterToken(input.bodyCode),
     suitClass: normalizeCharacterToken(input.suitClass),
     suitName: normalizeCharacterToken(input.suitName),
     ...(family !== "suit" && input.name ? { name: normalizeCharacterToken(input.name) } : {}),
-    ...(family === 'weapon' ? { weaponType: normalizeCharacterToken(input.weaponType), relatedAssetId: String(input.relatedAssetId || '').trim() } : {}),
-    ...(family === "monster" ? { relatedAssetId: String(input.relatedAssetId || "").trim(), formIds: Array.isArray(input.formIds) ? input.formIds.map(String) : [] } : {}),
+    ...(family === 'weapon' ? { weaponType: normalizeCharacterToken(input.weaponType),
+      ...(['single', 'combined'].includes(input.weaponAssembly) ? { weaponAssembly: input.weaponAssembly } : {}),
+      ...(['auto', 'sharedPair', 'separatePair', 'bow', 'custom'].includes(input.weaponLayout) ? { weaponLayout: input.weaponLayout } : {}),
+      relatedAssetId: String(input.relatedAssetId || '').trim() } : {}),
+    ...(['monster', 'npc'].includes(family) ? {
+      ...(family === 'monster' ? { relatedAssetId: String(input.relatedAssetId || "").trim() } : {}),
+      formIds: Array.isArray(input.formIds) ? input.formIds.map(String) : []
+    } : {}),
     serial: normalizeCharacterToken(input.serial),
     variant: normalizeCharacterToken(input.variant),
     maturity: String(input.maturity || "").toLowerCase() === "final" ? "approved" : ["wip", "needs_rig", "rigged", "approved"].includes(String(input.maturity || "").toLowerCase())
@@ -245,10 +259,14 @@ function normalizeCharacterFields(assetType, input = {}) {
   };
 }
 
-function validateCharacterImport({ assetType, assetName, category, characterFields, packageFiles, previewPaths, modelAnalyses = {} }) {
+function validateCharacterImport({ assetType, assetName, category, characterFields, packageFiles, previewPaths, modelAnalyses = {}, materialNames = {} }) {
   const errors = [];
   const independentPart = assetType === 'suit' && heroPartKind(characterFields);
-  if (!independentPart && !require('../../shared/characterNames.mjs').validCharacterEnglishName(characterFields?.displayNameEn)) errors.push('请填写英文名，以英文字母开头，仅使用字母、数字和下划线');
+  if (assetType === 'item' && gameplay.categories.includes(gameplay.normalizeCategory(category))) {
+    const identity = gameplayIdentity(category, characterFields?.displayNameEn);
+    if (!identity.assetName) errors.push(category.startsWith('Item/') ? '请填写数字资源 ID' : '请填写英文名，以英文字母开头，仅使用字母、数字和下划线');
+    else if (assetName !== identity.assetName) errors.push(`规范资产名应为：${identity.assetName}`);
+  } else if (!independentPart && !require('../../shared/characterNames.mjs').validCharacterEnglishName(characterFields?.displayNameEn)) errors.push('请填写英文名，以英文字母开头，仅使用字母、数字和下划线');
   if (!independentPart && characterFields?.nameConfirmed !== true) errors.push('请核对中文名和英文名并勾选确认');
   if (!(assetType === "suit" && heroPartKind(characterFields)) && !require("../../shared/characterNames.mjs").validCharacterChineseName(characterFields?.displayNameZh)) errors.push("请填写包含汉字的中文名（最多32字），不能只填写英文或拼音");
   if (!isCharacterAssetType(assetType)) errors.push("请选择角色资产类型");
@@ -261,6 +279,10 @@ function validateCharacterImport({ assetType, assetName, category, characterFiel
     if (!expected || assetName !== expected || category !== heroPartKind(characterFields)) errors.push("请确认头发／脸部的体型、三位编号和规范名称");
   }
   if (assetType === "suit" && !heroPartKind(characterFields)) {
+    const groupNames = Object.values(materialNames).filter(Boolean);
+    const groups = groupNames.length ? groupNames : (packageFiles || []).filter(file => classifyCharacterPackageFile(file) === 'texture').map(inferCharacterTextureGroup);
+    const unresolved = reviewSuitMaterialSlots((packageFiles || []).filter(file => /\.fbx$/i.test(file)).map(file => ({ file, part: heroSuitPart(file), slots: modelAnalyses[file]?.materialNames })), groups, characterFields?.materialSlotMappings).filter(row => !row.key);
+    if (unresolved.length) errors.push('请在入库确认中选择材质槽对应的贴图组：' + [...new Set(unresolved.map(row => row.slot))].join('、'));
     const maxSlots = require("../../shared/characterComponentRules.json").suit.maxSlots;
     const slots = new Set((packageFiles || []).filter(file => /\.(fbx|obj|abc|gltf|glb)$/i.test(file))
       .map(file => buildCharacterModelBaseName(assetName, String(file).replace(/_LOD\d+(?=\.[^.]+$)/i, ""), characterFields).toLowerCase()));

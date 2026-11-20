@@ -83,6 +83,8 @@ declare global {
       renderGroomPreview?: (sourcePath: string) => Promise<Record<'front' | 'left' | 'right' | 'back', string>>;
       pickCharacterUpdateFiles: () => Promise<string[]>;
       materializeDroppedFile?: (payload: { name: string; bytes: ArrayBuffer }) => Promise<string>;
+      getAnimationPreview?: (modelPath: string) => Promise<{ key: string; path: string } | null>;
+      cacheAnimationPreview?: (payload: { assetId: string; modelPath: string; key: string; bytes: ArrayBuffer }) => Promise<string>;
       readClipboardImage?: () => Promise<{ name: string; bytes: Uint8Array } | null>;
       resolveDroppedItems?: (payload: { paths: string[]; requestId?: string; includeCharacterSourceFiles?: boolean }) => Promise<DroppedAsset & { assets?: DroppedAsset[]; failedArchives?: Array<{ name?: string }> }>;
       cancelResolveDroppedItems?: (payload: { requestId: string }) => Promise<{ ok: boolean }>;
@@ -322,6 +324,7 @@ declare global {
       revealCharacterModel?: (payload: { assetId: string; storedPath: string }) => Promise<{ ok: boolean; message?: string }>;
       revealCharacterTexture?: (payload: { assetId: string; storedPath: string }) => Promise<{ ok: boolean; message?: string }>;
       onExportProgress: (callback: (payload: { percent: number; message: string }) => void) => () => void;
+      onRigDownloadProgress?: (callback: (payload: { assetId: string; percent: number }) => void) => () => void;
       onAssetChange: (callback: (payload?: { incremental?: boolean; count?: number; records?: AssetRecord[] }) => void) => () => void;
       onCharacterDeleted?: (callback: (payload: { assetId: string; assetPath: string; paths: string[]; clearedDraftIds: string[] }) => void) => () => void;
       onScanProgress?: (

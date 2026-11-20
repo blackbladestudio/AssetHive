@@ -16,11 +16,14 @@ const { changedDirectories } = require("./libraryChanges");
 const { ASSET_METADATA_FILE_NAME, isFolderAssetMetaFileName, isSidecarAssetMetaFileName, getSidecarStemFromMetaFileName, writeAssetMetadata, updateAssetMetadataFile } = require("./assetMetadata");
 const { applyAnimationIdentityMetadata, readAnimationIdentitySidecar } = require("./animationIdentity");
 const { resolveAssetModelPath, normalizeAssetModelPaths } = require("./assetModelPaths");
+const { activeCharacterFiles } = require("../../shared/characterComponents.mjs");
+const { isAllowedCharacterTextureFile } = require("../../shared/characterFilePolicy.mjs");
 const {
   applyPreservedAnimationPreview,
   buildAnimationMetaFromModel,
   isAnimationLibraryPath,
-  isAnimationModelMetaPath
+  isAnimationModelMetaPath,
+  pickPreservedAnimationPreview
 } = require("./customAssetLayout");
 const {
   FOUR_K_THRESHOLD_PIXELS,
@@ -540,7 +543,7 @@ function getTopCategoryForAssetType(assetType) {
   if (assetType === "animation") {
     return "animation";
   }
-  if (["suit", "monster", "npc", "weapon"].includes(assetType)) {
+  if (["suit", "monster", "npc", "weapon", "item"].includes(assetType)) {
     return "character";
   }
   return ["3d", "3dplant", "surface", "decal", "atlas", "imperfection", "displacement", "hdri"].includes(assetType) ? "environment" : "";
@@ -1058,6 +1061,15 @@ function collectJsonFiles(meta, assetDir, kind) {
     }
     unique.set(kind === "model" ? normalized.toLowerCase() : normalized, normalized);
   };
+  // Managed character files are relative to the published asset directory.
+  // Legacy recovery metadata may still contain absolute staging modelFiles.
+  if (Array.isArray(meta?.characterManifest?.files)) {
+    const roles = kind === "model" ? ["model", "staticMesh", "skeletalMesh"] : ["texture"];
+    for (const file of activeCharacterFiles({ assetType: meta.assetType || meta.type, meta })) {
+      if (roles.includes(file.role)) pushIfValid(file.storedPath);
+    }
+    return [...unique.values()];
+  }
   if (kind === "model" && meta?.modelSlots && typeof meta.modelSlots === "object" && !Array.isArray(meta.modelSlots)) {
     for (const filePath of Object.values(meta.modelSlots)) {
       pushIfValid(filePath);
@@ -1711,7 +1723,7 @@ function buildLightMeta(meta) {
   if (typeof meta.category === "string") light.category = meta.category;
   if (typeof meta.animationAffiliation === "string") light.animationAffiliation = meta.animationAffiliation;
   if (meta.character && typeof meta.character === "object" && !Array.isArray(meta.character)) {
-    light.characterDisplaySchema = 1;
+    light.characterDisplaySchema = 2;
     if (meta.characterComponents && typeof meta.characterComponents === "object") light.characterComponents = meta.characterComponents;
     if (Array.isArray(meta.characterPackageHistory)) light.characterPackageHistory = meta.characterPackageHistory.map(({ id, createdAt }) => ({ id, createdAt }));
     light.character = Object.fromEntries(
@@ -1936,7 +1948,16 @@ function createAssetRecord(assetDir, metaPath, meta, files, forcedSource, includ
       ? textureFilesFromJson.filter((filePath) => scannedTextureSet.has(String(filePath || "").toLowerCase()))
       : textureFilesFromJson;
   const finalModelFiles = modelFiles.length > 0 ? modelFiles : scannedModelFiles;
-  const finalTextureFiles = textureFiles.length > 0 ? textureFiles : scannedTextureFiles;
+  const assetType = getAssetType(meta, assetDir, source);
+  const characterAsset = ["suit", "monster", "npc", "weapon", "item"].includes(assetType);
+  // An empty character texture manifest is valid (for example a recovered
+  // untextured mesh). Never fill it with generated covers and component views.
+  const finalTextureFiles = characterAsset
+    ? Array.isArray(meta.characterManifest?.files)
+      ? [...new Set(activeCharacterFiles({ assetType, meta }).filter(file => file.role === "texture")
+        .map(file => resolveMetaFilePath(assetDir, file.storedPath)).filter(file => file && scannedTextureSet.has(file.toLowerCase())))]
+      : (textureFiles.length > 0 ? textureFiles : scannedTextureFiles).filter(isAllowedCharacterTextureFile)
+    : textureFiles.length > 0 ? textureFiles : scannedTextureFiles;
   if (finalModelFiles.length === 0 && finalTextureFiles.length === 0) {
     return null;
   }
@@ -1944,7 +1965,6 @@ function createAssetRecord(assetDir, metaPath, meta, files, forcedSource, includ
     return null;
   }
   
-  const assetType = getAssetType(meta, assetDir, source);
   const topCategory = String(meta?.topCategory || getTopCategoryForAssetType(assetType)).trim();
   const standardAssetTags = getStandardAssetTags(meta, assetDir, assetType);
   const baseTiling = Number.isFinite(Number(meta?.baseTiling)) && Number(meta?.baseTiling) > 0 ? Number(meta.baseTiling) : undefined;
@@ -1954,7 +1974,7 @@ function createAssetRecord(assetDir, metaPath, meta, files, forcedSource, includ
   const extractedDimensions = isModelAssetType(assetType) ? extractDimensions(meta) : null;
   const dimensions = extractedDimensions || getFallbackDimensions(assetType);
   const lightMeta = buildLightMeta(meta);
-  if (includeCharacterDetails && ['suit', 'monster', 'npc', 'weapon'].includes(assetType)) {
+  if (includeCharacterDetails && ['suit', 'monster', 'npc', 'weapon', 'item'].includes(assetType)) {
     for (const key of ['enginePath', 'characterUnrealExports', 'characterUpdateHistory', 'previews', 'previewImage', 'detailImage']) {
       if (meta[key] !== undefined) lightMeta[key] = meta[key];
     }
@@ -2084,7 +2104,7 @@ async function scanPath(rootPath, source, options = {}) {
         };
       };
       const processEntry = async (entry) => {
-        const staleCharacterDisplay = record => ["suit", "monster", "npc", "weapon"].includes(String(record?.assetType || "").toLowerCase()) && record?.meta?.characterDisplaySchema !== 1;
+        const staleCharacterDisplay = record => ["suit", "monster", "npc", "weapon", "item"].includes(String(record?.assetType || "").toLowerCase()) && record?.meta?.characterDisplaySchema !== 2;
         if (entry.cachedOnly && staleCharacterDisplay(entry.cachedOnly.record)) {
           entry = { ...entry.cachedOnly, metaPath: entry.metaPath, assetDir: entry.assetDir, cachedOnly: undefined };
         }
@@ -2110,7 +2130,7 @@ async function scanPath(rootPath, source, options = {}) {
         const cachedMetaMtimeMs = Number(cached?.metaMtimeMs) || 0;
         const dirState = await resolveDirChange(entry, cached, assetDir);
         const dirSignature = typeof entry?.dirSignature === "string" ? entry.dirSignature : "";
-        const cachedCharacterMetaCurrent = !["suit", "monster", "npc", "weapon"].includes(String(cachedRecord?.assetType || "").toLowerCase())
+        const cachedCharacterMetaCurrent = !["suit", "monster", "npc", "weapon", "item"].includes(String(cachedRecord?.assetType || "").toLowerCase())
           || Boolean(cachedRecord?.meta?.character && cachedRecord?.meta?.characterManifest && !staleCharacterDisplay(cachedRecord));
         const canReuseCache = Boolean(
           !options.refreshMetadata && !Array.isArray(options.changedDirectories) &&
@@ -2415,6 +2435,13 @@ function stopLibraryScans() {
 async function scanLibraryInWorker(customPath, options = {}) {
   const generation = scanWorkerGeneration;
   const { residentBase = [], ...workerOptions } = options;
+  // The local card index can have a newer animation cover than the scan memo.
+  const animationPreviews = new Map();
+  for (const asset of residentBase) {
+    if (asset?.assetType !== "animation" || !isAnimationModelMetaPath(asset.metaPath)) continue;
+    const preview = pickPreservedAnimationPreview(asset);
+    if (preview) animationPreviews.set(normalizeComparePath(asset.metaPath), preview);
+  }
   const reuseSeeds = options.residentIndex ? await createScanSeeds(residentBase) : [];
   if (generation !== scanWorkerGeneration) throw new Error("Scan canceled during preparation");
   return new Promise((resolve, reject) => {
@@ -2444,8 +2471,13 @@ async function scanLibraryInWorker(customPath, options = {}) {
       if (message.type === "progress" && onProgress) {
         onProgress(message.payload);
       } else if (message.type === "record") {
-        if (options.residentIndex) streamedRecords.set(message.token, message.payload);
-        onRecord?.(message.payload);
+        const record = message.payload;
+        if (record.assetType === "animation" && isAnimationModelMetaPath(record.metaPath)) {
+          const preview = animationPreviews.get(normalizeComparePath(record.metaPath));
+          if (preview) applyPreservedAnimationPreview(record, { previewImage: preview });
+        }
+        if (options.residentIndex) streamedRecords.set(message.token, record);
+        onRecord?.(record);
       } else if (message.type === "timing" && onTiming) {
         onTiming(message.payload);
       } else if (message.type === "warning" && onWarning) {

@@ -13,7 +13,7 @@ async function organizeCharacterFolders(root, assetDir, dryRun = true) {
   const metaPath = path.join(assetDir, 'asset_info.json');
   const raw = await fs.readFile(metaPath, 'utf8');
   const meta = JSON.parse(raw);
-  if (!['suit', 'weapon', 'monster', 'npc'].includes(meta.assetType)) throw new Error('Not a character asset');
+  if (!['suit', 'weapon', 'monster', 'npc', 'item'].includes(meta.assetType)) throw new Error('Not a character asset');
   const moves = new Map();
   function collect(value) {
     if (!value || typeof value !== 'object') return;

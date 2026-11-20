@@ -8,6 +8,13 @@ const { deduplicateCharacterCategoryTags } = require("../shared/characterFilters
 const { defaultCharacterFilters } = require("../shared/characterFilters.mjs");
 const { characterStatus } = require("../shared/characterFilters.mjs");
 
+test('all character categories place rigging directly before production status', () => {
+  for (const node of ['character', 'character-suit', 'character-suit:Face', 'character-suit:Hair', 'character-monster', 'character-npc', 'character-weapon', 'character-item']) {
+    const keys = definitions(context(node), []).map(field => field.key);
+    assert.equal(keys.indexOf('rigging'), keys.indexOf('maturity') - 1, node);
+  }
+});
+
 test("character overview has its own four owner categories and no recent section", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/ui/App.tsx"), "utf8");
   assert.ok(source.includes('activeMenu === "character" ? ['));
@@ -103,11 +110,12 @@ test("only character directories opt into the contextual filters; environment, a
 });
 test("family filter sets are distinct and face/hair do not inherit outfit parts or armor", () => {
   const fields = node => definitions(context(node), []).map(field => field.key);
-  assert.deepEqual(fields("character-suit"), ["suitClass", "display", "part", "maturity"]);
-  assert.deepEqual(fields("character-monster"), ["maturity"]);
-  assert.deepEqual(fields("character-suit:Face"), ["gender", "maturity"]);
-  assert.deepEqual(fields("character-suit:Hair"), ["gender", "hairType", "maturity"]);
-  assert.deepEqual(fields("character"), ["family", "display", "maturity"]);
+  assert.deepEqual(fields("character-suit"), ["suitClass", "display", "part", "rigging", "maturity"]);
+  assert.deepEqual(fields("character-monster"), ["rigging", "maturity"]);
+  assert.deepEqual(fields("character-weapon"), ["rigging", "maturity"]);
+  assert.deepEqual(fields("character-suit:Face"), ["gender", "rigging", "maturity"]);
+  assert.deepEqual(fields("character-suit:Hair"), ["gender", "hairType", "rigging", "maturity"]);
+  assert.deepEqual(fields("character"), ["family", "display", "rigging", "maturity"]);
 });
 test("switching scope retains independent values; selecting a part excludes owners and clearing display clears the part", () => {
   const state = { suit: change(defaults, "part", "head"), monster: change(defaults, "form", "02") };
@@ -148,9 +156,12 @@ test("legacy filters are bypassed only for character context and the worker sees
   assert.match(branch, /return;/);
   assert.ok(source.includes('if (selectedCharacterInfo) { navigateCharacterDirectory(); return; }'));
   assert.ok(source.includes('matchesCharacterCategoryTag(tag, selectedCharacterCategory, selectedCharacterCategoryLabels)'));
-  assert.ok(source.includes('["Male_01", "Female_01"].includes(category)'));
+  assert.match(source, /\['Outfit', 'Male_01', 'Female_01', 'Face', 'Hair'\]/);
+  assert.ok(source.includes('t("所有套装相关", "All outfit-related assets")'));
+  assert.ok(source.includes('const showCharacterSubcategories = Boolean(characterContext && characterContext.family !== "all")'));
   assert.ok(source.includes('t(`所有${getAssetTypeLabel(characterContext.family)}`, `All ${getAssetTypeLabel(characterContext.family)}`)'));
-  assert.ok(source.includes('showCharacterSubcategories && <DarkSelect'));
+  assert.ok(source.includes("showCharacterSubcategories && characterContext.family !== 'item' && <DarkSelect"));
+  assert.ok(source.includes("characterContext.family === 'item' && gameplayFilterLevels(selectedSuitSubcategory)"));
   assert.ok(source.includes('getCharacterCategoryNodes(characterContext.family, allAssets)'));
   assert.ok(source.includes('onChange={selectSuitSubcategory}'));
   assert.ok(source.includes('value={selectedSuitSubcategory || "all"}'));

@@ -2,7 +2,12 @@ export type WeaponIdentity = { type: string; category: string; serial: string; n
 export const WEAPON_CATEGORIES: string[];
 export const WEAPON_TYPES: string[];
 export const WEAPON_UE_ROOT: string;
+export function weaponSideInternal(value: string, owner?: string): string;
+export function weaponSideOutput(value: string): string;
+export function weaponPackageOutput(value: string, owner: string): string;
 export function weaponCategory(type: string): string;
+export function weaponModelSlot(value: string): string;
+export function weaponAssemblyKind(asset: { name?: string; meta?: unknown }): 'single' | 'combined';
 export function parseWeaponIdentity(value: string): WeaponIdentity | null;
 export function weaponFileIdentity(file: string): WeaponIdentity | null;
 export function weaponTargetRoot(identity: string): string;

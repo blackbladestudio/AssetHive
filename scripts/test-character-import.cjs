@@ -49,6 +49,19 @@ const {
   validateCharacterImport
 } = require("../electron/services/characterImport");
 
+test('all outfit parts preserve hair auxiliary texture channels and material groups', () => {
+  const fields = { suitName: 'BuQiang' };
+  for (const part of ['head', 'upbody', 'downbody', 'arm']) {
+    for (const [suffix, channel] of [['Depth','Height'],['Height','Height'],['Root','Root'],['ID','ID'],['Tangent','Tangent']]) {
+      const source = `T_M01_Heavy007_Buqiang_${part}_hair_${suffix}.tga`;
+      const group = inferCharacterTextureGroup(source);
+      assert.equal(group, `${part}_hair`, source);
+      assert.equal(buildCharacterTextureBaseName('M01_Heavy007_BuQiang', group, inferCharacterTextureType(source), source, fields),
+        `T_M01_Heavy007_BuQiang_${canonicalizeCharacterPart(group, fields.suitName)}_${channel}`);
+    }
+  }
+});
+
 test("Character 四类资产使用独立的顶层类型", () => {
   assert.equal(isCharacterAssetType("suit"), true);
   assert.equal(isCharacterAssetType("monster"), true);
@@ -148,6 +161,15 @@ test('Hair and Face use independent identities, not outfit slots or four-view re
   }
 });
 
+test('Hair preserves optional material parts and audits duplicates within each part', () => {
+  const fields = { gender: 'Female', bodyCode: '01', variant: 'Hair', serial: '001' };
+  const files = ['SM_F01_Hair001.fbx', 'T_F01_Hair001_Eyebrow_Height.tga', 'T_F01_Hair001_Front_Height.tga', 'T_F01_Hair001_Back_Height.tga'];
+  assert.equal(buildCharacterTextureBaseName('F01_Hair001', '', 'Height', files[1], fields), files[1].slice(0, -4));
+  assert.deepEqual(heroRules.auditHeroPackage(files, fields), []);
+  const duplicate = heroRules.auditHeroPackage([...files, 'Other/T_F01_Hair001_Front_Height.tga'], fields);
+  assert.ok(duplicate.some(error => error.includes('多个候选')));
+});
+
 test("Hair distinguishes Groom ABC from card meshes without treating other ABC files as Groom", () => {
   const fields = { gender: "Male", bodyCode: "01", variant: "Hair", serial: "001" };
   assert.equal(heroRules.heroPartModelKind(fields, "M01_Hair001.abc"), "groom");
@@ -213,6 +235,10 @@ test("Character 目标路径由类型和结构化分类稳定生成", () => {
 
 test("文件夹和文件名可以预填 Character 类型及字段", () => {
   assert.equal(inferCharacterAssetType(["Bow001_ChangGong", "SK_Bow001_ChangGong.fbx"]), "weapon");
+  for (const type of ['Dagger', 'DualHands', 'DualAxe', 'GreatSword']) {
+    assert.equal(inferCharacterAssetType([`C:/Art/${type}001_Test/SK_${type}001_L.fbx`]), 'weapon');
+  }
+  assert.equal(inferCharacterAssetType(['C:/Art/GameplayItem/Chest/SM_Test.fbx']), 'item');
   assert.equal(inferCharacterAssetType(["Merchant001_FireKeeper", "SK_FireKeeper.fbx"]), "npc");
   assert.equal(inferCharacterAssetType(["1_Boss", "GreatDingBeast_01"]), "monster");
   assert.equal(inferCharacterAssetType(["M01_Heavy001_SuitName"]), "suit");
@@ -402,4 +428,106 @@ test('Groom ABC reaches the real renderer submit payload after draft confirmatio
   assert.equal(scope.isModelFileAcceptedForType(file, 'suit', { variant: 'Face' }), false);
   assert.equal(scope.isModelFileAcceptedForType(file, 'monster', { variant: 'Hair' }), false);
   assert.equal(scope.isModelFileAcceptedForType('hair.fbx', 'suit', { variant: 'Hair' }), true);
+});
+
+test('FBX LOD confirmation gates actual submit and is invalidated by a new level', async () => {
+  const { buildScope, defaultImportForm } = require('./import-draft-harness.cjs');
+  const { characterLodReviewToken } = require('../shared/characterLodReview.mjs');
+  const files = ['C:/source/SM_F01_Face991.fbx', 'C:/source/SM_F01_Face991_LOD1.fbx'];
+  const scope = buildScope(files, { folderName: 'F01_Face991' });
+  await scope.applyQuickDropImport(['C:/source/F01_Face991'], 'suit');
+  const draft = scope.state.drafts[0].form;
+  const form = { ...defaultImportForm, ...draft, characterFields: { ...draft.characterFields, confirmed: true, identityConfirmed: true } };
+  const baseOnly = { ...form, characterPackageFiles: [form.characterPackageFiles[0]] };
+  baseOnly.characterLodConfirmation = characterLodReviewToken(baseOnly.characterPackageFiles.map(file => ({ name: file.split(/[\\/]/).pop(), sourcePath: file, kind: 'staticMesh' })));
+  assert.equal(scope.buildImportPayload(baseOnly).characterPackageFiles.length, 1);
+  assert.throws(() => scope.buildImportPayload(form), /LOD/);
+  form.characterLodConfirmation = characterLodReviewToken(form.characterPackageFiles.map(file => ({ name: file.split(/[\\/]/).pop(), sourcePath: file, kind: 'staticMesh' })));
+  assert.equal(scope.buildImportPayload(form).characterPackageFiles.length, 2);
+  const extra = 'C:/source/SM_F01_Face991_LOD2.fbx';
+  form.characterPackageFiles = [...form.characterPackageFiles, extra];
+  form.characterModelAnalysis[extra] = { ok: true, meshKind: 'staticMesh' };
+  assert.throws(() => scope.buildImportPayload(form), /LOD/);
+});
+
+test('character package whitelist excludes authoring projects and documents for new imports', () => {
+  const { partitionCharacterPackageFiles } = require('../shared/characterFilePolicy.mjs');
+  const accepted = ['SM_Hero.fbx', 'SK_Hero.fbx', 'F01_Hair001_Groom.abc', 'T_F01_Face001_Scatter.tga'];
+  const excluded = ['Hero.spp', 'Hero.blend', 'Hero.max', 'Hero.ma', 'Hero.mb', 'Hero.psd', 'notes.txt', 'data.json', 'SK_Hero.uasset'];
+  assert.deepEqual(partitionCharacterPackageFiles([...accepted, ...excluded]), { accepted, excluded });
+});
+
+test('manual file exclusion updates textures and previews; restore preserves map settings', () => {
+  const { buildScope, defaultImportForm } = require('./import-draft-harness.cjs');
+  const { setCharacterPackageFileIncluded: select } = buildScope([]);
+  const mesh = 'C:/art/SM_F01_Face001.fbx';
+  const texture = 'C:/art/T_F01_Face001_D.tga';
+  const entry = { id: 'map-1', filePath: texture, type: 'Diffuse', areaId: 'skin' };
+  for (const assetType of ['suit', 'monster', 'npc', 'weapon', 'item']) {
+    const form = { ...defaultImportForm, assetType, characterPackageFiles: [mesh, texture], textureEntries: [entry],
+      modelSlots: { Mesh: mesh }, characterFields: { confirmed: true }, characterLodConfirmation: 'checked',
+      characterPreviewPaths: { front: 'generated.png', left: '', right: '', back: '' }, previewImagePath: 'generated.png' };
+    const removed = select(form, texture, false);
+    assert.deepEqual(removed.characterPackageFiles, [mesh]);
+    assert.deepEqual(removed.textureEntries, []);
+    assert.equal(removed.previewImagePath, '');
+    assert.equal(removed.characterLodConfirmation, '');
+    assert.equal(removed.characterFields.confirmed, false);
+    assert.deepEqual(form.textureEntries, [entry], 'original draft is not mutated');
+    const restored = select(removed, texture, true);
+    assert.deepEqual(restored.textureEntries, [entry]);
+    assert.equal(restored.characterManualExclusions.length, 0);
+    assert.equal(select(restored, texture, true), restored, 'repeated restore cannot duplicate a file');
+  }
+});
+
+test('removing a base model retains LOD1 for review and clears stale model slot metadata', () => {
+  const { buildScope, defaultImportForm } = require('./import-draft-harness.cjs');
+  const { setCharacterPackageFileIncluded: select } = buildScope([]);
+  const base = 'C:/art/SM_F01_Face001.fbx', lod = 'C:/art/SM_F01_Face001_LOD1.fbx';
+  const form = { ...defaultImportForm, assetType: 'suit', characterPackageFiles: [base, lod],
+    modelSlots: { Mesh: base }, modelLodFiles: { Mesh: [lod] }, characterLodConfirmation: 'checked' };
+  const removed = select(form, base, false);
+  assert.deepEqual(removed.characterPackageFiles, [lod]);
+  assert(!Object.values(removed.modelSlots).includes(base));
+  assert.deepEqual(removed.modelLodFiles, {});
+  assert.equal(removed.characterLodConfirmation, '');
+  const review = require('../shared/characterLodReview.mjs').characterLodReview([{ name: lod.split('/').pop(), sourcePath: lod, kind: 'staticMesh' }]);
+  assert.equal(review[0].missingBase, true);
+  assert(Object.values(select(removed, base, true).modelSlots).includes(base));
+});
+
+test('resumed drafts automatically exclude SPP and cannot restore prohibited files', () => {
+  const { buildScope, defaultImportForm } = require('./import-draft-harness.cjs');
+  const { pruneCharacterImportFiles: prune, setCharacterPackageFileIncluded: select } = buildScope([]);
+  const mesh = 'C:/art/SM_Hero.fbx', spp = 'C:/art/Hero.spp', blend = 'C:/art/Hero.blend';
+  const form = { ...defaultImportForm, assetType: 'suit', characterPackageFiles: [mesh, spp],
+    characterManualExclusions: [{ filePath: blend, textureEntries: [] }],
+    characterFields: { confirmed: true }, previewImagePath: 'custom.png' };
+  const result = prune(form);
+  assert.deepEqual(result.characterPackageFiles, [mesh]);
+  assert.deepEqual(new Set(result.characterExcludedFiles), new Set([spp, blend]));
+  assert.deepEqual(result.characterManualExclusions, []);
+  assert.equal(result.previewImagePath, 'custom.png');
+  assert.equal(result.characterFields.confirmed, false);
+  assert.equal(select(result, spp, true), result);
+  assert.equal(prune(result), result, 'clean drafts are stable across renders');
+});
+
+test('manually excluded LODs stay out of the actual submit payload and model analysis', async () => {
+  const { buildScope } = require('./import-draft-harness.cjs');
+  const { characterLodReviewToken } = require('../shared/characterLodReview.mjs');
+  const base = 'C:/art/SM_F01_Face991.fbx', lod = 'C:/art/SM_F01_Face991_LOD1.fbx';
+  const scope = buildScope([base, lod], { folderName: 'F01_Face991' });
+  await scope.applyQuickDropImport(['C:/art/F01_Face991'], 'suit');
+  const draft = scope.state.drafts[0].form;
+  const removedFile = draft.characterPackageFiles.find(file => /_LOD1/.test(file));
+  const edited = scope.setCharacterPackageFileIncluded(draft, removedFile, false);
+  const form = { ...edited, characterFields: { ...edited.characterFields, confirmed: true, identityConfirmed: true } };
+  form.characterLodConfirmation = characterLodReviewToken(form.characterPackageFiles.map(file => ({ name: file.split(/[\\/]/).pop(), sourcePath: file, kind: 'staticMesh' })));
+  const payload = scope.buildImportPayload(form);
+  assert.equal(payload.characterPackageFiles.length, 1);
+  assert(!payload.characterPackageFiles.includes(removedFile));
+  assert(!Object.values(payload.modelSlots).includes(removedFile));
+  assert(!Object.hasOwn(payload.characterModelAnalysis, removedFile));
 });

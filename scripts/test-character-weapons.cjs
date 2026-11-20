@@ -91,3 +91,23 @@ test('weapon export excludes SM, owns its skeleton and material, and detects onl
   assert.equal(characterRigProgress(asset).pendingReview, 1);
   assert.equal(characterRigProgress(asset).complete, false);
 });
+
+test('all weapon outputs keep the full package identity and append component and LOD suffixes', () => {
+ const {WEAPON_CATEGORIES,weaponPackageOutput,weaponTargetRoot}=require('../shared/weaponRules.mjs');
+ const {buildFamilyPackagePlan}=require('../electron/services/characterFamilyRules');
+ for(const type of WEAPON_CATEGORIES){
+  const owner=`${type}001_TestName`;
+  assert.equal(weaponTargetRoot(owner,true),`/Game/Characters/Weapon_PJZ/${type}/${owner}`);
+  const parts=type==='Bow'?['Bow','Arrow','Arrowbag']:['DualHands','PairedSwords','ShieldAxe'].includes(type)?['L','R']:[''];
+  const models=parts.flatMap(part=>['SM','SK'].map(prefix=>`${prefix}_${owner}${part?'_'+part:''}.fbx`));
+  const plan=buildFamilyPackagePlan('weapon',owner,models,{assetName:owner,category:type});
+  assert.equal(plan.ok,true,plan.errors.join(';'));
+  assert.deepEqual(plan.files.map(file=>file.normalizedName),models);
+  for(const side of ['L','R']) for(const prefix of ['SM','SK','SKEL','MI','T']){
+   const tail=prefix==='T'?'_D':'';
+   assert.equal(weaponPackageOutput(`${prefix}_${type}001_${side}${tail}`,owner),`${prefix}_${owner}_${side}${tail}`);
+   assert.equal(weaponPackageOutput(`${prefix}_${type}001_${side}_TestName${tail}`,owner),`${prefix}_${owner}_${side}${tail}`);
+  }
+  assert.equal(weaponPackageOutput(`SK_${type}001_L_LOD2`,owner),`SK_${owner}_L_LOD2`);
+ }
+});

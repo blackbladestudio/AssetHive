@@ -7,6 +7,125 @@ const crypto = require('node:crypto');
 const { buildSuitExport: build, managedFile } = require('../electron/services/characterSuitExport');
 const buildSuitExport = (asset, options, analyze) => build(asset, options, analyze, async () => false);
 
+test('UE intake material references are fallback only, scoped to the exact model and slot', async t => {
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'suit-intake-'));
+  t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  const name='M01_Heavy001_Test',slot='cloth';
+  const files=[{role:'skeletalMesh',normalizedName:`SK_${name}_Upbody.fbx`,storedPath:'mesh.fbx'}];
+  await fs.writeFile(path.join(dir,'mesh.fbx'),'mesh');
+  const asset={id:'recovered',name,assetType:'suit',path:dir,meta:{character:{gender:'Male',bodyCode:'01',suitClass:'Heavy',serial:'001',suitName:'Test'},characterManifest:{files},characterUEIntake:{materialBindings:{'recovered:skeletalMesh:upbody|cloth':'/Game/Existing/MI_Cloth'}}}};
+  const analyze=async()=>({meshKind:'skeletalMesh',hasSkin:true,skinnedMeshCount:1,materialNames:[slot]});
+  let result=await buildSuitExport(asset,{},analyze);
+  assert.equal(result.materialRequests.length,0);
+  assert.equal(result.entries[0].externalMaterials.cloth,'/Game/Existing/MI_Cloth');
+  const mismatch=await buildSuitExport(asset,{},async()=>({...await analyze(),materialNames:['other']}));
+  assert.equal(mismatch.materialRequests.length,1);
+  files.push({role:'texture',normalizedName:`T_${name}_cloth_D.tga`,storedPath:'cloth.tga',materialName:`MI_${name}_cloth`});
+  await fs.writeFile(path.join(dir,'cloth.tga'),'texture');
+  result=await buildSuitExport(asset,{},analyze);
+  const mesh=result.entries.find(entry=>entry.kind==='skeletalMesh');
+  assert.equal(mesh.materials.cloth,'recovered:material:cloth');
+  assert.equal(mesh.externalMaterials.cloth,undefined);
+});
+
+test('outfit hair maps export with correct channels and recover legacy MAP files from original names', async t => {
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'suit-hair-'));
+  t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  const name='M01_Heavy007_BuQiang';
+  const files=[{role:'staticMesh',normalizedName:`SM_${name}_Upbody.fbx`,storedPath:'mesh.fbx'}];
+  for (const [index, suffix] of ['Depth','ID','Root'].entries()) files.push({role:'texture',
+    normalizedName:`T_${name}_${index ? 'Texture0'+index : 'Arm'}_MAP.tga`,storedPath:suffix+'.tga',
+    originalName:`T_M01_Heavy007_Buqiang_upbody_hair_${suffix}.tga`,materialName:`MI_${name}_Arm`});
+  files.push({role:'texture',normalizedName:`T_${name}_Upbody_Hair_D.tga`,storedPath:'diffuse.tga'});
+  for (const file of files) await fs.writeFile(path.join(dir,file.storedPath),file.storedPath);
+  const asset={id:'suit-hair',name,assetType:'suit',path:dir,meta:{character:{gender:'Male',bodyCode:'01',suitClass:'Heavy',serial:'007',suitName:'BuQiang'},characterManifest:{files}}};
+  const result=await buildSuitExport(asset,{includeStaticMeshes:true},async()=>({meshKind:'staticMesh',materialNames:[`MI_${name}_Upbody_Hair`]}));
+  assert.deepEqual(result.entries.filter(e=>e.kind==='texture').map(e=>e.name).sort(),
+    ['D','Height','ID','Root'].map(channel=>`T_${name}_Upbody_Hair_${channel}`).sort());
+  const material=result.entries.find(e=>e.kind==='material');
+  assert.deepEqual(Object.keys(material.textures).sort(),['D','Height','ID','Root']);
+  assert.equal(material.config.materialRole,'hero_hair');
+  assert.equal(material.config.parentPath,'/Game/MaterialLibrary/Character/Common/M_Char_Hair');
+  assert.equal(result.entries.filter(e=>e.kind==='material').length,1);
+  const typoSlot='M_SK_Char_Suit_H007_M01_hari';
+  const typo=await buildSuitExport(asset,{includeStaticMeshes:true},async()=>({meshKind:'staticMesh',materialNames:[typoSlot]}));
+  assert.equal(typo.entries.find(e=>e.kind==='staticMesh').materials[typoSlot],'suit-hair:material:upbodyhair');
+  assert.deepEqual(typo.entries.find(e=>e.kind==='staticMesh').unresolvedMaterials,[]);
+  asset.meta.character.materialSlotMappings={'upbody|M_Custom':'upbodyhair'};
+  const manual=await buildSuitExport(asset,{includeStaticMeshes:true},async()=>({meshKind:'staticMesh',materialNames:['M_Custom']}));
+  assert.equal(manual.entries.find(e=>e.kind==='staticMesh').materials.M_Custom,'suit-hair:material:upbodyhair');
+  files[1].originalName='unknown.tga';
+  await assert.rejects(buildSuitExport(asset,{includeStaticMeshes:true},async()=>({meshKind:'staticMesh',materialNames:[]})),/待指定贴图类型/);
+});
+
+test('adopted outfits update their existing textures and retain real UE materials and locations until renamed', async t => {
+  const {asset,analyze}=await fixture(t,'F01_Medium001_Test',true);
+  const initial=await buildSuitExport(asset,{},analyze);
+  const root=initial.targetRoot;
+  asset.meta.characterUEIntake={assetName:initial.name,enginePath:root,preserveMaterialBindings:true,
+    externalMaterialGroups:['head','arm'],materialBindings:{},resources:{}};
+  for(const e of initial.entries){
+    asset.meta.characterUEIntake.resources[e.key]={kind:e.kind,path:root+'/Legacy/'+e.name};
+    for(const slot of Object.keys(e.materials||{}))asset.meta.characterUEIntake.materialBindings[e.key+'|'+slot]='/Game/Existing/MI_'+e.partSlot;
+  }
+  let result=await buildSuitExport(asset,{},analyze);
+  assert.equal(result.entries.filter(e=>e.kind==='material').length,0);
+  assert(result.entries.every(e=>e.targetPath.startsWith(root+'/Legacy/')));
+  assert(result.entries.filter(e=>e.kind==='skeletalMesh').every(e=>Object.keys(e.externalMaterials).length===1));
+  const texture=result.entries.find(e=>e.kind==='texture');
+  await fs.writeFile(texture.sourcePath,'updated texture');
+  const updated=await buildSuitExport(asset,{},analyze);
+  assert.notEqual(updated.entries.find(e=>e.key===texture.key).fingerprint,texture.fingerprint);
+  assert.equal(updated.entries.find(e=>e.key===texture.key).targetPath,texture.targetPath);
+  const model=result.entries.find(e=>e.kind==='skeletalMesh');
+  const slot=Object.keys(model.externalMaterials)[0];
+  const override=await buildSuitExport(asset,{materialMappings:{[model.key+'|'+slot]:'group:head'}},analyze);
+  assert(override.entries.some(e=>e.kind==='material'&&e.key.endsWith(':head')));
+  asset.meta.characterUEIntake.assetName='OldOwner';
+  result=await buildSuitExport(asset,{},analyze);
+  assert(result.entries.every(e=>!e.targetPath.includes('/Legacy/')));
+});
+
+test('every outfit part can mix ordinary clothes with hair or fur using the installed hair contract', async t => {
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'all-suit-hair-'));
+  t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  const name='F01_Medium001_Test', files=[];
+  for (const part of ['Head','Upbody','Downbody','Arm']) {
+    files.push({role:'staticMesh',normalizedName:`SM_${name}_${part}.fbx`,storedPath:part+'.fbx'});
+    for (const group of [part,part+'_Hair',part+'_Fur']) for (const channel of ['D','N','ORM','A','Height','ID','Root','Tangent']) {
+      const normalizedName=`T_${name}_${group}_${channel}.tga`;
+      files.push({role:'texture',normalizedName,storedPath:normalizedName});
+    }
+  }
+  for (const file of files) await fs.writeFile(path.join(dir,file.storedPath),file.storedPath);
+  const asset={id:'hair-all',name,assetType:'suit',path:dir,meta:{character:{gender:'Female',bodyCode:'01',suitClass:'Medium',serial:'001',suitName:'Test'},characterManifest:{files}}};
+  const result=await buildSuitExport(asset,{includeStaticMeshes:true},async source=>({meshKind:'staticMesh',materialNames:[path.basename(source,'.fbx'),path.basename(source,'.fbx')+'_Hair',path.basename(source,'.fbx')+'_Fur']}));
+  assert(result.entries.filter(e=>e.kind==='staticMesh').every(e=>!e.unresolvedMaterials.length));
+  for (const material of result.entries.filter(e=>e.kind==='material')) {
+    const hair=/_Hair$|_Fur$/.test(material.name);
+    assert.deepEqual(Object.keys(material.textures).sort(),hair?['D','Height','ID','Opacity','Root','Tangent']:['A','D','N','ORM']);
+    assert(hair?material.config.parentPath.endsWith('/M_Char_Hair'):material.config.parentPath.includes('MI_Suit_ComplexShading'));
+  }
+});
+
+test('Hair exports separate part material groups and requests ambiguous slots', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hair-parts-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 3 }));
+  const files = ['SM_F01_Hair001.fbx', 'T_F01_Hair001_Front_D.tga', 'T_F01_Hair001_Back_D.tga', 'T_F01_Hair001_Eyebrow_Height.tga'].map(name => ({ role: name.startsWith('SM') ? 'staticMesh' : 'texture', normalizedName: name, storedPath: name }));
+  for (const file of files) await fs.writeFile(path.join(dir, file.storedPath), file.storedPath);
+  const asset = { id: 'hairparts', assetType: 'suit', path: dir, meta: { character: { gender: 'Female', bodyCode: '01', variant: 'Hair', serial: '001' }, characterManifest: { files } } };
+  const result = await buildSuitExport(asset, { includeStaticMeshes: true }, async () => ({ meshKind: 'staticMesh', materialNames: ['M_Front', 'M_Back', 'M_Eyebrow', 'M_Hair'] }));
+  const mesh = result.entries.find(entry => entry.kind === 'staticMesh');
+  assert.equal(mesh.materials.M_Front, 'hairparts:material:front');
+  assert.equal(mesh.materials.M_Back, 'hairparts:material:back');
+  assert.equal(mesh.materials.M_Eyebrow, 'hairparts:material:eyebrow');
+  assert.deepEqual(mesh.unresolvedMaterials, ['M_Hair']);
+  assert.equal(result.entries.filter(entry => entry.kind === 'material').length, 3);
+  assert.ok(result.entries.some(entry => entry.name === 'T_F01_Hair001_Eyebrow_Height'));
+  const selected = await buildSuitExport(asset, { includeStaticMeshes: true, materialMappings: { 'hairparts:staticMesh:main|M_Hair': 'group:back' } }, async () => ({ meshKind: 'staticMesh', materialNames: ['M_Hair'] }));
+  assert.equal(selected.entries.find(entry => entry.kind === 'staticMesh').materials.M_Hair, 'hairparts:material:back');
+});
+
 test('monster material inference asks only for ambiguous groups and preserves saved choices', () => {
   const { inferMonsterMaterialType, mergeSuitExportOptions } = require('../electron/services/characterSuitExport');
   for (const name of ['01_Body', 'Skin', 'Face', '02_Flesh']) assert.equal(inferMonsterMaterialType(name), 'skin', name);
@@ -47,14 +166,18 @@ test('monster clothing or skin choice survives send and reopening without exposi
       { role: 'staticMesh', normalizedName: 'SM_Executioner_01.fbx', storedPath: 'SM_Executioner_01.fbx' }] } };
   const asset = { id: 'choice', name: 'Executioner', assetType: 'monster', path: root, metaPath: path.join(root, 'asset_info.json'), meta };
   await fs.writeFile(asset.metaPath, JSON.stringify(meta));
-  const client = { getEditorInfo: async () => ({ projectPath: 'D:/Test/Project.uproject', capabilities: ['characterSuitV1'] }),
+  const client = { getEditorInfo: async () => ({ projectPath: 'D:/Test/Project.uproject', capabilities: ['characterSuitV1', 'characterUpgradeV1'] }),
     importAssets: async ({ characterSuit: job }) => ({ suitResult: { inspectToken: 'token', entries: job.suits.flatMap(suit => suit.entries.map(entry => ({
       assetId: suit.assetId, key: entry.key, kind: entry.kind, name: entry.name, targetPath: entry.targetPath, path: entry.targetPath,
       status: job.phase === 'apply' ? 'success' : 'ready', action: 'added'
     }))) } }) };
   const { sendSuitJob } = require('../electron/services/characterSuitExport');
   const choice = { suitOptions: { monsterMaterialTypes: { 'choice:material:01surface': 'skin' } } };
-  const checked = (await sendSuitJob([asset], choice, undefined, client)).suitResult;
+  const progress = [];
+  const checked = (await sendSuitJob([asset], choice, event => progress.push(event.percent), client)).suitResult;
+  assert.equal(progress[0], 0); assert.equal(progress.at(-1), 100);
+  assert.deepEqual(progress, [...progress].sort((a, b) => a - b));
+  assert.ok(progress.includes(25), 'source preparation has its own completed stage before UE inspection');
   assert.equal(checked.monsterMaterialGroups[0].type, 'skin');
   assert.deepEqual(Object.keys(checked.monsterMaterialGroups[0]).sort(), ['assetName', 'key', 'name', 'type']);
   await sendSuitJob([asset], { ...choice, suitPhase: 'apply', suitInspectToken: 'token', suitManifestHash: checked.manifestHash }, undefined, client);
@@ -77,7 +200,7 @@ test('rename reminder clears only after a complete successful send of the curren
   const asset = { id: 'rename', name: meta.name, assetType: meta.assetType, path: root, metaPath: path.join(root, 'asset_info.json'), meta };
   const { sendSuitJob } = require('../electron/services/characterSuitExport');
   let mode = 'complete';
-  const client = { getEditorInfo: async () => ({ projectPath: 'D:/Test/Project.uproject', capabilities: ['characterSuitV1'] }),
+  const client = { getEditorInfo: async () => ({ projectPath: 'D:/Test/Project.uproject', capabilities: ['characterSuitV1', 'characterUpgradeV1'] }),
     importAssets: async ({ characterSuit: job }) => {
       let entries = job.suits.flatMap(suit => suit.entries.map(entry => ({ assetId: suit.assetId, key: entry.key, kind: entry.kind,
         name: entry.name, targetPath: entry.targetPath, path: entry.targetPath, status: job.phase === 'inspect' ? 'ready' : 'success', action: 'renamed' })));
@@ -101,6 +224,49 @@ test('rename reminder clears only after a complete successful send of the curren
   }
 });
 
+test('modern WP weapon names keep owner and multi-material indices through UE export', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'modern-wp-export-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const files = [
+    { role: 'skeletalMesh', normalizedName: 'SK_WP_Fire_Keeper_Torch.fbx', componentRole: 'weapon', componentName: 'Torch' },
+    ...['01', '02'].flatMap(index => ['D', 'A'].map(channel => ({ role: 'texture', normalizedName: `T_WP_Fire_Keeper_Torch_${index}_${channel}.tga` })))
+  ].map(file => ({ ...file, storedPath: file.normalizedName }));
+  for (const file of files) await fs.writeFile(path.join(root, file.storedPath), file.role);
+  const asset = { id: 'modern-wp', name: 'Fire_Keeper', assetType: 'monster', path: root, meta: { category: '3_Elite', character: { name: 'Fire_Keeper' }, characterManifest: { files } } };
+  const result = await buildSuitExport(asset, {}, async () => ({ meshKind: 'skeletalMesh', hasSkin: true, skinnedMeshCount: 1, bones: [], materialNames: ['MI_WP_Fire_Keeper_Torch_01', 'MI_WP_Fire_Keeper_Torch_02'] }));
+  assert.equal(result.materialRequests.length, 0);
+  assert.equal(result.entries.find(e => e.kind === 'skeletalMesh').name, 'SK_WP_Fire_Keeper_Torch');
+  assert.deepEqual(result.entries.filter(e => e.kind === 'texture').map(e => e.name), files.slice(1).map(file => file.normalizedName.replace('.tga', '')));
+  assert.equal(result.entries.filter(e => e.kind === 'material').length, 2);
+});
+
+test('NPC exports body and owned weapon into its own category with independent skeletons', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'npc-export-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const subjects = ['FireKeeper_01', 'WP_FireKeeper_Torch'];
+  const files = subjects.flatMap(subject => [
+    { role: 'skeletalMesh', normalizedName: `SK_${subject}.fbx` },
+    { role: 'staticMesh', normalizedName: `SM_${subject}.fbx` },
+    ...['D', 'A'].map(channel => ({ role: 'texture', normalizedName: `T_${subject}_${subject.startsWith('WP_') ? '' : 'Body_'}${channel}.tga` }))
+  ]).map(file => ({ ...file, storedPath: file.normalizedName }));
+  for (const file of files) await fs.writeFile(path.join(root, file.storedPath), file.role);
+  const asset = { id: 'npc-test', name: 'SK_FireKeeper_01', assetType: 'npc', path: root, meta: { category: 'Merchant', character: { name: 'FireKeeper', formIds: ['01'] }, characterManifest: { files } } };
+  const analyze = async file => ({ meshKind: path.basename(file).startsWith('SM_') ? 'staticMesh' : 'skeletalMesh', hasSkin: true, skinnedMeshCount: 1, bones: [{ name: 'root', parent: '' }], materialNames: [file.includes('WP_') ? 'MI_WP_FireKeeper_Torch' : 'MI_FireKeeper_01_Body'] });
+  const result = await buildSuitExport(asset, {}, analyze);
+  assert.equal(result.family, 'npc');
+  assert.equal(result.targetRoot, '/Game/Characters/NPC/Merchant/Merchant_FireKeeper');
+  assert.equal(result.materialRequests.length, 0);
+  assert.equal(result.entries.filter(e => e.kind === 'skeletalMesh').length, 2);
+  assert(result.entries.every(e => e.config.family === 'npc' && e.targetPath.startsWith(result.targetRoot + '/')));
+  assert(result.entries.filter(e => e.kind === 'skeletalMesh').every(e => e.config.ownSkeleton && e.config.createPhysicsAsset));
+  assert(result.entries.some(e => e.name === 'SK_FireKeeper_01'));
+  assert(result.entries.some(e => e.name === 'SK_WP_FireKeeper_Torch'));
+  assert(result.entries.some(e => e.config.materialRole === 'monsterSkin'));
+  assert(result.entries.some(e => e.config.materialRole === 'monsterWeapon'));
+  const withStatic = await buildSuitExport(asset, { includeStaticMeshes: true }, analyze);
+  assert.equal(withStatic.entries.filter(e => e.kind === 'staticMesh').length, 2);
+});
+
 test('Monster forms and owned weapons export together with independent skeletons and shared static opt-in', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'monster-export-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -122,10 +288,10 @@ test('Monster forms and owned weapons export together with independent skeletons
   const weaponMaterial = manifest.entries.find(e=>e.kind==='material' && e.config.materialRole==='monsterWeapon');
   assert.equal(weaponMaterial.config.parentPath,'/Game/MaterialLibrary/Weapon/Common/M_Weapon_Monster');
   assert.ok(weaponMaterial.textures.E);
-  assert.equal(weaponMaterial.targetPath,manifest.targetRoot+'/Weapon/Material/MI_Executioner_GreatSword');
+  assert.equal(weaponMaterial.targetPath,manifest.targetRoot+'/Weapon/Material/MI_WP_Executioner_GreatSword');
   assert(manifest.entries.filter(e=>e.kind==='material' && e!==weaponMaterial).every(e=>e.config.materialRole==='monsterCloth' && e.config.parentPath==='/Game/MaterialLibrary/Character/Common/M_Char_Monster_ComplexShading'));
-  const weaponMesh = meshes.find(e=>e.name==='SK_Executioner_GreatSword');
-  assert.equal(weaponMesh.targetPath,manifest.targetRoot+'/Weapon/Mesh/SkeletalMesh/SK_Executioner_GreatSword');
+  const weaponMesh = meshes.find(e=>e.name==='SK_WP_Executioner_GreatSword');
+  assert.equal(weaponMesh.targetPath,manifest.targetRoot+'/Weapon/Mesh/SkeletalMesh/SK_WP_Executioner_GreatSword');
   assert.equal(weaponMesh.materials.MI_Executioner_01_WP_GreatSword,weaponMaterial.key);
   assert(manifest.entries.filter(e=>e.kind==='texture' && e.groupName==='GreatSword').every(e=>e.targetPath.includes('/Weapon/Texture/') && e.config.virtualTexture===false));
   const emissiveTextures = manifest.entries.filter(e=>e.kind==='texture' && e.channel==='E');
@@ -141,7 +307,8 @@ test('Monster forms and owned weapons export together with independent skeletons
   asset.meta.character.formIds=['01'];
   assert.equal((await buildSuitExport(asset,{},analyze)).entries.filter(e=>e.kind==='skeletalMesh').length,3);
   asset.assetType='npc';
-  await assert.rejects(buildSuitExport(asset,{},analyze),/本入口/);
+  asset.meta.category='Merchant';
+  assert.equal((await buildSuitExport(asset,{},analyze)).targetRoot, '/Game/Characters/NPC/Merchant/Merchant_Executioner');
 });
 
 test('Monster indexed slots auto-match one material group and body uses the skin master', async t => {

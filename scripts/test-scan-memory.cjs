@@ -51,6 +51,39 @@ test("stopping scans also cancels asynchronous signature preparation before a wo
   await assert.rejects(pending, /Scan canceled during preparation/);
 });
 
+test("periodic and manual scans keep a newer local animation cover than the memo", async t => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "assethive-scan-animation-"));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const root = path.join(temp, "library");
+  const archive = path.join(root, "Animation", "Hero");
+  const modelPath = path.join(archive, "AS_Walk.fbx");
+  const legacyPreview = path.join(archive, "Preview", "AS_Walk.png");
+  const legacyMeta = path.join(archive, "AS_Walk.asset_info.json");
+  await fs.mkdir(path.dirname(legacyPreview), { recursive: true });
+  await fs.writeFile(legacyPreview, "legacy preview");
+  await fs.writeFile(legacyMeta, "legacy sidecar");
+  await fs.writeFile(modelPath, "animation fixture");
+
+  const scanMemoPath = path.join(temp, "local", "library.memo.json.gz");
+  const options = { scanMemoPath, residentIndex: true };
+  const [before] = await scanLibraryInWorker(root, options);
+  assert.equal(before.assetType, "animation");
+  assert.equal(before.previewImage, null);
+  const cover = path.join(temp, "local", "AS_Walk_preview.webm");
+  await fs.writeFile(cover, "new local cover");
+  const residentBase = [{ ...before, preview: cover, previewImage: cover }];
+  for (const mode of [{ incrementalScan: true, changedDirectories: [archive] }, { refreshMetadata: true }]) {
+    const streamed = [];
+    const [after] = await scanLibraryInWorker(root, { ...options, ...mode, residentBase, onRecord: record => streamed.push(record) });
+    assert.equal(after.previewImage, cover);
+    assert.equal(after.detailImage, cover);
+    assert.equal(after, streamed[0]);
+  }
+  assert.equal(await fs.readFile(legacyPreview, "utf8"), "legacy preview");
+  assert.equal(await fs.readFile(legacyMeta, "utf8"), "legacy sidecar");
+  assert.equal(await fs.readFile(modelPath, "utf8"), "animation fixture");
+});
+
 test("private resident memos stay small, preserve source/legacy bytes and invalidate after a full-memo update", async t => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "assethive-resident-memo-"));
   t.after(() => fs.rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));

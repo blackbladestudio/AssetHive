@@ -1,4 +1,4 @@
-import { heroTextureChannel, heroMaterialRole } from './heroMaterialRules.mjs';
+import { heroTextureChannel, heroTextureGroup } from './heroMaterialRules.mjs';
 // Hero subtypes share storage infrastructure, not outfit slot rules.
 export const heroPartKind = fields => /^(Hair|Face)$/.test(fields?.variant || "") ? fields.variant : "";
 export function inferHeroPart(values) {
@@ -39,7 +39,7 @@ export function partitionHeroSuitFiles(files = [], fields = {}, { includeWeapons
   return { accepted, excluded };
 }
 export function heroPackageModelFiles(files = []) {
-  return files.filter(file => /\.(fbx|obj|abc|gltf|glb)$/i.test(String(file || "")) && !/_LOD\d+\.[^.]+$/i.test(String(file || "")) && !isHeroCache(file));
+  return files.filter(file => /\.(fbx|obj|abc|gltf|glb)$/i.test(String(file || "")) && !/_LOD[1-9]\d*\.[^.]+$/i.test(String(file || "")) && !isHeroCache(file));
 }
 export function heroPackageNeedsScopeReview(files = [], confirmed = false) {
   const models = heroPackageModelFiles(files);
@@ -109,7 +109,7 @@ export function cleanSuitName(value) {
   return String(value || "").trim().split(/[_\s]+/)[0].replace(/[^A-Za-z]/g, "");
 }
 export function auditHeroPackage(files, fields = {}, { partial = false, modelAnalyses = {} } = {}) {
-  const models = files.filter(file => /\.(fbx|obj|abc|gltf|glb)$/i.test(file) && !/_LOD\d+\.[^.]+$/i.test(file));
+  const models = files.filter(file => /\.(fbx|obj|abc|gltf|glb)$/i.test(file) && !/_LOD[1-9]\d*\.[^.]+$/i.test(file));
   const errors = [];
   if (heroPartKind(fields)) {
     if (heroPartKind(fields) === "Hair") {
@@ -131,7 +131,7 @@ export function auditHeroPackage(files, fields = {}, { partial = false, modelAna
       if (/preview|thumb|render|beauty/i.test(base)) continue;
       const textureIdentity = inferHeroPart([file]);
       const channel = heroTextureChannel(base);
-      const map = channel ? `${heroMaterialRole(base, fields.variant)}:${channel}` : '';
+      const map = channel ? `${heroTextureGroup(base, fields.variant).key}:${channel}` : '';
       if ((textureIdentity && identity && heroPartName(textureIdentity) !== heroPartName(identity)) || !map) {
         errors.push(`贴图归属或类型无法确认，请整理：${file}`);
       } else if (maps.has(map)) errors.push(`同一贴图类型存在多个候选：\n${maps.get(map)}\n${file}`);

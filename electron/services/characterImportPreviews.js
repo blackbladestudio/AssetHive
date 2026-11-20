@@ -4,7 +4,7 @@ const { characterModelPreviewComponents: listCharacterComponents, characterMeshP
 // Resolve by source file, never by a draft name: the user may correct the
 // Chinese name or suit number after scanning without needing another render.
 async function saveCharacterImportPreviews({ meta, assetType, destinationDir, previews = [], saveImage, onProgress = () => {} }) {
-  if (!['suit', 'monster', 'npc', 'weapon'].includes(assetType) || !previews.length) return;
+  if (!['suit', 'monster', 'npc', 'weapon', 'item'].includes(assetType) || !previews.length) return;
   const parts = listCharacterComponents({ id: meta.assetID, name: meta.name, assetType, meta });
   const normalized = value => path.resolve(value).toLowerCase();
   const state = meta.characterComponents || { schemaVersion: 1, slots: {} };

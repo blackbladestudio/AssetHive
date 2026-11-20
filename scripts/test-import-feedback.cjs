@@ -83,7 +83,10 @@ test("family identity corrections belong to confirmation and invalidate derived 
   assert.ok(editor.includes("getDefaultImportDestinationPath("));
   assert.ok(editor.includes("identityConfirmed"));
   assert.ok(editor.includes("serial: event.target.value"));
-  assert.ok(editor.includes('readOnly placeholder={t("与英文名同步"'));
+  assert.ok(editor.includes('readOnly placeholder='));
+  assert.ok(editor.includes('gameplayUsesResourceId(importForm.subCategory)'));
+  assert.ok(editor.includes('与资源 ID 同步'));
+  assert.ok(editor.includes('与英文名同步'));
   assert.ok(editor.includes("readOnly"));
   assert.ok(source.includes('...patch, confirmed: false'));
   assert.ok(source.includes('assetName: isCharacterAssetType(form.assetType) ? composedName : form.assetName'));

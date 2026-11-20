@@ -38,6 +38,20 @@ function rigPackage() {
   return { root, files, modelAnalyses };
 }
 
+test('artist WP prefix imports for monster and NPC without treating material indices as forms', () => {
+  for (const family of ['monster', 'npc']) {
+    const files = ['SM_FireKeeper_01.fbx', 'SM_WP_FireKeeper_Torch.fbx', 'SK_WP_FireKeeper_Torch.fbx', 'T_WP_FireKeeper_Torch_02_D.tga', 'T_FireKeeper_01_Body_02_D.tga'];
+    const plan = buildFamilyPackagePlan(family, files[0], files, { name: 'FireKeeper', assetName: 'SK_FireKeeper_01', category: family === 'monster' ? '3_Elite' : 'Merchant', formIds: ['01'] });
+    assert.equal(plan.ok, true, plan.errors.join(';'));
+    assert.equal(plan.files[1].normalizedName, files[1]);
+    assert.equal(plan.files[1].componentName, 'Torch');
+    assert.equal(plan.files[1].componentRole, 'weapon');
+    assert.equal(plan.files[3].normalizedName, files[3]);
+    assert.equal(plan.files[3].formId, '');
+  }
+  assert.equal(auditMonsterPackage(['SM_FireKeeper_01.fbx', 'SM_WP_Other_Torch.fbx']).ok, false);
+});
+
 test('renamed rig body and weapon join the numbered static models through inspected material slots', async () => {
   const { root, files, modelAnalyses } = rigPackage();
   const audit = auditMonsterPackage(files, { modelAnalyses });
@@ -97,10 +111,8 @@ test("Monster accepts the seven documented tiers and parses a nonexample boss", 
   ];
   const plan = buildFamilyPackagePlan("monster", files[0], files, { assetName: "Boss042_StoneGolem", category: "1_Boss" });
   assert.equal(plan.ok, true, plan.errors.join("; "));
-  assert.deepEqual(plan.files.map((item) => item.role), [
-    "skeletalMesh", "physicsAsset", "skeleton", "staticMesh", "material", "texture",
-    "animationBlueprint", "blueprint", "actionFile"
-  ]);
+  assert.deepEqual(plan.files.map((item) => item.role), ["skeletalMesh", "texture"]);
+  assert(plan.files.every(item => !/\.(uasset|json)$/i.test(item.sourcePath)));
   assert.equal(plan.warnings.length, 0);
   assert.equal(parsePackageName("monster", "Dragon042_StoneGolem"), null);
 });
@@ -109,7 +121,7 @@ test("NPC category comes from the package prefix; the static mesh keeps the full
   const root = "C:/work/NPC/Scholar/Scholar017_MoonReader";
   const files = [
     `${root}/Mesh/SkeletalMesh/SK_MoonReader.fbx`,
-    `${root}/Mesh/StaticMesh/SM_Scholar017_MoonReader.uasset`,
+    `${root}/Mesh/StaticMesh/SM_Scholar017_MoonReader.fbx`,
     `${root}/Material/MI_MoonReader_Upbody_01.uasset`,
     `${root}/Texture/T_MoonReader_01_D.png`,
     `${root}/Animation/Idle.fbx`
@@ -118,8 +130,35 @@ test("NPC category comes from the package prefix; the static mesh keeps the full
   assert.equal(plan.ok, true, plan.errors.join("; "));
   assert.equal(plan.category, "Scholar");
   assert.equal(plan.files[1].nameStatus, "valid");
-  assert.equal(plan.files[4].role, "animation");
+  assert.equal(plan.files.at(-1).role, "animation");
+  assert(plan.files.every(item => !/\.uasset$/i.test(item.sourcePath)));
   assert.equal(parsePackagePath("npc", "C:/work/NPC/Guard/Scholar017_MoonReader"), null);
+});
+
+test("new NPC imports match monster file identities and omit the legacy category serial", () => {
+  const files = [
+    "C:/delivery/SK_ShangExecutioner_01.fbx",
+    "C:/delivery/SM_ShangExecutioner_01.fbx",
+    "C:/delivery/T_ShangExecutioner_01_Body_D.tga",
+    "C:/delivery/T_ShangExecutioner_01_Body_A.tga"
+  ];
+  const plan = buildFamilyPackagePlan("npc", files[0], files, {
+    assetName: "SK_ShangExecutioner_01", category: "Merchant", name: "ShangExecutioner", formIds: ["01"]
+  });
+  assert.equal(plan.ok, true, plan.errors.join("; "));
+  assert.equal(plan.assetName, "SK_ShangExecutioner_01");
+  assert.deepEqual(plan.fields, { serial: "", name: "ShangExecutioner", category: "Merchant", formIds: ["01"] });
+  assert.deepEqual(plan.files.map(file => file.normalizedName), [
+    "SK_ShangExecutioner_01.fbx", "SM_ShangExecutioner_01.fbx",
+    "T_ShangExecutioner_01_Body_D.tga", "T_ShangExecutioner_01_Body_A.tga"
+  ]);
+  assert.equal(plan.files.every(file => !file.normalizedName.includes("Merchant001")), true);
+  const legacyRoot = "C:/NPC/Merchant/Merchant001_ShangExecutioner";
+  const renamed = buildFamilyPackagePlan("npc", `${legacyRoot}/SK_Merchant001_ShangExecutioner.fbx`, [
+    `${legacyRoot}/SK_Merchant001_ShangExecutioner.fbx`, `${legacyRoot}/T_ShangExecutioner_Body_D.tga`
+  ], { assetName: "SK_ShangExecutioner_01", category: "Merchant", name: "ShangExecutioner", formIds: ["01"] });
+  assert.equal(renamed.ok, true, renamed.errors.join("; "));
+  assert.deepEqual(renamed.files.map(file => file.normalizedName), ["SK_ShangExecutioner_01.fbx", "T_ShangExecutioner_01_Body_D.tga"]);
 });
 
 test("Weapon supports new categories and names its files from the full package name", () => {
@@ -134,7 +173,8 @@ test("Weapon supports new categories and names its files from the full package n
   ];
   const plan = buildFamilyPackagePlan("weapon", files[0], files, { assetName: "Spear023_SilverFang", category: "Spear" });
   assert.equal(plan.ok, true, plan.errors.join("; "));
-  assert.equal(plan.files[5].relativePath, "Texture/T_Spear023_SilverFang_ORM.png");
+  assert.equal(plan.files[1].relativePath, "Texture/T_Spear023_SilverFang_ORM.png");
+  assert.equal(plan.files.length, 2);
   assert.equal(classifyFamilyFile("weapon", `${root}/ABP/ABP_Spear023_SilverFang.uasset`).role, "other");
 });
 
@@ -230,7 +270,7 @@ test("later monster forms share a name hint, require an explicit relationship, a
   assert.equal(combined.ok, false);
   assert.match(combined.errors.join(" "), /每个形态分别/);
   assert.equal(combined.forms.length, 2);
-  assert.deepEqual(combined.sharedFiles, ["Mesh/SkeletalMesh/SKEL_Executioner.uasset"]);
+  assert.deepEqual(combined.sharedFiles, []);
 });
 
 test("monster association is explicit and rejects wrong owners, missing records, and duplicate forms", () => {
@@ -247,7 +287,7 @@ test("monster association is explicit and rejects wrong owners, missing records,
   assert.equal(resolveMonsterAssociation({ ...plan, fields: { name: "OtherMonster" } }, "first", records).ok, false);
 });
 
-test("unmatched textures and projects block import; numbered weapons retain their form", async () => {
+test("unmatched textures block import, projects are excluded, numbered weapons retain their form", async () => {
   const root = "C:/art/Monster/SK_Executioner_01/scenes";
   const files = [
     `${root}/SK_Executioner_01.fbx`,
@@ -266,18 +306,18 @@ test("unmatched textures and projects block import; numbered weapons retain thei
   const plan = buildFamilyPackagePlan("monster", root, files, { assetName: "Executioner", category: "1_Boss" });
   assert.equal(plan.ok, false);
   assert.ok(plan.validationIssues.some((issue) => issue.code === "wrong-form"));
-  assert.equal(plan.files[1].role, "other");
-  assert.equal(plan.files[2].normalizedName, "SK_Executioner_01_WP_GreatSword.fbx");
-  assert.equal(plan.files[2].componentRole, "weapon");
+  assert(plan.files.every(item => !/\.(ma|spp)$/i.test(item.sourcePath)));
+  assert.equal(plan.files[1].normalizedName, "SK_Executioner_01_WP_GreatSword.fbx");
+  assert.equal(plan.files[1].componentRole, "weapon");
+  assert.equal(plan.files[1].componentName, "GreatSword");
+  assert.equal(plan.files[1].sharedAcrossForms, undefined);
+  assert.equal(plan.files[1].formId, "01");
   assert.equal(plan.files[2].componentName, "GreatSword");
-  assert.equal(plan.files[2].sharedAcrossForms, undefined);
   assert.equal(plan.files[2].formId, "01");
-  assert.equal(plan.files[3].componentName, "GreatSword");
-  assert.equal(plan.files[3].formId, "01");
-  assert.equal(plan.files[5].textureMapCode, "Emissive");
-  assert.equal(plan.files[6].normalizedName, "T_Executioner_02_Shoulder_Arm_A.tga");
+  assert.equal(plan.files[3].textureMapCode, "Emissive");
+  assert.equal(plan.files[4].normalizedName, "T_Executioner_02_Shoulder_Arm_A.tga");
   assert.deepEqual(plan.forms.map((form) => form.id), ["01"]);
-  for (const index of [4, 5, 6]) {
+  for (const index of [3, 4]) {
     assert.equal(plan.files[index].formId, "");
     assert.equal(plan.files[index].unresolvedFormToken, "02");
     assert.ok(plan.unassignedFiles.includes(plan.files[index].relativePath));

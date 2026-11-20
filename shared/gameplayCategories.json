@@ -1,0 +1,353 @@
+[
+  {
+    "code": "Gameplay",
+    "zh": "交互物资源",
+    "children": [
+      {
+        "code": "Int_Loot",
+        "zh": "搜索容器",
+        "children": [
+          {
+            "code": "WeaponCase",
+            "zh": "武器箱",
+            "tier": "subcategory"
+          },
+          {
+            "code": "MedicalBasket",
+            "zh": "药品箱",
+            "tier": "subcategory"
+          },
+          {
+            "code": "ThrowableCase",
+            "zh": "投掷物箱",
+            "tier": "subcategory"
+          },
+          {
+            "code": "MaterialBox",
+            "zh": "材料箱",
+            "tier": "subcategory"
+          },
+          {
+            "code": "ValuablesChest",
+            "zh": "藏品箱",
+            "tier": "subcategory"
+          },
+          {
+            "code": "RitualVessel",
+            "zh": "祭器",
+            "tier": "subcategory"
+          },
+          {
+            "code": "ArmorChest",
+            "zh": "护甲箱",
+            "tier": "subcategory"
+          },
+          {
+            "code": "MilitaryCrate",
+            "zh": "战备箱",
+            "tier": "subcategory"
+          },
+          {
+            "code": "Worship",
+            "zh": "祭祀台",
+            "tier": "subcategory"
+          },
+          {
+            "code": "SupplyCrate",
+            "zh": "物资箱",
+            "tier": "subcategory"
+          },
+          {
+            "code": "Qi",
+            "zh": "气容器",
+            "children": [
+              {
+                "code": "Statue",
+                "zh": "雕像",
+                "tier": "subcategory"
+              },
+              {
+                "code": "Ding",
+                "zh": "鼎",
+                "tier": "subcategory"
+              }
+            ],
+            "tier": "subcategory"
+          }
+        ],
+        "tier": "category"
+      },
+      {
+        "code": "Int_Door",
+        "zh": "门",
+        "children": [
+          {
+            "code": "StandardDoor",
+            "zh": "常规门",
+            "tier": "subcategory",
+            "aliases": [
+              "Standard"
+            ]
+          },
+          {
+            "code": "KeyDoor",
+            "zh": "钥匙门",
+            "tier": "subcategory",
+            "aliases": [
+              "Key"
+            ]
+          },
+          {
+            "code": "MonsterDoor",
+            "zh": "杀怪开启",
+            "tier": "subcategory",
+            "aliases": [
+              "Monster"
+            ]
+          },
+          {
+            "code": "QiDoor",
+            "zh": "用气开启",
+            "tier": "subcategory",
+            "aliases": [
+              "Qi"
+            ]
+          }
+        ],
+        "tier": "category"
+      },
+      {
+        "code": "Int_Elevator",
+        "zh": "电梯",
+        "children": [
+          {
+            "code": "StandardElevator",
+            "zh": "常规电梯",
+            "tier": "subcategory",
+            "aliases": [
+              "Standard"
+            ]
+          },
+          {
+            "code": "AutoElevator",
+            "zh": "自动电梯",
+            "tier": "subcategory",
+            "aliases": [
+              "Auto"
+            ]
+          },
+          {
+            "code": "MonsterElevator",
+            "zh": "击杀怪物开启",
+            "tier": "subcategory",
+            "aliases": [
+              "Monster"
+            ]
+          }
+        ],
+        "tier": "category"
+      },
+      {
+        "code": "Int_Worship",
+        "zh": "祭祀台",
+        "tier": "category"
+      },
+      {
+        "code": "Int_TengyunFormation",
+        "zh": "腾云阵",
+        "tier": "category"
+      },
+      {
+        "code": "Int_EscapePoint",
+        "zh": "撤离点",
+        "children": [
+          {
+            "code": "StandardEscapePoint",
+            "zh": "常规",
+            "tier": "subcategory",
+            "aliases": [
+              "Standard"
+            ]
+          },
+          {
+            "code": "QiEscapePoint",
+            "zh": "消耗气撤离",
+            "tier": "subcategory",
+            "aliases": [
+              "Qi"
+            ]
+          },
+          {
+            "code": "TokenEscapePoint",
+            "zh": "消耗令牌撤离",
+            "tier": "subcategory",
+            "aliases": [
+              "Token"
+            ]
+          }
+        ],
+        "tier": "category"
+      },
+      {
+        "code": "Trap",
+        "zh": "陷阱",
+        "children": [
+          {
+            "code": "TampedEarthTrap",
+            "zh": "夯土陷阱",
+            "tier": "subcategory",
+            "aliases": [
+              "TampedEarth"
+            ]
+          },
+          {
+            "code": "ArrowTrap",
+            "zh": "飞箭陷阱",
+            "tier": "subcategory",
+            "aliases": [
+              "Arrow"
+            ]
+          },
+          {
+            "code": "SpikeTrap",
+            "zh": "地刺陷阱",
+            "tier": "subcategory",
+            "aliases": [
+              "Spike"
+            ]
+          },
+          {
+            "code": "FlameJetTrap",
+            "zh": "喷火陷阱",
+            "tier": "subcategory",
+            "aliases": [
+              "FlameJet"
+            ]
+          },
+          {
+            "code": "TrapControllerTrap",
+            "zh": "陷阱控制器",
+            "tier": "subcategory",
+            "aliases": [
+              "TrapController"
+            ]
+          }
+        ],
+        "tier": "category"
+      },
+      {
+        "code": "Destructible",
+        "zh": "可破坏物",
+        "children": [
+          {
+            "code": "BarrelDestructible",
+            "zh": "木桶",
+            "tier": "subcategory",
+            "aliases": [
+              "Barrel"
+            ]
+          },
+          {
+            "code": "ChestDestructible",
+            "zh": "木箱",
+            "tier": "subcategory",
+            "aliases": [
+              "Chest"
+            ]
+          },
+          {
+            "code": "BarrierDestructible",
+            "zh": "木板",
+            "tier": "subcategory",
+            "aliases": [
+              "Barrier"
+            ]
+          },
+          {
+            "code": "WallDestructible",
+            "zh": "墙壁",
+            "tier": "subcategory",
+            "aliases": [
+              "Wall"
+            ]
+          },
+          {
+            "code": "PillarDestructible",
+            "zh": "柱子",
+            "tier": "subcategory",
+            "aliases": [
+              "Pillar"
+            ]
+          }
+        ],
+        "tier": "category"
+      },
+      {
+        "code": "Tombstone",
+        "zh": "复活点",
+        "tier": "category"
+      }
+    ],
+    "tier": "group"
+  },
+  {
+    "code": "Item",
+    "zh": "道具资源",
+    "children": [
+      {
+        "code": "Dropped",
+        "zh": "掉落模型",
+        "children": [
+          { "code": "DroppedWeapon", "zh": "武器", "tier": "subcategory" },
+          { "code": "DroppedArmor", "zh": "护甲", "tier": "subcategory" },
+          { "code": "DroppedAccessory", "zh": "饰品", "tier": "subcategory" },
+          { "code": "DroppedAshes", "zh": "战灰", "tier": "subcategory" },
+          { "code": "DroppedConsumable", "zh": "消耗品", "tier": "subcategory" },
+          { "code": "DroppedCraft", "zh": "制作材料", "tier": "subcategory" },
+          { "code": "DroppedLoot", "zh": "战利品", "tier": "subcategory" },
+          { "code": "DroppedCurrency", "zh": "货币", "tier": "subcategory" },
+          { "code": "DroppedSpecialItem", "zh": "特殊道具", "tier": "subcategory" }
+        ],
+        "tier": "category"
+      },
+      {
+        "code": "Consumable",
+        "zh": "消耗品",
+        "children": [
+          {
+            "code": "Eat",
+            "zh": "吃",
+            "tier": "subcategory"
+          },
+          {
+            "code": "Drink",
+            "zh": "喝",
+            "tier": "subcategory"
+          },
+          {
+            "code": "Crush",
+            "zh": "捏碎",
+            "tier": "subcategory"
+          },
+          {
+            "code": "Use",
+            "zh": "使用",
+            "tier": "subcategory"
+          },
+          {
+            "code": "Throw",
+            "zh": "投掷",
+            "tier": "subcategory"
+          },
+          {
+            "code": "FlagSetup",
+            "zh": "阵旗布置",
+            "tier": "subcategory"
+          }
+        ],
+        "tier": "category"
+      }
+    ],
+    "tier": "group"
+  }
+]

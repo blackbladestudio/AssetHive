@@ -17,7 +17,7 @@ const { characterGalleryRevision } = require('../../shared/characterPreviewRevis
 
 async function updateCharacterStatus(options) {
   if (!["wip", "needs_rig", "rigged", "approved"].includes(options.maturity)) throw new Error("制作状态无效");
-  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon"]);
+  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon", "item"]);
   return withRecycleLock(root, () => withFileTransaction({ root, owner: "character-components", key: parent.metaPath }, async () => {
     await updateAssetMetadataFile(parent.metaPath, meta => {
       if (String(meta.assetID || meta.id) !== parent.id) throw new Error("主体 ID 已变化，请刷新");
@@ -67,20 +67,20 @@ async function syncActiveCharacterMetadata(meta, parent) {
   const groupOf = file => file.materialName || file.normalizedName.replace(/\.[^.]+$/, "").replace(/_(?:D|N|ORM|A|E|Emissive)$/i, "").replace(/^T_/i, "MI_");
   const groups = [...new Set(textures.map(groupOf))].sort();
   const textureType = file => file.textureType || ({ d: "Diffuse", n: "Normal", orm: "ORM", a: "Opacity", e: "Emissive", emissive: "Emissive" })[file.normalizedName.replace(/\.[^.]+$/, "").split("_").pop().toLowerCase()] || "MAP";
-  meta.modelFiles = models.map(file => path.join(parent.path, file.storedPath));
-  const primaryModels = models.filter(file => !/_LOD\d+(?=\.[^.]+$)/i.test(file.normalizedName));
-  const slotOf = new Map(primaryModels.map((file, i) => [file.normalizedName.replace(/\.[^.]+$/, "").toLowerCase(), i ? `Mesh${String(i + 1).padStart(2, "0")}` : "Mesh"]));
-  meta.modelSlots = Object.fromEntries(primaryModels.map(file => [slotOf.get(file.normalizedName.replace(/\.[^.]+$/, "").toLowerCase()), path.join(parent.path, file.storedPath)]));
-  meta.modelLods = models.filter(file => /_LOD\d+(?=\.[^.]+$)/i.test(file.normalizedName)).map(file => ({
-    slot: slotOf.get(file.normalizedName.replace(/_LOD\d+(?=\.[^.]+$)/i, "").replace(/\.[^.]+$/, "").toLowerCase()),
-    lod: Number(file.normalizedName.match(/_LOD(\d+)(?=\.[^.]+$)/i)[1]), file: path.join(parent.path, file.storedPath)
+  meta.modelFiles = models.filter(file => !require('../../shared/characterLods.cjs').level(file.normalizedName)).map(file => path.join(parent.path, file.storedPath));
+  const primaryModels = models.filter(file => !require('../../shared/characterLods.cjs').level(file.normalizedName));
+  const modelSlotKey = file => `${file.role === 'skeletalMesh' ? 'SK' : 'SM'}:${require('../../shared/characterLods.cjs').identity(file.normalizedName).replace(/^(?:sk|sm)_/i, '')}`;
+  const slotOf = new Map(primaryModels.map((file, i) => [modelSlotKey(file), i ? `Mesh${String(i + 1).padStart(2, "0")}` : "Mesh"]));
+  meta.modelSlots = Object.fromEntries(primaryModels.map(file => [slotOf.get(modelSlotKey(file)), path.join(parent.path, file.storedPath)]));
+  meta.modelLods = models.filter(file => require('../../shared/characterLods.cjs').level(file.normalizedName)).map(file => ({
+    slot: slotOf.get(modelSlotKey(file)), lod: require('../../shared/characterLods.cjs').level(file.normalizedName), file: path.join(parent.path, file.storedPath)
   }));
   if (meta.modelLods.some(file => !file.slot)) throw new Error("LOD 缺少对应主体模型，请整理后重新导入");
   meta.textureFiles = textures.map(file => path.join(parent.path, file.storedPath));
   meta.textureEntries = textures.map(file => ({ textureType: textureType(file), areaIndex: groups.indexOf(groupOf(file)) + 1, uri: file.storedPath, materialName: groupOf(file) }));
   meta.textureSlots = {};
   for (const file of textures) meta.textureSlots[textureType(file)] ||= path.join(parent.path, file.storedPath);
-  meta.components = [...models.map(file => ({ type: "model", slot: slotOf.get(file.normalizedName.replace(/_LOD\d+(?=\.[^.]+$)/i, "").replace(/\.[^.]+$/, "").toLowerCase()), uri: file.storedPath,
+  meta.components = [...models.map(file => ({ type: "model", slot: slotOf.get(modelSlotKey(file)), uri: file.storedPath,
     ...(/_LOD\d+(?=\.[^.]+$)/i.test(file.normalizedName) ? { lod: Number(file.normalizedName.match(/_LOD(\d+)(?=\.[^.]+$)/i)[1]) } : {}) })),
     ...meta.textureEntries.map(file => ({ type: "texture", ...file }))];
   const modelLodFiles = {};
@@ -96,7 +96,7 @@ async function syncActiveCharacterMetadata(meta, parent) {
     action: "character-update", previousFingerprint, nextFingerprint: identity.contentFingerprint }];
 }
 
-async function loadParent(rootValue, asset, allowedTypes = ["monster", "suit", "npc", "weapon"]) {
+async function loadParent(rootValue, asset, allowedTypes = ["monster", "suit", "npc", "weapon", "item"]) {
   const root = await libraryRoot(rootValue);
   if (!asset || asset.source !== "custom" || !allowedTypes.includes(asset.assetType)) throw new Error("不支持此资产类型的角色操作");
   await safePath(root, asset.path);
@@ -108,7 +108,7 @@ async function loadParent(rootValue, asset, allowedTypes = ["monster", "suit", "
 }
 
 async function resolveCharacterFile({ root: rootValue, asset, storedPath }, roles, label) {
-  const { root, parent } = await loadParent(rootValue, asset, ["monster", "suit", "npc", "weapon"]);
+  const { root, parent } = await loadParent(rootValue, asset, ["monster", "suit", "npc", "weapon", "item"]);
   const file = activeCharacterFiles(parent).find(item => item.storedPath === storedPath && roles.includes(item.role));
   if (!file) throw new Error(`该${label}不在当前版本中，请刷新资产详情后重试`);
   const location = path.resolve(parent.path, file.storedPath);
@@ -161,7 +161,7 @@ async function prepareComponentReplacement({ root: rootValue, asset, slot, sourc
     }
     modelAnalyses.set(path.resolve(model.sourcePath).toLowerCase(), analysis);
   }
-  const primary = models.filter(item => !/_LOD\d+$/i.test(normalized(item.sourcePath)));
+  const primary = models.filter(item => !/_LOD[1-9]\d*$/i.test(normalized(item.sourcePath)));
   const primaryKinds = primary.map(item => modelAnalyses.get(path.resolve(item.sourcePath).toLowerCase())?.meshKind);
   if (new Set(primaryKinds).size !== primaryKinds.length) {
     throw new Error("同一部件的静态模型或骨骼模型各只能提供一个主版本；请移除重复文件后重试：\n" + primary.map(item => item.sourcePath).join("\n"));
@@ -184,13 +184,14 @@ async function prepareComponentReplacement({ root: rootValue, asset, slot, sourc
     else if (ext === ".uasset" && (/^SKEL_/i.test(token) || /_Physics$/i.test(token))) { role = /^SKEL_/i.test(token) ? "skeleton" : "physicsAsset"; folder = "Mesh/SkeletalMesh"; }
     else if (sourceExtension.test(ext)) { role = "other"; folder = "OtherFiles"; }
     else throw new Error("无法识别用途或版本的文件，请整理：" + file.sourcePath);
-    const lod = token.match(/(_LOD\d+)$/i)?.[1] || "";
+    const lod = require('../../shared/characterLods.cjs').suffix(token);
     const normalizedName = models.includes(file) ? `${role === "skeletalMesh" ? "SK" : "SM"}_${subject}${lod}${ext}` : token + ext;
     const relativePath = `${folder}/${normalizedName}`;
     if (destinations.has(relativePath.toLowerCase())) throw new Error("发现同用途的重复资源：" + normalizedName);
     destinations.add(relativePath.toLowerCase());
     const analysis = modelAnalyses.get(path.resolve(file.sourcePath).toLowerCase());
     const previousModel = analysis && part.files.find(item => !replacedModelPaths.has(item.storedPath)
+      && require('../../shared/characterLods.cjs').level(item.normalizedName) === require('../../shared/characterLods.cjs').level(file.sourcePath)
       && (item.role === "skeletalMesh" ? "skeletalMesh" : ["model", "staticMesh"].includes(item.role) ? "staticMesh" : "") === role);
     if (previousModel) replacedModelPaths.add(previousModel.storedPath);
     return { ...file, normalizedName, role, ...(previousModel ? { replacesStoredPath: previousModel.storedPath } : {}), ...(analysis || {}), relativePath };
@@ -211,6 +212,7 @@ async function prepareComponentReplacement({ root: rootValue, asset, slot, sourc
     if (before) previous.delete(before.normalizedName.toLowerCase());
   }
   for (const file of previous.values()) changes.push({ name: file.normalizedName, status: "retained" });
+  require('../../shared/characterLods.cjs').validate([...planned, ...previous.values()]);
   const plan = { parentId: parent.id, slot, componentRole: part.role, sharedAcrossForms: part.sharedAcrossForms, formId: part.sharedAcrossForms ? "" : parent.meta.character?.formIds?.[0] || "", expectedRevision: part.currentRevision, parentRevision: parent.meta.characterComponents?.contentRevision || "initial", sourceFolder, sourcePaths, name: modelName, files: planned, excludedFiles, retainedFiles: [...previous.values()], changes, unchanged: changes.every(item => ["unchanged", "retained"].includes(item.status)) };
   return { ...plan, token: digest(plan) };
 }
@@ -369,7 +371,7 @@ async function updateCharacterMeshPreviews(options) {
 }
 
 async function updateCharacterPreviewGallery(options) {
-  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon"]);
+  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon", "item"]);
   const requested = Array.isArray(options.images) ? options.images.slice(0, 32) : [];
   if (requested.length !== (options.images || []).length) throw new Error("预览图数量超过 32 张");
   return withRecycleLock(root, () => withFileTransaction({ root, owner: "character-components", key: parent.metaPath }, async () => {
@@ -499,7 +501,7 @@ async function updateCharacterPreviewGallery(options) {
 }
 
 async function updateCharacterAutomaticPreviews(options) {
-  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon"]);
+  const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon", "item"]);
   const requested = Array.isArray(options.images) ? options.images : [];
   const requestedByView = new Map(requested.map(item => [String(item?.view || ""), String(item?.sourcePath || "")]).filter(([view, source]) => view && source));
   return withRecycleLock(root, () => withFileTransaction({ root, owner: "character-components", key: parent.metaPath }, async () => {
@@ -570,7 +572,7 @@ async function selectCharacterComponentRevision(options) {
 }
 
 async function updateCharacterPreviewBatch(options) {
-  if (!['suit', 'monster', 'npc', 'weapon'].includes(options.asset?.assetType) || !Array.isArray(options.previewBatch) || !options.previewBatch.length || options.previewBatch.length > 128) throw new Error('无效的角色预览任务');
+  if (!['suit', 'monster', 'npc', 'weapon', 'item'].includes(options.asset?.assetType) || !Array.isArray(options.previewBatch) || !options.previewBatch.length || options.previewBatch.length > 128) throw new Error('无效的角色预览任务');
   const previewErrors = [];
   for (let i = 0; i < options.previewBatch.length; i++) {
     const item = options.previewBatch[i];

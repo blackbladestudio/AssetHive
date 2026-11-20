@@ -10,6 +10,15 @@ export function normalizeCharacterNames(fields = {}) {
   return { displayNameZh, displayNameEn };
 }
 
+// Planned export destinations are not evidence that an asset has reached UE.
+export function hasCharacterEnginePath(meta = {}) {
+  const paths = [meta.enginePath, meta.unrealPath, meta.uePath, meta.unrealAssetPath, meta.engineAssetPath,
+    meta.exportInfo?.unrealPath, meta.exportInfo?.assetPath, meta.unreal?.assetPath];
+  return paths.some(value => typeof value === 'string' && value.trim().startsWith('/Game/'))
+    || Object.values(meta.characterUnrealExports || {}).some(receipt =>
+      Object.values(receipt?.entries || {}).some(entry => String(entry?.lastSuccessPath || '').startsWith('/Game/')));
+}
+
 // Monster identity uses the same English name shown in the name editor.
 // A detected source name is only a seed when neither display name is available.
 export function normalizeMonsterNames(fields = {}) {

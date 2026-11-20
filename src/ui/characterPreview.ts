@@ -4,6 +4,7 @@ import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { TGALoader } from "three/examples/jsm/loaders/TGALoader.js";
 import { getPreviewUrl } from "./previewUrl";
 import type { CharacterPreviewPaths } from "./hooks/types";
+import { characterPreviewMaterialPlan, characterPreviewTextureKey } from "../../shared/characterPreviewMaterials.mjs";
 
 export const CHARACTER_PREVIEW_VIEWS = ["front", "left", "right", "back"] as const;
 export type CharacterPreviewView = typeof CHARACTER_PREVIEW_VIEWS[number];
@@ -57,17 +58,19 @@ function loadPreviewTexture(manager: THREE.LoadingManager, filePath: string) {
 async function applyStructuredMaterialTextures(
   root: THREE.Object3D,
   manager: THREE.LoadingManager,
-  texturesByStem: Map<string, ResolvedPreviewTexture>
+  texturesByStem: Map<string, ResolvedPreviewTexture>,
+  heroPart = ""
 ) {
   const textureCache = new Map<string, Promise<THREE.Texture>>();
   const getTexture = async (stem: string, suffix: "d" | "n" | "orm" | "a") => {
-    const entry = texturesByStem.get(`t_${stem}_${suffix}`);
+    const textureKey = characterPreviewTextureKey(stem, suffix, texturesByStem.keys());
+    const entry = textureKey ? texturesByStem.get(textureKey) : undefined;
     if (!entry) return null;
-    const key = entry.previewPath.toLowerCase();
-    let pending = textureCache.get(key);
+    const cacheKey = entry.previewPath.toLowerCase();
+    let pending = textureCache.get(cacheKey);
     if (!pending) {
       pending = loadPreviewTexture(manager, entry.previewPath);
-      textureCache.set(key, pending);
+      textureCache.set(cacheKey, pending);
     }
     return pending;
   };
@@ -79,32 +82,30 @@ async function applyStructuredMaterialTextures(
     jobs.push((async () => {
       const replacements = await Promise.all(sourceMaterials.map(async (sourceMaterial) => {
         if (!sourceMaterial) return sourceMaterial;
-        let stem = String(sourceMaterial.name || "").replace(/^(?:mi|m)_/i, "").toLowerCase();
-        if (!texturesByStem.has(`t_${stem}_d`)) {
-          // Renaming the managed suit does not rewrite FBX's embedded material
-          // names. Match an unambiguous suit material group (e.g. Upbody_01).
-          const materialKey = stem.replace(/(?:sg|material)$/i, '').replace(/[^a-z0-9]/g, '');
-          const candidates = [...texturesByStem.keys()].flatMap(key => {
-            const match = /^t_[mf]\d+_(?:light|medium|heavy)\d+_[^_]+_(.+)_d$/.exec(key);
-            const group = match?.[1].replace(/[^a-z0-9]/g, '');
-            return group && materialKey.endsWith(group) ? [{ key, length: group.length }] : [];
-          }).sort((a, b) => b.length - a.length);
-          if (candidates.length && (!candidates[1] || candidates[0].length > candidates[1].length)) stem = candidates[0].key.slice(2, -2);
-        }
-        if (!texturesByStem.has(`t_${stem}_d`)) {
-          // A single-material weapon may retain its original FBX material name
-          // after the managed asset is renamed. Only use a unique weapon group.
-          const weaponGroups = [...texturesByStem.keys()].filter(key => /^t_(?:bow|arrow|greataxe|jade|longsword|pairedswords|shieldaxe|spear|sword)\d+_.+_d$/.test(key));
-          if (weaponGroups.length === 1 && sourceMaterials.length === 1) stem = weaponGroups[0].slice(2, -2);
-        }
-        const diffuse = await getTexture(stem, "d");
-        if (!diffuse) return sourceMaterial;
+        const plan = characterPreviewMaterialPlan(sourceMaterial.name, texturesByStem.keys(), heroPart, sourceMaterials.length === 1);
+        const stem = plan.stem;
         const [normal, orm, opacity] = await Promise.all([
           getTexture(stem, "n"),
           getTexture(stem, "orm"),
           getTexture(stem, "a")
         ]);
-        diffuse.colorSpace = THREE.SRGBColorSpace;
+        const diffuse = await getTexture(stem, "d");
+        if (!diffuse && !normal && !orm && !opacity) {
+          // UE material graphs do not survive FBX export. Their black placeholder
+          // colors/maps are not a usable preview; missing textures use a clean clay material.
+          const neutral = new THREE.MeshStandardMaterial({
+            name: sourceMaterial.name,
+            color: 0xffffff,
+            roughness: 0.8,
+            metalness: 0,
+            side: THREE.DoubleSide,
+            vertexColors: false
+          });
+          neutral.userData = { ...sourceMaterial.userData };
+          sourceMaterial.dispose();
+          return neutral;
+        }
+        if (diffuse) diffuse.colorSpace = THREE.SRGBColorSpace;
         if (normal) normal.colorSpace = THREE.NoColorSpace;
         if (orm) {
           orm.colorSpace = THREE.NoColorSpace;
@@ -256,7 +257,7 @@ function disposeSkeletonOverlay(overlay: THREE.Group | null) {
 }
 
 async function renderCharacterViews(modelPaths: string[], texturePaths: CharacterPreviewTextureInput[], size: number, views: readonly CharacterPreviewView[], labels: boolean, skeletonPreview = false,
-  batch?: { owner: boolean; partPaths?: Set<string>; onPart: (path: string, images: Record<CharacterPreviewView, Blob>) => Promise<void>; onView: () => void }) {
+  batch?: { owner: boolean; partPaths?: Set<string>; onPart: (path: string, images: Record<CharacterPreviewView, Blob>) => Promise<void>; onView: () => void }, heroPart = "", separateModels = false) {
   const models = [...new Set(modelPaths.map((value) => String(value || "").trim()).filter((value) => /\.fbx$/i.test(value)))];
   if (models.length === 0) throw new Error("没有可用于生成角色预览的 FBX 模型");
   const texturesByStem = resolvePreviewTextures(texturePaths);
@@ -266,6 +267,13 @@ async function renderCharacterViews(modelPaths: string[], texturePaths: Characte
   const root = new THREE.Group();
   const loaded = await Promise.all(models.map((filePath) => loadFbx(loader, filePath)));
   loaded.forEach((object) => {
+    // FBX collision hulls remain in the source file, but are not render meshes.
+    const collisionNodes: THREE.Object3D[] = [];
+    object.traverse(child => {
+      if ([child.name, child.userData?.originalName, (child as THREE.Mesh).geometry?.name]
+        .some(name => /^(?:UCX|UBX|USP|UCP)(?:_|$)/i.test(String(name || '')))) collisionNodes.push(child);
+    });
+    collisionNodes.forEach(child => { child.removeFromParent(); disposeObject(child); });
     applyFbxDisplayScale(object);
     object.traverse((child) => {
       const mesh = child as THREE.Mesh;
@@ -288,7 +296,7 @@ async function renderCharacterViews(modelPaths: string[], texturePaths: Characte
       (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach(material => material.dispose());
       mesh.material = new THREE.MeshStandardMaterial({ color: 0xe3e3e3, roughness: 0.8, side: THREE.DoubleSide });
     });
-  } else await applyStructuredMaterialTextures(root, manager, texturesByStem);
+  } else await applyStructuredMaterialTextures(root, manager, texturesByStem, heroPart);
   root.updateMatrixWorld(true);
   const bounds = new THREE.Box3().setFromObject(root);
   if (bounds.isEmpty()) {
@@ -330,6 +338,28 @@ async function renderCharacterViews(modelPaths: string[], texturePaths: Characte
       const context = canvas.getContext("2d");
       if (!context) throw new Error("无法创建角色预览画布");
       context.drawImage(renderer.domElement, 0, 0, outputSize, outputSize);
+      const visibleModels = loaded.filter(object => object.visible);
+      if (separateModels && visibleModels.length > 1) {
+        // Each component gets its own camera and cell in every view. Merely
+        // moving them along X would overlap again in the side views.
+        context.fillStyle = '#24272c';
+        context.fillRect(0, 0, outputSize, outputSize);
+        const columns = Math.ceil(Math.sqrt(visibleModels.length));
+        const rows = Math.ceil(visibleModels.length / columns);
+        const cell = Math.floor(outputSize / Math.max(columns, rows));
+        const overlayVisible = skeletonHelper?.visible;
+        if (skeletonHelper) skeletonHelper.visible = false;
+        visibleModels.forEach((object, index) => {
+          loaded.forEach(model => { model.visible = model === object; });
+          const cellOverlay = skeletonPreview ? createSkeletonOverlay(object) : null;
+          if (cellOverlay) scene.add(cellOverlay);
+          renderer.render(scene, createCamera(view, new THREE.Box3().setFromObject(object), outputSize));
+          context.drawImage(renderer.domElement, index % columns * cell, Math.floor(index / columns) * cell, cell, cell);
+          if (cellOverlay) { scene.remove(cellOverlay); disposeSkeletonOverlay(cellOverlay); }
+        });
+        if (skeletonHelper) skeletonHelper.visible = Boolean(overlayVisible);
+        loaded.forEach(object => { object.visible = visibleModels.includes(object); });
+      }
       if (labels) drawViewLabel(canvas, view);
       output[view] = await canvasToBlob(canvas);
       batch?.onView();
@@ -371,7 +401,7 @@ export async function generateCharacterImportPreviews(
   models: { sourcePath: string; meshKind: "staticMesh" | "skeletalMesh" }[], textures: CharacterPreviewTextureInput[],
   onPart: (sourcePath: string, meshKind: "staticMesh" | "skeletalMesh", images: Record<CharacterPreviewView, Blob>) => Promise<void>,
   onProgress: (done: number, total: number) => void,
-  options: { partPaths?: Set<string>; texturedOwner?: boolean } = {}
+  options: { partPaths?: Set<string>; texturedOwner?: boolean; heroPart?: string; separateModels?: boolean } = {}
 ) {
   const partPaths = options.partPaths || new Set(models.map(model => model.sourcePath));
   const total = (partPaths.size + 1) * 4;
@@ -387,7 +417,7 @@ export async function generateCharacterImportPreviews(
     if (kind === 'skeletalMesh' && kind === ownerKind && options.texturedOwner) {
       owner = await renderCharacterViews(paths, textures, 768, CHARACTER_PREVIEW_VIEWS, true, false, {
         owner: true, partPaths: new Set(), onPart: async () => {}, onView: () => onProgress(++done, total)
-      });
+      }, options.heroPart, options.separateModels);
     }
     const renderOwner = kind === ownerKind && !(kind === 'skeletalMesh' && options.texturedOwner);
     if (!renderOwner && !paths.some(path => partPaths.has(path))) continue;
@@ -395,27 +425,27 @@ export async function generateCharacterImportPreviews(
       owner: renderOwner, partPaths,
       onPart: (path, images) => onPart(path, kind, images),
       onView: () => onProgress(++done, total)
-    });
+    }, options.heroPart, options.separateModels);
     if (renderOwner) owner = result;
   }
   return owner;
 }
 
-export function generateCharacterFourViewBlobs(modelPaths: string[], texturePaths: CharacterPreviewTextureInput[], size = 1024, skeletonPreview = false) {
-  return renderCharacterViews(modelPaths, texturePaths, size, CHARACTER_PREVIEW_VIEWS, true, skeletonPreview);
+export function generateCharacterFourViewBlobs(modelPaths: string[], texturePaths: CharacterPreviewTextureInput[], size = 1024, skeletonPreview = false, heroPart = "", separateModels = false) {
+  return renderCharacterViews(modelPaths, texturePaths, size, CHARACTER_PREVIEW_VIEWS, true, skeletonPreview, undefined, heroPart, separateModels);
 }
 
 // Reuse one loaded scene for changed parts and the assembled suit; unchanged
 // parts are loaded only when needed to compose the owner, never photographed.
 export function generateCharacterUpdatePreviews(modelPaths: string[], textures: CharacterPreviewTextureInput[],
   partPaths: Set<string>, owner: boolean, skeletal: boolean,
-  onPart: (path: string, images: Record<CharacterPreviewView, Blob>) => Promise<void>, onView: () => void) {
-  return renderCharacterViews(modelPaths, textures, 768, CHARACTER_PREVIEW_VIEWS, true, skeletal, { owner, partPaths, onPart, onView });
+  onPart: (path: string, images: Record<CharacterPreviewView, Blob>) => Promise<void>, onView: () => void, heroPart = "", separateModels = false) {
+  return renderCharacterViews(modelPaths, textures, 768, CHARACTER_PREVIEW_VIEWS, true, skeletal, { owner, partPaths, onPart, onView }, heroPart, separateModels);
 }
 
 // Same studio, framing and material pipeline; one part, one clean front cover.
-export async function generateCharacterPartFrontBlob(modelPath: string, texturePaths: CharacterPreviewTextureInput[], size = 768) {
-  return (await renderCharacterViews([modelPath], texturePaths, size, ["front"], false)).front;
+export async function generateCharacterPartFrontBlob(modelPath: string, texturePaths: CharacterPreviewTextureInput[], size = 768, heroPart = "") {
+  return (await renderCharacterViews([modelPath], texturePaths, size, ["front"], false, false, undefined, heroPart)).front;
 }
 
 export function hasCompleteCharacterPreview(paths: Partial<CharacterPreviewPaths> | null | undefined) {

@@ -10,6 +10,7 @@ const { createCacheProcess } = require("../electron/services/cacheProcess");
 const { createSharedDerivedCache } = require("../electron/services/sharedDerivedCache");
 const storage = require("../electron/services/derivedCacheProcess");
 const { gzipSync } = require("node:zlib");
+const { Buffer } = require("node:buffer");
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "assethive-shared-cache-"));
@@ -32,6 +33,61 @@ async function fixture(t) {
       meta: { previews: { relativeSize: "1:1" } } })
   };
 }
+
+test("a second client loads an animation cover from the share and FBX changes invalidate it", async t => {
+  const f = await fixture(t);
+  const archive = path.join(f.root, "Animation", "Hero");
+  await fs.mkdir(archive, { recursive: true });
+  const source = path.join(archive, "AS_Walk.fbx");
+  await fs.writeFile(source, "animation fixture");
+  const before = await fs.stat(source);
+  const alice = f.client("alice"), bob = f.client("bob");
+  const probe = await alice.animationPreview(source);
+  assert.ok(probe.key);
+  assert.equal(probe.path, "");
+  const bytes = Buffer.alloc(40);
+  bytes.writeUInt32BE(0x1a45dfa3);
+  assert.equal(await alice.saveAnimationPreview(source, probe.key, Buffer.alloc(40)), null);
+  const local = await alice.saveAnimationPreview(source, probe.key, bytes);
+  assert.ok(local.startsWith(path.join(f.directory, "alice")));
+  assert.deepEqual(await fs.readFile(local), bytes);
+  let sharedHit;
+  for (let attempt = 0; attempt < 50 && !sharedHit?.path; attempt++) {
+    sharedHit = await bob.animationPreview(source);
+    if (!sharedHit?.path) await delay(40);
+  }
+  assert.equal(sharedHit?.key, probe.key);
+  assert.ok(sharedHit?.path.startsWith(path.join(f.directory, "bob")));
+  assert.deepEqual(await fs.readFile(sharedHit.path), bytes);
+  assert.deepEqual(await fs.readdir(archive), ["AS_Walk.fbx"]);
+  assert.deepEqual(await fs.readdir(path.join(f.root, ".assethive")), ["DerivedCache"]);
+  assert.equal((await fs.stat(source)).mtimeMs, before.mtimeMs);
+
+  await fs.appendFile(source, " edited");
+  const edited = await bob.animationPreview(source);
+  assert.notEqual(edited.key, probe.key);
+  assert.equal(edited.path, "");
+  assert.equal(await bob.saveAnimationPreview(source, probe.key, bytes), null, "a recording from an older FBX cannot be published for the new version");
+});
+
+test("an unavailable shared animation cache still saves and reuses a local cover", async t => {
+  const f = await fixture(t);
+  const archive = path.join(f.root, "Animation");
+  await fs.mkdir(archive);
+  const source = path.join(archive, "AS_Idle.fbx");
+  await fs.writeFile(source, "animation fixture");
+  await fs.writeFile(path.join(f.root, ".assethive"), "blocks shared cache directory creation");
+  const client = f.client("offline");
+  const { key, path: missing } = await client.animationPreview(source);
+  assert.equal(missing, "");
+  const bytes = Buffer.alloc(40);
+  bytes.writeUInt32BE(0x1a45dfa3);
+  const file = await client.saveAnimationPreview(source, key, bytes);
+  assert.ok(file);
+  assert.equal((await client.animationPreview(source)).path, file);
+  assert.deepEqual(await fs.readFile(file), bytes);
+  assert.equal(await fs.readFile(path.join(f.root, ".assethive"), "utf8"), "blocks shared cache directory creation");
+});
 
 test("snapshot paths rebase across drive mappings and omit personal/local data", () => {
   const firstRoot = path.resolve("first-library");

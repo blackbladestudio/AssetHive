@@ -1,6 +1,6 @@
 const crypto = require('node:crypto');
 const { heroPartName } = require('../../shared/heroPackageRules.mjs');
-const { heroTextureChannel, heroMaterialRole } = require('../../shared/heroMaterialRules.mjs');
+const { heroTextureChannel, heroMaterialRole, heroTextureGroup, heroMaterialGroupForSlot } = require('../../shared/heroMaterialRules.mjs');
 const { inspectCharacterModel } = require('./characterFileInspection');
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const ROOT = '/Game/Characters/Hero/Asset_PJZ';
@@ -14,28 +14,31 @@ async function buildHeroPartExport(asset, options, analyze, managedFile) {
   const cardRoot = fields.variant === 'Hair' ? `${root}/HairCard` : root;
   const files = asset.meta.characterManifest?.files || [];
   const entries = [], materialRequests = [], groups = new Map();
-  const models = files.filter(f => ['model', 'staticMesh', 'skeletalMesh'].includes(f.role));
+  const models = files.filter(f => ['model', 'staticMesh', 'skeletalMesh'].includes(f.role) && !require('../../shared/characterLods.cjs').level(f.normalizedName || f.storedPath));
   const hasCards = models.some(f => /\.fbx$/i.test(f.storedPath));
   for (const file of files.filter(f => f.role === 'texture' && hasCards)) {
     const sourceName = file.normalizedName || file.originalName || file.storedPath;
-    const role = heroMaterialRole(sourceName, fields.variant);
+    const group = heroTextureGroup(sourceName, fields.variant);
+    const { role } = group;
     const channel = heroTextureChannel(sourceName);
     if (!channel || !parents[role]) throw new Error(`请核对脸部/头发贴图用途：${sourceName}`);
-    if (!groups.has(role)) groups.set(role, {});
-    if (groups.get(role)[channel]) throw new Error(`同材质组贴图类型重复：${role}/${channel}`);
-    const suffix = role === 'face' || fields.variant === 'Hair' ? '' : '_' + role;
+    if (!groups.has(group.key)) groups.set(group.key, { ...group, textures: {} });
+    if (groups.get(group.key).textures[channel]) throw new Error(`同材质组贴图类型重复：${group.key}/${channel}`);
+    const suffix = group.part ? '_' + group.part : role === 'face' || fields.variant === 'Hair' ? '' : '_' + role;
     const textureName = `T_${name}${suffix}_${channel}`;
-    const key = `${asset.id}:texture:${role}:${channel}`;
-    groups.get(role)[channel] = key;
-    entries.push({ key, kind: 'texture', name: textureName, groupName: role, channel: channel === 'Opacity' ? 'A' : channel,
+    const key = `${asset.id}:texture:${group.key}:${channel}`;
+    // Preserve auxiliary maps as UE textures, but never invent a master parameter.
+    if (!['SRMF', 'Mask'].includes(channel)) groups.get(group.key).textures[channel] = key;
+    entries.push({ key, kind: 'texture', name: textureName, groupName: group.part || role, channel: channel === 'Opacity' ? 'A' : channel,
       targetPath: `${cardRoot}/Material/${name}/Texture/${textureName}`, ...await managedFile(asset, file.storedPath),
       config: { version: 1, family: 'suit', heroPart: fields.variant, virtualTexture: role !== 'eye', normalFormat: options.normalFormat || 'directx' } });
   }
-  if (hasCards && !groups.has(fields.variant === 'Hair' ? 'hair' : 'face')) groups.set(fields.variant === 'Hair' ? 'hair' : 'face', {});
-  for (const [role, textures] of groups) {
-    const suffix = role === 'face' || fields.variant === 'Hair' ? '' : '_' + role;
+  const mainRole = fields.variant === 'Hair' ? 'hair' : 'face';
+  if (hasCards && ![...groups.values()].some(group => group.role === mainRole)) groups.set(mainRole, { key: mainRole, role: mainRole, part: '', textures: {} });
+  for (const [groupKey, { role, part, textures }] of groups) {
+    const suffix = part ? '_' + part : role === 'face' || fields.variant === 'Hair' ? '' : '_' + role;
     const materialName = `MI_${name}${suffix}`;
-    entries.push({ key: `${asset.id}:material:${role}`, kind: 'material', name: materialName, groupName: role,
+    entries.push({ key: `${asset.id}:material:${groupKey}`, kind: 'material', name: materialName, groupName: part || role,
       targetPath: `${cardRoot}/Material/${name}/${materialName}`, textures,
       config: { version: 1, family: 'suit', heroPart: fields.variant, materialRole: 'hero_' + role,
         ...(role === 'hair' ? { hairDefaultsVersion: 1 } : {}),
@@ -57,12 +60,13 @@ async function buildHeroPartExport(asset, options, analyze, managedFile) {
       const role = heroMaterialRole(slot, fields.variant);
       const known = fields.variant === 'Hair' || /head|face|hair|beard|mustache|eyebrow|eyelash|iris|eye|lacri|tearline|oral|teeth|mouth|skin|body|arm|hand|foot|leg/i.test(slot);
       const chosen = options.materialMappings?.[`${key}|${slot}`];
+      const matched = known ? heroMaterialGroupForSlot(slot, fields.variant, [...groups.values()]) : '';
       if (chosen?.startsWith('group:') && groups.has(chosen.slice(6))) materials[slot] = `${asset.id}:material:${chosen.slice(6)}`;
-      else if (known && groups.has(role)) materials[slot] = `${asset.id}:material:${role}`;
-      else if (known && role !== 'face') heroSharedRoles[slot] = role;
+      else if (matched) materials[slot] = `${asset.id}:material:${matched}`;
+      else if (known && role !== 'face' && ![...groups.values()].some(group => group.role === role)) heroSharedRoles[slot] = role;
       else {
         unresolvedMaterials.push(slot);
-        materialRequests.push({ key: `${key}|${slot}`, meshName, slot, groups: [...groups.keys()].map(role => ({ key: role, name: role })) });
+        materialRequests.push({ key: `${key}|${slot}`, meshName, slot, groups: [...groups.values()].map(group => ({ key: group.key, name: group.part || group.role })) });
       }
     }
     entries.push({ key, kind, name: meshName, targetPath: `${groom ? root + '/Groom' : cardRoot}/${meshName}`, ...source, materials, externalMaterials: {},

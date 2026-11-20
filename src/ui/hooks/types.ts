@@ -55,6 +55,7 @@ export type ImportSourceIdentity = {
 };
 
 export type CharacterImportFields = {
+  materialSlotMappings?: Record<string, string>;
   editedFields?: string[];
   displayNameZh?: string;
   displayNameEn?: string;
@@ -67,6 +68,8 @@ export type CharacterImportFields = {
   suitName: string;
   name?: string;
   weaponType?: string;
+  weaponAssembly?: 'single' | 'combined';
+  weaponLayout?: 'auto' | 'sharedPair' | 'separatePair' | 'bow' | 'custom';
   entityKey?: string;
   relatedAssetId?: string;
   formIds?: string[];
@@ -121,8 +124,10 @@ export type ImportFormState = {
   animationAffiliation: string;
   characterFields: CharacterImportFields;
   characterPackageFiles: string[];
+  characterLodConfirmation?: string;
   characterModelAnalysis: Record<string, CharacterModelAnalysis>;
   characterExcludedFiles: string[];
+  characterManualExclusions?: { filePath: string; textureEntries: TextureEntry[] }[];
   characterDuplicateTextures?: { sourcePath: string; keptPath: string }[];
   characterFileScopes: Record<string, "suit" | "weapon">;
   characterScopesConfirmed: boolean;

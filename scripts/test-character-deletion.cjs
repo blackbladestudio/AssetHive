@@ -34,7 +34,11 @@ test("permanent delete removes only owned library files, including old parts; no
   assert.equal(plan.permanent, true);
   assert.equal(plan.fileCount, 3);
   let changed = false;
-  const result = await remove({ ...f, token: plan.token, confirmPermanent: true, onIndexChange: async () => { changed = true; } });
+  const progress = [];
+  const result = await remove({ ...f, token: plan.token, confirmPermanent: true, onProgress: value => progress.push(value), onIndexChange: async () => { changed = true; } });
+  assert.equal(progress[0], 0); assert.equal(progress.at(-1), 100);
+  assert.deepEqual(progress, [...progress].sort((a,b) => a-b));
+  assert.ok(progress.some(value => value > 15 && value < 95));
   assert.equal(result.ok, true); assert.equal(changed, true);
   assert.equal(await fs.stat(f.asset.path).catch(() => null), null);
   assert.equal(await fs.readFile(f.backup, "utf8"), "backup");
@@ -93,4 +97,33 @@ test("index failure cannot resurrect permanently deleted files", async t => {
   const result = await remove({ ...f, token: plan.token, confirmPermanent: true, onIndexChange: async () => { throw new Error("offline index"); } });
   assert.equal(result.ok, true); assert.equal(result.indexPending, true);
   assert.equal((await listPermanentlyDeletedAssets(f.root)).length, 1);
+});
+
+test('deletion confirmation works during scanning; confirmed deletion waits and always releases its lock', async () => {
+  const vm=require('node:vm');
+  const source=await fs.readFile(path.resolve(__dirname,'../electron/main.js'),'utf8');
+  const get=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
+  const asset={id:'target',source:'custom',assetType:'suit'};
+  let prepared=0, attempts=0, ticks=0;
+  const context={index:[asset],settings:{customLibraryPath:'C:/library'},scanInProgress:true,recycleInProgress:false,
+    hasActiveBackgroundImport:()=>false,activeExportCalls:0,foliageOpaqueRegenInFlight:new Set(),
+    preparePermanentCharacterDeletion:async()=>{prepared++;return {token:'confirmed'}},Date,
+    normalizeComparePath:v=>v,emitCustomSaveProgress:()=>{},
+    getPersistentCacheRoot:()=>'',deletingCharacterCachePaths:new Set(),
+    require:()=>({prepareCharacterCacheCleanup:async()=>{assert.equal(context.scanInProgress,false);attempts++;throw Error('stop before mutation');}}),
+    setTimeout:resolve=>{ticks++; assert.equal(context.recycleInProgress,true);context.scanInProgress=false;globalThis.queueMicrotask(resolve);}
+  };
+  vm.createContext(context);
+  vm.runInContext(get('async function waitForCharacterDeletion','async function waitForCharacterOperation')+
+    get('async function previewCustomAssetDeletion','async function rewriteCustomJsonFiles'),context);
+  assert.equal((await context.previewCustomAssetDeletion({assetId:'target'})).plan.token,'confirmed');
+  assert.equal(prepared,1);assert.equal(context.scanInProgress,true);
+  await assert.rejects(context.deleteCustomAsset({assetId:'target',token:'confirmed'}),/stop before mutation/);
+  assert.equal(attempts,1);assert.equal(ticks,1);assert.equal(context.recycleInProgress,false);
+  context.recycleInProgress=true;
+  await assert.rejects(context.previewCustomAssetDeletion({assetId:'target'}),/正在删除/);
+  context.recycleInProgress=false;context.scanInProgress=true;
+  let now=0; context.Date={now:()=>now};context.setTimeout=resolve=>{now+=120001;globalThis.queueMicrotask(resolve);};
+  await assert.rejects(context.deleteCustomAsset({assetId:'target',token:'confirmed'}),/本次未删除任何文件/);
+  assert.equal(attempts,1);assert.equal(context.recycleInProgress,false);
 });

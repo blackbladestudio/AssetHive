@@ -144,8 +144,9 @@ test("index, rescan and search IPC replies use compact records; detail replies k
   const handlers = new Map();
   vm.runInNewContext(main.slice(start, end), {
     ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
+    isCharacterAssetType: require('../electron/services/characterImport').isCharacterAssetType,
     index: [fixture, null], toAssetListRecord, searchAssets: () => [fixture], refreshAssetById: async () => fixture,
-    recycleInProgress: false, filterRecycledIndex: async () => {},
+    recycleInProgress: false, filterRecycledIndex: async () => {}, librarySelectionGeneration: 0,
     BrowserWindow: { fromWebContents: () => null, getAllWindows: () => [] }, performScan: async () => {},
     hydrateIndexPreviewFields: async () => [fixture]
   });
@@ -156,6 +157,55 @@ test("index, rescan and search IPC replies use compact records; detail replies k
     assert.equal(records[0].meta.textureEntries, undefined);
   }
   assert.equal((await handlers.get("assets:getById")({}, fixture.id)).asset, fixture);
+});
+
+test("overlapping detail requests share fresh, parallel deletion checks within one library", async () => {
+  const removed = { id: "removed" };
+  const requests = [];
+  let handler;
+  const context = vm.createContext({
+    settings: { customLibraryPath: "library-a" }, librarySelectionGeneration: 0, index: [fixture, removed],
+    ipcMain: { handle: (_, callback) => { handler = callback; } },
+    toAssetListRecord, refreshAssetById: async id => context.index.find(asset => asset.id === id),
+    listRecycledAssets: (root, { concurrency }) => {
+      assert.equal(concurrency, 8);
+      const read = Promise.withResolvers();
+      requests.push({ root, read, permanentStarted: false });
+      return read.promise;
+    },
+    listPermanentlyDeletedAssets: async root => {
+      const request = requests.at(-1);
+      assert.equal(request.root, root);
+      request.permanentStarted = true;
+      return [{ assetId: removed.id }];
+    }
+  });
+  const filter = main.slice(main.indexOf("async function filterRecycledIndex("), main.indexOf("async function syncRecycleIndex("));
+  const start = main.indexOf("  let detailDeletionCheck =");
+  const end = main.indexOf('  ipcMain.handle("character:suitUnrealStatus",', start);
+  vm.runInContext(filter + main.slice(start, end), context);
+
+  const first = handler({}, fixture.id);
+  const second = handler({}, removed.id);
+  assert.equal(requests.length, 1, "overlapping card and edit reads share the journal check");
+  assert.equal(requests[0].permanentStarted, true, "permanent deletion logs also start before recycle journals finish");
+  requests[0].read.resolve([]);
+  assert.equal((await first).asset, fixture);
+  assert.equal((await second).asset, null);
+
+  const later = handler({}, fixture.id);
+  assert.equal(requests.length, 2, "a subsequent request reads the journals again");
+  context.settings.customLibraryPath = "library-b";
+  context.librarySelectionGeneration++;
+  const current = handler({}, fixture.id);
+  assert.equal(requests[2].root, "library-b");
+  requests[1].read.resolve([{ assetId: fixture.id }]);
+  assert.equal((await later).asset, null, "discard the check from the previous library");
+  const concurrent = handler({}, fixture.id);
+  assert.equal(requests.length, 3, "the old check cannot clear the current library's pending check");
+  requests[2].read.resolve([]);
+  assert.equal((await current).asset, fixture, "old deletion records cannot filter the current library");
+  assert.equal((await concurrent).asset, fixture);
 });
 
 test("abandoned startup reads cannot leave duplicate library subscriptions", async () => {

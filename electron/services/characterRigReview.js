@@ -7,7 +7,7 @@ const { characterModelGroups, characterRigReviewSignature } = require('../../sha
 
 async function reviewCharacterRig(options) {
   if (typeof options.needsRigging !== 'boolean') throw new Error('请选择是否需要重新绑定');
-  const { root, parent } = await loadParent(options.root, options.asset, ['suit', 'monster', 'npc', 'weapon']);
+  const { root, parent } = await loadParent(options.root, options.asset, ['suit', 'monster', 'npc', 'weapon', 'item']);
   return withRecycleLock(root, () => withFileTransaction({ root, owner: 'character-components', key: parent.metaPath }, async () => {
     await updateAssetMetadataFile(parent.metaPath, meta => {
       const current = { ...parent, meta };

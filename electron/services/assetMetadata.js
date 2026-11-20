@@ -97,7 +97,7 @@ function inferTopCategory(assetType) {
   if (normalized === "displacement") return "Displacements";
   if (normalized === "hdri") return "HDRI";
   if (normalized === "animation") return "animation";
-  if (["suit", "monster", "npc", "weapon"].includes(normalized)) return "character";
+  if (["suit", "monster", "npc", "weapon", "item"].includes(normalized)) return "character";
   return normalizeString(assetType);
 }
 
