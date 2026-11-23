@@ -127,6 +127,7 @@ function buildScope(files, options = {}) {
   state.importModalLocked = false;
   const heroRules = require("../shared/heroPackageRules.mjs");
   const scope = {
+    animationImportRules: require('../shared/animation-import-rules.json'),
     settings: {},
     isAnimationAssetImportType: type => type === 'animation',
     isModelAssetImportType: type => ['suit','monster','npc','weapon','3d','3dplant'].includes(type),

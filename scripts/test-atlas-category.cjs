@@ -32,7 +32,7 @@ function findRendererNode(predicate) {
 }
 
 function rendererFunction(name, scope = {}) {
-  scope = { getCharacterNavigationSelection: () => null, characterCategoryOptions: () => [], ...scope };
+  scope = { getCharacterNavigationSelection: () => null, getAnimationNavigationSelection: () => null, characterCategoryOptions: () => [], ...scope };
   const node = findRendererNode(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
   const code = ts.transpileModule(node.getText(rendererAst), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   return new Function(...Object.keys(scope), `${code}; return ${name};`)(...Object.values(scope));
@@ -145,6 +145,7 @@ test("Atlas cards export to Unreal while folder-only types keep independent fold
     const scope = { allAssets: assets, isFolderOnlyAsset, isBlenderTarget: target === "blender", isThreeDCoatTarget: target === "3dcoat",
       supportsBlenderExport: rendererFunction("supportsBlenderExport"), supportsThreeDCoatExport: asset => asset?.assetType === "decal", canExport: true, exportUnavailableTitle: "Disconnected",
       bridgeAvailable: true, t: (_zh, en) => en,
+      canOpenAnimationExport: target === "unreal", isAnimationExportRecord: asset => asset?.assetType === "animation",
       folderAssetExportUnavailableTitle: "Atlas disabled", blenderAssetUnavailableTitle: "Blender disabled",
       threeDCoatAssetUnavailableTitle: "3DCoat disabled", threeDCoatSingleSelectionTitle: "single only" };
     const unavailable = rendererFunction("getAssetExportUnavailableTitle", scope);
@@ -153,9 +154,14 @@ test("Atlas cards export to Unreal while folder-only types keep independent fold
     assert.equal(unavailable(["decal", "atlas"]), target === "3dcoat" ? "single only" : atlasUnavailable);
     assert.equal(unavailable(["imperfection"]), "Atlas disabled");
     assert.equal(unavailable(["decal"]), undefined, "existing Decal export stays enabled");
+    const disconnected = rendererFunction("getAssetExportUnavailableTitle", { ...scope, canExport: false, allAssets: [...assets, { id: "clip", assetType: "animation" }] });
+    assert.equal(disconnected(["clip"]), target === "unreal" ? undefined : target === "blender" ? "Blender disabled" : "3DCoat disabled",
+      "animations open the Unreal dialog before the editor connects");
+    assert.equal(disconnected(["decal"]), "Disconnected");
     for (const asset of assets) {
       for (const available of [true, false]) {
-        const state = { ...scope, asset, busy: !available, isExporting: !available, canExport: available, importingAssetIds: [] };
+        const state = { ...scope, asset, busy: !available, isExporting: !available, canExport: available, importingAssetIds: [],
+          assetCanExport: item => available || (scope.canOpenAnimationExport && scope.isAnimationExportRecord(item)) };
         for (const attribute of attributes) {
           const value = new Function(...Object.keys(state), `return ${attribute.initializer.expression.getText(rendererAst)}`)(...Object.values(state));
           const targetUnavailable = target === "blender" && !scope.supportsBlenderExport(asset) ? "Blender disabled"
@@ -202,6 +208,7 @@ test("desktop IPC accepts Atlas and mixed Unreal requests while retaining other 
   const context = vm.createContext({ index: assets, settings: {}, appUpdates: null, activeExportCalls: 0,
     componentParentId: require('../shared/characterComponents.mjs').componentParentId,
     isCharacterUEAsset: require('../electron/services/characterSuitExport').isCharacterUEAsset,
+    isAnimationUEAsset: require('../electron/services/animationUnrealExport').isAnimationUEAsset,
     recycleInProgress: false, filterRecycledIndex: async () => {},
     ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
     refreshAssetById: async id => assets.find(asset => asset.id === id),

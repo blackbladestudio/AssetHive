@@ -1,0 +1,111 @@
+{
+  "说明": "动画导入规范。这里维护选项和数值，程序读取本文件；修改后重新构建 AssetHive。距离单位为厘米。",
+  "name": {
+    "说明": "前缀后使用 PascalCase，允许下划线分段及数字序号；不允许空格、中文和其他符号。",
+    "prefixes": [
+      "AS_",
+      "BS_",
+      "ABP_",
+      "AM_",
+      "AC_"
+    ]
+  },
+  "types": [
+    {
+      "name": "基础移动",
+      "english": "Locomotion",
+      "folder": "Locomotion"
+    },
+    {
+      "name": "攻击",
+      "english": "Attack",
+      "folder": "Attack"
+    },
+    {
+      "name": "受击",
+      "english": "Hit",
+      "folder": "Hit"
+    }
+  ],
+  "frameRate": {
+    "说明": "所有动画按 60 FPS 导出；读取失败提示人工核对。",
+    "fps": 60,
+    "tolerance": 0.5
+  },
+  "root": {
+    "说明": "只检查普通受击、走停和跑停。击飞、倒地、死亡、冲刺停和下蹲停不套用这些限制。",
+    "hitMaxHorizontalCm": 10,
+    "hitToleranceCm": 0.5,
+    "walkStopTravelCm": 0,
+    "walkStopToleranceCm": 1,
+    "runStopTravelCm": 30,
+    "runStopToleranceCm": 3
+  },
+  "steps": {
+    "说明": "只检查主角基础移动。脚部世界高度按 FBX UpAxis 检测，不猜测缺失坐标轴。起步 3 步，循环 4 步；停步、怪物、NPC、攻击和受击不验步数。",
+    "start": 3,
+    "loop": 4
+  },
+  "monsterLoco": {
+    "说明": "从项目 ZionMonsterLocoChecker 提取规范，在归档 FBX 上本地检查，不连接 UE，不分档位。起停动画有 loop 时按循环均速拟合，没有 loop 时先拟合自身的匀加减速并标注衔接未核验。Stand 整段 Root 静止，0.01 cm 仅吸收数值噪声。整套模板暂不在单动画中检查，UE Distance 曲线待核对，不套用主角步数与停步距离。",
+    "sourceDate": "2026-11-20",
+    "sourceRoot": "E:/Zion_MalinLine/Project",
+    "sourceFiles": ["Plugins/GameFramework/ZionCharacterEditor/Source/ZionMonsterLocoCheckTool/Private/ZionMonsterLocoChecker.cpp", "Plugins/GameFramework/ZionCharacterEditor/Source/ZionAnimSetRefreshTool/Private/ZionAnimSetRefresher.cpp", "Config/DefaultGameplayTags.ini"],
+    "checker": "ZionMonsterLocoChecker",
+    "module": "ZionMonsterLocoCheckTool",
+    "resampleHz": 120,
+    "minResampleCount": 16,
+    "maxResampleCount": 4096,
+    "minSourceKeys": 3,
+    "minTotalDistanceCm": 1,
+    "straightnessThreshold": 0.95,
+    "rootRotationToleranceDeg": 0.5,
+    "standRootToleranceCm": 0.01,
+    "offAxisToleranceCm": 1,
+    "stopSpeedMatchTolerance": 0.15,
+    "loopSpeedScope": "wholeClipSampleIntervals",
+    "loopSpeedTolerance": 0.10,
+    "rampMinTransientSeconds": 0.1,
+    "rampMaxDeviationRatio": 0.12,
+    "rampMaxSpeedDeviationRatio": 0.15,
+    "distanceCurveName": "Distance",
+    "tags": ["Alert.Stand", "Alert.Walk", "Alert.Walk_Start", "Alert.Walk_Stop", "Battle.Run", "Battle.Run_Start", "Battle.Run_Stop", "Battle.Stand", "Battle.Walk_LtoR", "Battle.Walk_RtoL", "Battle.WalkB", "Battle.WalkB_Start", "Battle.WalkB_Stop", "Battle.WalkF", "Battle.WalkF_Start", "Battle.WalkF_Stop", "Battle.WalkL", "Battle.WalkL_Start", "Battle.WalkL_Stop", "Battle.WalkR", "Battle.WalkR_Start", "Battle.WalkR_Stop", "IdleTransition.AlertToBattle", "IdleTransition.AlertToPatrol", "IdleTransition.BattleToAlert", "IdleTransition.BattleToPatrol", "IdleTransition.PatrolToAlert", "IdleTransition.PatrolToBattle", "Patrol.Stand", "Patrol.Walk", "Patrol.Walk_Start", "Patrol.Walk_StartShow", "Patrol.Walk_Stop", "Patrol.Walk_StopShow"],
+    "检查项": ["停步初速度匹配循环", "停步 Distance 曲线", "起步匀加速", "停步匀减速", "循环匀速", "Root 不旋转", "Stand Root 不移动", "命名后缀与 Tag 一致", "只沿移动方向位移"]
+  },
+  "planning": {
+    "说明": "仅基础移动显示，可选填写。主角只显示走跑与阶段，不显示状态；怪物保留状态。默认按名称识别，手选值优先。选中的值与手写动作标签合并，显示在预览上；战斗阶段固定循环，移动名称无阶段后缀默认循环。不作为数量完整性的硬校验。",
+    "contexts": [
+      "警戒",
+      "巡逻",
+      "战斗"
+    ],
+    "gaits": [
+      "走",
+      "跑",
+      "站立"
+    ],
+    "phases": [
+      "起步",
+      "循环",
+      "停步"
+    ],
+    "battlePhase": "循环",
+    "nameMappings": {
+      "contexts": {
+        "Alert": "警戒",
+        "Battle": "战斗",
+        "Idle": "巡逻"
+      },
+      "gaits": {
+        "Walk": "走",
+        "Run": "跑",
+        "Stand": "站立"
+      },
+      "phases": {
+        "Start": "起步",
+        "Stop": "停步",
+        "Loop": "循环"
+      }
+    }
+  }
+}

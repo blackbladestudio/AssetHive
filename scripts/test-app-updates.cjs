@@ -423,7 +423,7 @@ test("export preparation stays busy and reports a per-asset read failure before 
     ipcMain: { handle: (name, callback) => { if (name === "assets:exportToUnreal") handler = callback; } },
     appUpdates: { isInstalling: () => false }, activeExportCalls: 0,
     recycleInProgress: false, filterRecycledIndex: async () => {},
-    componentParentId: id => id, isCharacterUEAsset: () => false,
+    componentParentId: id => id, isCharacterUEAsset: () => false, isAnimationUEAsset: () => false,
     index: [{ id: "asset" }], refreshAssetById: () => preparing.promise,
     settings: {}, writeLog() {}, setMainWindowTaskbarProgress() {},
     exportToUnreal: async assets => {

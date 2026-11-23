@@ -11,11 +11,12 @@ import {
   scoreFootName
 } from "./animationFbxAnalyze";
 import { getPreviewUrl } from "./previewUrl";
+import { readFbxUnitScale, readFbxUpAxis, sampleMonsterRoot } from './animationMonsterRules';
 
 const statsCache = new Map<string, Promise<AnimationFbxStats>>();
 
-export function loadAnimationFbxStats(filePath: string, skeletonPath = "") {
-  const key = `${String(filePath || "").trim()}|${String(skeletonPath || "").trim()}`;
+export function loadAnimationFbxStats(filePath: string, skeletonPath = "", revision = "") {
+  const key = `${String(filePath || "").trim()}|${String(skeletonPath || "").trim()}|${revision}`;
   if (!String(filePath || "").trim()) {
     return Promise.resolve(emptyStats());
   }
@@ -43,7 +44,7 @@ async function readAnimationFbxStats(filePath: string, skeletonPath = ""): Promi
   const object = new FBXLoader().parse(buffer, "");
   const clips = object.animations || [];
   const clip = clips[0] || null;
-  const unitScale = Number(object.userData?.unitScaleFactor);
+  const unitScale = readFbxUnitScale(buffer) ?? Number(object.userData?.unitScaleFactor);
   const centimetersPerUnit = Number.isFinite(unitScale) && unitScale > 0 ? unitScale : 1;
   const asciiRate = isAsciiFbxBuffer(buffer) ? readAsciiFbxFrameRate(new TextDecoder("latin1").decode(buffer)) : { timeModeFps: null, customFps: null };
   const inferredFps = clip ? inferFrameRateFromTrackTimes(clip.tracks) : null;
@@ -63,6 +64,7 @@ async function readAnimationFbxStats(filePath: string, skeletonPath = ""): Promi
   }
 
   const rootSamples = sampleRootWorldOrTrack(object, clip, centimetersPerUnit);
+  const monsterRoot = sampleMonsterRoot(object, clip, readFbxUnitScale(buffer) ?? centimetersPerUnit, readFbxUpAxis(buffer), resolved.frameRate);
   const rootHorizontalRangeCm = rootSamples.length
     ? Math.max(
       Math.max(...rootSamples.map((item) => item.x)) - Math.min(...rootSamples.map((item) => item.x)),
@@ -81,14 +83,15 @@ async function readAnimationFbxStats(filePath: string, skeletonPath = ""): Promi
       skeletonObject = null;
     }
   }
-  const stepCount = countClipSteps(object, clip, centimetersPerUnit, skeletonObject);
+  const stepCount = countClipSteps(object, clip, centimetersPerUnit, skeletonObject, readFbxUpAxis(buffer));
 
   return {
     frameRate: resolved.frameRate,
     frameRateSource: resolved.source,
     rootHorizontalRangeCm,
     rootTravelCm,
-    stepCount
+    stepCount,
+    monsterRoot
   };
 }
 
@@ -108,12 +111,13 @@ function hasUsableSkeleton(object: THREE.Object3D) {
   return bones >= 8;
 }
 
-function countClipSteps(animObject: THREE.Object3D, clip: THREE.AnimationClip, centimetersPerUnit: number, skeletonObject: THREE.Object3D | null) {
+function countClipSteps(animObject: THREE.Object3D, clip: THREE.AnimationClip, centimetersPerUnit: number, skeletonObject: THREE.Object3D | null, upAxis: number | null) {
+  if (upAxis === null || ![0, 1, 2].includes(upAxis)) return null;
   const worlds: Array<{ left: number[]; right: number[] }> = [];
-  const fromAnim = sampleFootWorldHeights(animObject, clip, centimetersPerUnit);
+  const fromAnim = sampleFootWorldHeights(animObject, clip, centimetersPerUnit, upAxis);
   if (fromAnim && (fromAnim.left.length || fromAnim.right.length)) worlds.push(fromAnim);
   if (skeletonObject) {
-    const fromSkeleton = sampleFootWorldHeights(skeletonObject, clip, centimetersPerUnit);
+    const fromSkeleton = sampleFootWorldHeights(skeletonObject, clip, centimetersPerUnit, upAxis);
     if (fromSkeleton && (fromSkeleton.left.length || fromSkeleton.right.length)) worlds.push(fromSkeleton);
   }
   const ranked = worlds
@@ -138,12 +142,12 @@ function countClipSteps(animObject: THREE.Object3D, clip: THREE.AnimationClip, c
   const leftTrack = positionTracks.find((track) => track.name === leftName);
   const rightTrack = positionTracks.find((track) => track.name === rightName);
   if (!leftTrack && !rightTrack) return null;
-  const leftSteps = leftTrack ? countFootPlants(sampleVerticalTrack(leftTrack, clip.duration, centimetersPerUnit)) : 0;
-  const rightSteps = rightTrack ? countFootPlants(sampleVerticalTrack(rightTrack, clip.duration, centimetersPerUnit)) : 0;
+  const leftSteps = leftTrack ? countFootPlants(sampleVerticalTrack(leftTrack, clip.duration, centimetersPerUnit, upAxis)) : 0;
+  const rightSteps = rightTrack ? countFootPlants(sampleVerticalTrack(rightTrack, clip.duration, centimetersPerUnit, upAxis)) : 0;
   return leftSteps + rightSteps;
 }
 
-function sampleFootWorldHeights(root: THREE.Object3D, clip: THREE.AnimationClip, centimetersPerUnit: number) {
+function sampleFootWorldHeights(root: THREE.Object3D, clip: THREE.AnimationClip, centimetersPerUnit: number, upAxis: number) {
   const nodes: THREE.Object3D[] = [];
   root.traverse((child) => nodes.push(child));
   const leftCandidates = nodes.filter((node) => scoreFootName(node.name, "left") > 0);
@@ -154,8 +158,8 @@ function sampleFootWorldHeights(root: THREE.Object3D, clip: THREE.AnimationClip,
   const mixer = new THREE.AnimationMixer(root);
   const action = mixer.clipAction(clip);
   action.reset().play();
-  const left = pickMostMobileFoot(root, mixer, clip, leftCandidates, centimetersPerUnit);
-  const right = pickMostMobileFoot(root, mixer, clip, rightCandidates, centimetersPerUnit);
+  const left = pickMostMobileFoot(root, mixer, clip, leftCandidates, centimetersPerUnit, upAxis);
+  const right = pickMostMobileFoot(root, mixer, clip, rightCandidates, centimetersPerUnit, upAxis);
   mixer.stopAllAction();
   mixer.uncacheRoot(root);
   if ((!left || extent(left) < 1.5) && (!right || extent(right) < 1.5)) {
@@ -169,12 +173,13 @@ function pickMostMobileFoot(
   mixer: THREE.AnimationMixer,
   clip: THREE.AnimationClip,
   candidates: THREE.Object3D[],
-  centimetersPerUnit: number
+  centimetersPerUnit: number,
+  upAxis: number
 ) {
   let best: number[] | null = null;
   let bestRange = 0;
   candidates.forEach((node) => {
-    const heights = sampleNodeHeights(root, mixer, clip, node, centimetersPerUnit);
+    const heights = sampleNodeHeights(root, mixer, clip, node, centimetersPerUnit, upAxis);
     const range = extent(heights);
     if (range > bestRange) {
       best = heights;
@@ -189,7 +194,8 @@ function sampleNodeHeights(
   mixer: THREE.AnimationMixer,
   clip: THREE.AnimationClip,
   node: THREE.Object3D,
-  centimetersPerUnit: number
+  centimetersPerUnit: number,
+  upAxis: number
 ) {
   const sampleCount = Math.min(240, Math.max(36, Math.round(Math.max(clip.duration, 0.2) * 60)));
   const heights: number[] = [];
@@ -198,7 +204,7 @@ function sampleNodeHeights(
     mixer.setTime(clip.duration * (index / sampleCount));
     root.updateMatrixWorld(true);
     node.getWorldPosition(world);
-    heights.push(world.y * centimetersPerUnit);
+    heights.push(world.getComponent(upAxis) * centimetersPerUnit);
   }
   return heights;
 }
@@ -293,11 +299,9 @@ function sampleVectorAt(times: ArrayLike<number>, values: ArrayLike<number>, str
   });
 }
 
-function sampleVerticalTrack(track: THREE.KeyframeTrack, duration: number, centimetersPerUnit: number) {
+function sampleVerticalTrack(track: THREE.KeyframeTrack, duration: number, centimetersPerUnit: number, upAxis: number) {
   const samples = samplePositionTrack(track, duration);
-  const yRange = extent(samples.map((item) => item.y));
-  const zRange = extent(samples.map((item) => item.z));
-  const axis = zRange > yRange * 1.4 ? "z" : "y";
+  const axis = (['x', 'y', 'z'] as const)[upAxis];
   return samples.map((item) => item[axis] * centimetersPerUnit);
 }
 

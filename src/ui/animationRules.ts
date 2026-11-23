@@ -1,9 +1,63 @@
-export const ANIMATION_ASSET_NAME_PREFIXES = ["AS_", "BS_", "ABP_", "AM_", "AC_"] as const;
+import rules from '../../shared/animation-import-rules.json';
+
+export const ANIMATION_ASSET_NAME_PREFIXES = rules.name.prefixes;
+
+export function animationPlanningLabels(input: { subCategory?: string; zionTags?: string[]; animationAffiliation?: string; animationMotionContext?: string; animationGait?: string; animationPhase?: string }) {
+  if ((input.zionTags?.find(tag => rules.types.some(type => type.name === tag)) || input.subCategory) !== '基础移动') return [];
+  const context = input.animationAffiliation !== '主角' && rules.planning.contexts.includes(input.animationMotionContext || '') ? input.animationMotionContext || '' : '';
+  const gait = rules.planning.gaits.includes(input.animationGait || '') ? input.animationGait || '' : '';
+  const phase = context === '战斗' ? rules.planning.battlePhase : rules.planning.phases.includes(input.animationPhase || '') ? input.animationPhase || '' : '';
+  return [context, gait, phase].filter(Boolean);
+}
+
+export type AnimationPlanningField = 'animationMotionContext' | 'animationGait' | 'animationPhase';
+type PlanningForm = { assetName: string; animationAffiliation?: string; animationMotionContext?: string; animationGait?: string; animationPhase?: string; animationPlanningManualFields?: AnimationPlanningField[]; animationPlanningSourceName?: string };
+
+export function inferAnimationPlanning(assetName: string, affiliation = '') {
+  const parts = assetName.replace(/\.[^.]+$/, '').toLowerCase().split(/[^a-z0-9]+/);
+  const motionParts = rules.name.prefixes.some(prefix => prefix.toLowerCase() === `${parts[0]}_`) ? parts.slice(2) : parts;
+  const tokens = motionParts.flatMap(part => {
+    const combined = part.match(/^(walk|run|stand)(start|stop|loop)$/);
+    return combined ? [combined[1], combined[2]] : [part];
+  });
+  const find = (mapping: Record<string, string>) => Object.entries(mapping).find(([key]) => tokens.includes(key.toLowerCase()))?.[1] || '';
+  const animationMotionContext = affiliation === '主角' ? '' : find(rules.planning.nameMappings.contexts);
+  const animationGait = Object.entries(rules.planning.nameMappings.gaits).find(([key]) => tokens.some(token => token.includes(key.toLowerCase())))?.[1] || '';
+  const animationPhase = animationMotionContext === '战斗' ? rules.planning.battlePhase : find(rules.planning.nameMappings.phases) || (animationMotionContext || animationGait ? '循环' : '');
+  return { animationMotionContext, animationGait, animationPhase };
+}
+
+export function syncAnimationPlanning<T extends PlanningForm>(form: T): T {
+  const inferred = inferAnimationPlanning(form.assetName, form.animationAffiliation);
+  const fields: AnimationPlanningField[] = ['animationMotionContext', 'animationGait', 'animationPhase'];
+  // Older drafts may already contain manual selections; retain those on first sync.
+  const manual = form.animationPlanningManualFields || (form.animationPlanningSourceName === undefined ? fields.filter(key => form[key] !== undefined && form[key] !== '') : []);
+  const next = { ...form, animationPlanningSourceName: form.assetName, animationPlanningManualFields: manual };
+  for (const key of fields) if (!manual.includes(key)) next[key] = inferred[key];
+  if (form.animationAffiliation === '主角') next.animationMotionContext = '';
+  else if (next.animationMotionContext === '战斗') next.animationPhase = rules.planning.battlePhase;
+  return fields.every(key => next[key] === form[key]) && form.animationPlanningSourceName === next.animationPlanningSourceName && JSON.stringify(manual) === JSON.stringify(form.animationPlanningManualFields) ? form : next;
+}
+
+export function suggestAnimationArchiveRelativePath(assetName: string, affiliation: string, animationType: string) {
+  const typeFolder = rules.types.find(type => type.name === animationType)?.folder || rules.types[0].folder;
+  const stem = String(assetName || '').replace(/\.[^.]+$/, '');
+  const character = stem.match(/^(?:AS|BS|ABP|AM|AC)_([A-Z][A-Za-z0-9]*)(?:_|$)/)?.[1];
+  if (affiliation === '怪物' || affiliation === 'NPC') {
+    return ['Animation', affiliation === '怪物' ? 'Monster' : 'NPC', character, typeFolder].filter(Boolean).join('\\');
+  }
+  if (affiliation === '主角') {
+    const body = stem.match(/_(M|F)(\d+)(?:_|$)/);
+    const bodyFolder = body ? `${body[1] === 'M' ? 'Male' : 'Female'}_${body[2].padStart(2, '0')}` : 'Male_01';
+    return ['Animation', 'Hero', bodyFolder, 'WP00_Unarm', typeFolder].join('\\');
+  }
+  return 'Animation';
+}
 
 export type AnimationRuleStatus = "ok" | "fail" | "skip" | "warn";
 
 export type AnimationRuleCheck = {
-  id: "name" | "fps" | "root" | "steps";
+  id: string;
   status: AnimationRuleStatus;
   zh: string;
   en: string;
@@ -15,6 +69,8 @@ export type AnimationFbxStats = {
   rootHorizontalRangeCm: number | null;
   rootTravelCm: number | null;
   stepCount: number | null;
+  monsterRoot?: { error?: string; rotationDeg: number; lateralCm: number | null; verticalCm: number | null; distanceCm: number | null; meanSpeed: number | null; speedDeviation: number | null;
+    maxDisplacementCm?: number | null; distanceTrack?: { distance: number[]; dt: number; sourceDt: number | null } | null };
 };
 
 export type AnimationRuleInput = {
@@ -25,6 +81,32 @@ export type AnimationRuleInput = {
   animationAffiliation?: string;
   stats?: AnimationFbxStats | null;
 };
+
+export type AnimationRequiredFields = {
+  assetName: string;
+  filePath: string;
+  destinationPath: string;
+  affiliation: string;
+  animationType: string;
+  labels: string[];
+  gameTag?: { kind: string; id: string } | null;
+};
+
+// Ordinary tags are optional; gameplay identity is required only where the
+// affiliation exposes a weapon/monster selector.
+export function getMissingAnimationFields(input: AnimationRequiredFields): Array<{ zh: string; en: string }> {
+  const missing: Array<{ zh: string; en: string }> = [];
+  const require = (present: boolean, zh: string, en: string) => { if (!present) missing.push({ zh, en }); };
+  require(Boolean(input.assetName.trim()), "资产名", "Asset name");
+  require(Boolean(input.filePath.trim()), "导入文件", "Import file");
+  require(Boolean(input.destinationPath.trim()), "归档目录", "Archive folder");
+  require(["主角", "怪物", "NPC"].includes(input.affiliation), "动画归属", "Affiliation");
+  require(rules.types.some(type => type.name === input.animationType), "动画类型", "Animation type");
+  require(input.labels.some(label => label.trim()), "动作标签", "Action labels");
+  const kind = input.affiliation === "主角" ? "weapon" : input.affiliation === "怪物" ? "monster" : "";
+  if (kind) require(input.gameTag?.kind === kind && Boolean(input.gameTag.id.trim()), kind === "weapon" ? "武器类别" : "怪物", kind === "weapon" ? "Weapon category" : "Monster");
+  return missing;
+}
 
 const NAME_SEGMENT = /^(?:[A-Z][A-Za-z0-9]*|[0-9]+)$/;
 const HERO_FOLDER = /(?:^|[\\/])hero(?:[\\/]|$)/i;
@@ -107,7 +189,7 @@ export function evaluateAnimationImportRules(input: AnimationRuleInput): Animati
     const nameIssue = getAnimationAssetNameIssue(filledName);
     checks.push(nameIssue
       ? { id: "name", status: "fail", zh: nameIssue.zh, en: nameIssue.en }
-      : { id: "name", status: "ok", zh: `命名 ${name}`, en: `Name ${name}` });
+      : { id: "name", status: "ok", zh: `命名：${name}`, en: `Name: ${name}` });
   }
 
   if (!String(input.filePath || "").trim()) {
@@ -119,36 +201,36 @@ export function evaluateAnimationImportRules(input: AnimationRuleInput): Animati
 
   if (stats?.frameRate != null && Number.isFinite(stats.frameRate)) {
     const source = frameRateSourceLabel(stats.frameRateSource);
-    if (Math.abs(stats.frameRate - 60) <= 0.5) {
-      checks.push({ id: "fps", status: "ok", zh: `帧率 ${formatNumber(stats.frameRate)} FPS${source.zh}`, en: `Frame rate ${formatNumber(stats.frameRate)} FPS${source.en}` });
+    if (Math.abs(stats.frameRate - rules.frameRate.fps) <= rules.frameRate.tolerance) {
+      checks.push({ id: "fps", status: "ok", zh: `帧率：${formatNumber(stats.frameRate)}FPS`, en: `Frame rate: ${formatNumber(stats.frameRate)}FPS` });
     } else {
       checks.push({
         id: "fps",
         status: "fail",
-        zh: `帧率 ${formatNumber(stats.frameRate)} FPS，要求 60 FPS${source.zh}`,
-        en: `Frame rate is ${formatNumber(stats.frameRate)} FPS; 60 FPS is required${source.en}`
+        zh: `帧率 ${formatNumber(stats.frameRate)} FPS，要求 ${rules.frameRate.fps} FPS${source.zh}`,
+        en: `Frame rate is ${formatNumber(stats.frameRate)} FPS; ${rules.frameRate.fps} FPS is required${source.en}`
       });
     }
   } else {
-    checks.push({ id: "fps", status: "warn", zh: "未能读取 FBX 帧率，请确认按 60 FPS 导出", en: "Could not read the FBX frame rate. Export at 60 FPS" });
+    checks.push({ id: "fps", status: "warn", zh: `未能读取 FBX 帧率，请确认按 ${rules.frameRate.fps} FPS 导出`, en: `Could not read the FBX frame rate. Export at ${rules.frameRate.fps} FPS` });
   }
 
   if (isWalkStopName(name)) {
-    checks.push(rootDistanceCheck(stats, 0, 1, "WalkStop Root 位移应为 0", "WalkStop root displacement must be 0"));
+    checks.push(rootDistanceCheck(stats, rules.root.walkStopTravelCm, rules.root.walkStopToleranceCm, `WalkStop Root 位移应为 ${rules.root.walkStopTravelCm}cm`, `WalkStop root displacement must be ${rules.root.walkStopTravelCm}cm`));
   } else if (isRunStopName(name)) {
-    checks.push(rootDistanceCheck(stats, 30, 3, "RunStop Root 位移应为 0.3m", "RunStop root displacement must be 0.3m"));
+    checks.push(rootDistanceCheck(stats, rules.root.runStopTravelCm, rules.root.runStopToleranceCm, `RunStop Root 位移应为 ${rules.root.runStopTravelCm / 100}m`, `RunStop root displacement must be ${rules.root.runStopTravelCm / 100}m`));
   } else if (isHitRootRuleName(name)) {
     const range = stats?.rootHorizontalRangeCm;
     if (range == null) {
       checks.push({ id: "root", status: "warn", zh: "未能读取受击 Root 位移", en: "Could not read hit-react root motion" });
-    } else if (range <= 10.5) {
+    } else if (range <= rules.root.hitMaxHorizontalCm + rules.root.hitToleranceCm) {
       checks.push({ id: "root", status: "ok", zh: `受击 Root 水平幅度 ${formatNumber(range)} cm`, en: `Hit root horizontal span ${formatNumber(range)} cm` });
     } else {
       checks.push({
         id: "root",
         status: "fail",
-        zh: `受击 Root 水平幅度 ${formatNumber(range)} cm，要求不超过 10cm`,
-        en: `Hit root horizontal span is ${formatNumber(range)} cm; it must stay within 10cm`
+        zh: `受击 Root 水平幅度 ${formatNumber(range)} cm，要求不超过 ${rules.root.hitMaxHorizontalCm}cm`,
+        en: `Hit root horizontal span is ${formatNumber(range)} cm; it must stay within ${rules.root.hitMaxHorizontalCm}cm`
       });
     }
   } else {
@@ -190,7 +272,7 @@ export function evaluateAnimationImportRules(input: AnimationRuleInput): Animati
     });
     return checks;
   }
-  const expected = kind === "start" ? 3 : 4;
+  const expected = kind === "start" ? rules.steps.start : rules.steps.loop;
   if (stats?.stepCount == null) {
     checks.push({
       id: "steps",

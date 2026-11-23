@@ -1,4 +1,5 @@
 import type { AppSettings } from "../../types";
+import type { AnimationGameTag } from "../../../shared/animationGameTags.mjs";
 
 export type SearchState = {
   text: string;
@@ -107,6 +108,7 @@ export type ImportFormState = {
   assetType: string;
   subCategory: string;
   destinationPath: string;
+  animationArchiveManual?: boolean;
   skeletonPath: string;
   skeletalMeshPath: string;
   modelSlots: Record<string, string>;
@@ -122,6 +124,14 @@ export type ImportFormState = {
   tagsText: string;
   zionTags: string[];
   animationAffiliation: string;
+  animationLabelsText: string;
+  animationMotionContext?: string;
+  animationGait?: string;
+  animationPhase?: string;
+  animationPlanningManualFields?: Array<"animationMotionContext" | "animationGait" | "animationPhase">;
+  animationPlanningSourceName?: string;
+  animationGameTag: AnimationGameTag | null;
+  animationGameTagManual?: boolean;
   characterFields: CharacterImportFields;
   characterPackageFiles: string[];
   characterLodConfirmation?: string;
@@ -186,6 +196,8 @@ export type EditFormState = {
   tagsText: string;
   zionTags: string[];
   animationAffiliation: string;
+  animationLabelsText: string;
+  animationGameTag: AnimationGameTag | null;
 };
 
 export type ModalAlertState = { visible: boolean; message: string; title?: string } | null;
@@ -238,6 +250,8 @@ export const defaultImportForm: ImportFormState = {
   tagsText: "",
   zionTags: [],
   animationAffiliation: "",
+  animationLabelsText: "",
+  animationGameTag: null,
   characterFields: {
     family: "",
     gender: "",
@@ -303,7 +317,9 @@ export const defaultEditForm: EditFormState = {
   previewImagePath: "",
   tagsText: "",
   zionTags: [],
-  animationAffiliation: ""
+  animationAffiliation: "",
+  animationLabelsText: "",
+  animationGameTag: null
 };
 
 export const defaultAppUpdateState: AppUpdateState = {

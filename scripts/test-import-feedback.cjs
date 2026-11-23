@@ -540,6 +540,31 @@ test("invalid input gets a visible explanation without issuing a save", async ()
   assert.equal(state.calls, 0);
 });
 
+test("missing animation gameplay identity blocks single and batch saves before closing the form", async () => {
+  const rules = { exports: {} };
+  const rulePath = path.join(__dirname, "../src/ui/animationRules.ts");
+  new Function("exports", "require", ts.transpileModule(fs.readFileSync(rulePath, "utf8"), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText)(rules.exports, require('node:module').createRequire(rulePath));
+  for (const batch of [false, true]) {
+    const { state, form, submit } = fixture(() => { throw new Error("must not save"); });
+    Object.assign(form, { assetType: "animation", assetName: "AS_ShangExecutor_Run_Stop", destinationPath: "D:/Library/Animation/Monster", animationAffiliation: "怪物", subCategory: "基础移动", animationLabelsText: "跑停", animationGameTag: null });
+    Object.assign(state, {
+      isAnimationAssetImportType: type => type === "animation", getMissingAnimationFields: rules.exports.getMissingAnimationFields, animationPlanningLabels: rules.exports.animationPlanningLabels,
+      getFirstFbxPath: files => files.find(file => /\.fbx$/i.test(file)) || "",
+      resolveAnimationAffiliationValue: value => value, resolveAnimationTypeValue: (_, category) => category,
+      parseAnimationLabels: require('../shared/animationUnrealExport.mjs').parseAnimationLabels,
+      switchImportAsset: index => { state.focusedImport = index; }
+    });
+    state.importDrafts = [{ form, tagInput: "" }, { form: { ...form, assetName: "AS_Other_Run" }, tagInput: "" }];
+    await submit(0, batch ? [0, 1] : undefined);
+    assert.match(state.alert.message, /请补齐必填项：怪物/);
+    assert.equal(state.calls, 0);
+    assert.equal(state.backgroundActive, false);
+    assert.equal(state.open, true);
+    assert.equal(state.importDrafts.length, 2);
+    if (batch) assert.equal(state.focusedImport, 0);
+  }
+});
+
 test("retry success clears the old error and resets the form only after saving", async () => {
   const { state, submit } = fixture(() => ({ ok: true, assetId: "saved" }));
   state.alert = { visible: true, title: "old failure" };
@@ -887,16 +912,41 @@ test("mixed checkboxes are indeterminate until explicitly unified", () => {
 test("a mixed dropdown allows choosing the current asset's value to unify selection", () => {
   const React = require("react");
   const start = source.indexOf("const DarkSelect = memo(");
-  const end = source.indexOf("\nconst RelatedAssetCard", start);
+  const end = source.indexOf("\nfunction normalizeThemeToken", start);
   const js = ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
   const Select = new Function("React", "memo", "useState", "useRef", "useEffect", `${js}; return DarkSelect;`)(React, (fn) => fn, () => [true, () => {}], () => ({ current: null }), () => {});
   let changed;
   const tree = Select({ value: "Props", mixed: true, options: [{ value: "Props", label: "Props" }, { value: "Nature", label: "Nature" }], ariaLabel: "Category", onChange: (value) => { changed = value; } });
   assert.equal(tree.props.children[0].props.children.props.children, "Multiple Value");
-  const options = tree.props.children[1].props.children;
+  const listbox = React.Children.toArray(tree.props.children[1].props.children).find(child => child.props?.role === 'listbox');
+  const options = React.Children.toArray(listbox.props.children).filter(child => child.props?.role === 'option');
   assert.ok(options.every((option) => option.props["aria-selected"] === false));
   options[0].props.onClick();
   assert.equal(changed, "Props");
+});
+
+test('searchable animation dropdown filters Chinese names and row IDs without changing its selection', () => {
+  const React = require('react');
+  const start = source.indexOf('const DarkSelect = memo(');
+  const end = source.indexOf('\nfunction normalizeThemeToken', start);
+  const js = ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
+  const render = query => {
+    let state = 0;
+    const Select = new Function('React', 'memo', 'useState', 'useRef', 'useEffect', `${js}; return DarkSelect;`)(React, fn => fn, () => [state++ === 0 ? true : query, () => {}], () => ({ current: null }), () => {});
+    return Select({ value: 'Monster_ShangSoldier', options: [
+      { value: 'Monster_ShangExecutor', label: '行刑官' }, { value: 'Monster_ShangSoldier', label: '商士兵' }
+    ], ariaLabel: '怪物', searchPlaceholder: '搜索怪物名称或编号', emptySearchLabel: '没有匹配项', onChange: () => {} });
+  };
+  for (const query of ['行刑', 'shangexecutor']) {
+    const tree = render(query);
+    const menu = tree.props.children[1];
+    const listbox = React.Children.toArray(menu.props.children).find(child => child.props?.role === 'listbox');
+    const options = React.Children.toArray(listbox.props.children).filter(child => child.props?.role === 'option');
+    assert.equal(options.length, 1);
+    assert.ok(React.Children.toArray(options[0].props.children).includes('行刑官'));
+    assert.equal(options[0].props['aria-selected'], false);
+    assert.equal(React.Children.toArray(menu.props.children)[0].props['aria-label'], '搜索怪物名称或编号');
+  }
 });
 
 test("normal format buttons switch both conventions and keep UDIM groups independent", () => {
@@ -945,4 +995,27 @@ test("normal format buttons switch both conventions and keep UDIM groups indepen
     assert.equal(form.assetName, original.assetName);
     assert.deepEqual(original.normalMapFormats, {});
   }
+});
+
+test("failed animation naming and motion rules do not block single or batch imports", async () => {
+  for (const batch of [false, true]) for (const invalidName of [false, true]) {
+    const { state, form, submit } = fixture(() => ({ ok: true, assetId: "saved" }));
+    Object.assign(form, { assetType: "animation", assetName: invalidName ? "walk" : "AS_Executor_Alert_Walk", destinationPath: "D:/Library/Animation/Monster", animationAffiliation: "怪物", subCategory: "基础移动", animationLabelsText: "走", animationGameTag: { kind: "monster", id: "Executor" } });
+    Object.assign(state, {
+      isAnimationAssetImportType: type => type === "animation", getMissingAnimationFields: () => [], animationPlanningLabels: () => [],
+      getAnimationAssetNameIssue: () => invalidName ? ({ zh: "命名不符合规范", en: "Invalid naming" }) : null,
+      getFirstFbxPath: files => files.find(file => /\.fbx$/i.test(file)) || "",
+      resolveAnimationAffiliationValue: value => value, resolveAnimationTypeValue: (_, category) => category, isAnimationTypeValue: () => true,
+      parseAnimationLabels: require('../shared/animationUnrealExport.mjs').parseAnimationLabels,
+      animationGameTagKind: affiliation => affiliation === '怪物' ? 'monster' : 'weapon',
+      allAssets: [], loadAnimationFbxStats: async () => ({ frameRate: 30 }), loadAnimationRuleReference: async () => ({}),
+      evaluateAnimationImportRules: () => [{ id: 'fps', status: 'fail', zh: '帧率不符合规范' }], getAnimationRuleErrors: rows => rows.filter(row => row.status === 'fail'),
+      switchImportAsset: index => { state.focusedImport = index; }
+    });
+    state.importDrafts = [{ form, tagInput: "" }, { form: { ...form, assetName: "walk2" }, tagInput: "" }];
+    await submit(0, batch ? [0, 1] : undefined);
+    assert.equal(state.calls, batch ? 2 : 1, JSON.stringify(state.alert));
+    assert.equal(state.alert, null);
+  }
+  assert.match(source, /importAnimationRuleChecks\.map/);
 });

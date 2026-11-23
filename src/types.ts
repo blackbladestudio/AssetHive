@@ -22,6 +22,10 @@ export type AssetRecord = {
   previewSkeletalMeshPath?: string;
   textureFiles: string[];
   animationAffiliation?: string;
+  animationLabels?: string[];
+  animationGameTag?: { kind: "weapon" | "monster"; id: string; name: string };
+  animationContentFingerprint?: string;
+  animationSendReceipts?: { projectPath: string; at?: string; contentFingerprint?: string }[];
   colorTags?: string[];
   themes?: string[] | null;
   categories?: string[] | null;
@@ -89,4 +93,6 @@ export type AppSettings = {
   // 合成 SpeedTree 风（导出面板选择）：""（无）| "grass" | "bush" | "fern"。
   // 导出到引擎时由插件写入风动 UV 并改用 ST 风母材质；仅原始资产为 FBX 的植被生效。
   plantSyntheticWind: string;
+  // UE 目录独立手选，按目标工程和归档组记住；Skeleton 按角色记住。
+  animationUnrealExport?: { root?: string; projectFolders?: Record<string, Record<string, string>>; skeletons?: Record<string, string>; enableRootMotion?: boolean; forceRootLock?: boolean; showImportDialog?: boolean; allowEngineCompressionFallback?: boolean };
 };

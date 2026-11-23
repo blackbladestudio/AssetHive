@@ -24,6 +24,7 @@ function fixture({ autoScan = false, hasCache = false } = {}) {
   win.show = () => { calls.shown++; };
   const scope = {
     win, ipcMain: new EventEmitter(), process: { env: {} }, app: { isPackaged: false },
+    diagnostics: { recordEvent() {} },
     startupWindow: { finish: () => { calls.splashFinished++; } }, startupWindows: new Map(),
     Date: { now: () => elapsed },
     globalThis: {

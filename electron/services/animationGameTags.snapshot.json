@@ -1,0 +1,277 @@
+{
+  "generatedFrom": "ZionGame DT_WeaponCategoryConfig / DT_MonsterPrototype",
+  "weapons": [
+    {
+      "kind": "weapon",
+      "id": "Unarmed01",
+      "name": "空手",
+      "group": "UnArmed"
+    },
+    {
+      "kind": "weapon",
+      "id": "Sword01",
+      "name": "单手剑",
+      "group": "Sword"
+    },
+    {
+      "kind": "weapon",
+      "id": "GreatSword01",
+      "name": "大剑",
+      "group": "GreatSword"
+    },
+    {
+      "kind": "weapon",
+      "id": "Jade01",
+      "name": "玉",
+      "group": "Jade"
+    },
+    {
+      "kind": "weapon",
+      "id": "Bow01",
+      "name": "弓",
+      "group": "Bow"
+    },
+    {
+      "kind": "weapon",
+      "id": "PairedSwords01",
+      "name": "双剑",
+      "group": "PairedSwords"
+    },
+    {
+      "kind": "weapon",
+      "id": "GreatAxe01",
+      "name": "巨斧",
+      "group": "GreatAxe"
+    },
+    {
+      "kind": "weapon",
+      "id": "Spear01",
+      "name": "长枪",
+      "group": "Spear"
+    },
+    {
+      "kind": "weapon",
+      "id": "LongSword01",
+      "name": "长剑",
+      "group": "LongSword"
+    },
+    {
+      "kind": "weapon",
+      "id": "ShieldAxe01",
+      "name": "盾斧",
+      "group": "ShieldAxe"
+    }
+  ],
+  "monsters": [
+    {
+      "kind": "monster",
+      "id": "Monster_Prototype",
+      "name": "Boss蓑衣男",
+      "group": "Boss"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_Wolf",
+      "name": "狼",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_WuGuard",
+      "name": "南土铁卫白盒",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_LacheGiantWarrior",
+      "name": "拉车闻太师巨人兵",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangGiantWarrior",
+      "name": "闻太师巨人兵长柄斧",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_HugeShangGiantWarrior",
+      "name": "巨型闻太师巨人兵长柄斧",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_YongNiao",
+      "name": "颙鸟精英",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ZhouwangCommander",
+      "name": "纣王士兵指挥官",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_Chicken",
+      "name": "鬿雀（鸡）",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_VillagerHand",
+      "name": "殷商居民（空手）",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_VillagerKnife",
+      "name": "殷商居民（匕首）",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_VillagerBell",
+      "name": "殷商居民（铃铛）",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_VillagerCursed",
+      "name": "殷商居民（魔化）",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_VillagerBoom",
+      "name": "殷商居民（自爆）",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Trap_TampedEarthTrap",
+      "name": "夯土巨柱陷阱",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_XiaUndead",
+      "name": "夏朝阴兵",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangExecutor",
+      "name": "行刑官",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_KingWuding",
+      "name": "武丁王",
+      "group": "Boss"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_QueenMoxi",
+      "name": "妹喜",
+      "group": "Boss"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_GreatDingBeast",
+      "name": "大鼎兽",
+      "group": "Boss"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangGuard",
+      "name": "青铜盾卫",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangSoldierSword",
+      "name": "纣王士兵剑盾",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangSoldierBow",
+      "name": "纣王士兵大弓",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangSoldierSpear",
+      "name": "纣王士兵长戟",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangMinionSpear",
+      "name": "殷商士卒盾矛",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangMinionSpear_0",
+      "name": "殷商士卒大剑",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "ShangMinionTorchGe",
+      "name": "殷商士卒火把戈",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangDivinator",
+      "name": "殷商卜人",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_KuLouBing",
+      "name": "骷髅兵",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangPriestZhu",
+      "name": "殷商祭祀精英祝",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_ShangPriestZhen",
+      "name": "殷商祭祀精英贞",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_DingBeast",
+      "name": "鼎兽",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_DingBeastSummoned",
+      "name": "召唤物鼎兽",
+      "group": "NormalMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_DragonKin",
+      "name": "精英龙人士兵",
+      "group": "EliteMonster"
+    },
+    {
+      "kind": "monster",
+      "id": "Monster_LaserTriFeetRaven",
+      "name": "激光三足乌",
+      "group": "NormalMonster"
+    }
+  ]
+}

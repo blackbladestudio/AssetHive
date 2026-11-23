@@ -27,6 +27,8 @@ export type GridDirection = "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight"
 
 // A shared four-part reference keeps owner sizing independent of display filters.
 const CHARACTER_CARD_SIZE = .5;
+export const MIN_CARD_SCALE = .6;
+export const MAX_CARD_SCALE = 2.4;
 function characterOwnerHeight(viewport: number, padding: number, maxHeight = 400) {
   const available = Math.max(1, viewport - padding * 2 - 8);
   const gapRatio = 12 / 320;
@@ -172,7 +174,7 @@ export function getDirectionalGridItem<T extends { x: number; y: number; width: 
   return best;
 }
 
-export function buildAssetGridLayout(list: AssetRecord[], viewportWidth: number, compact = false, inset?: number, groupOutfits = false, fixedCharacterCards = false, thumbnailHeight?: number, sizingWidth?: number, showCharacterSections = false) {
+export function buildAssetGridLayout(list: AssetRecord[], viewportWidth: number, compact = false, inset?: number, groupOutfits = false, fixedCharacterCards = false, thumbnailHeight?: number, sizingWidth?: number, showCharacterSections = false, cardScale = 1) {
   const viewport = Number.isFinite(viewportWidth) ? Math.max(1, viewportWidth) : 1600;
   const narrow = viewport <= 900;
   const medium = viewport <= 1200;
@@ -202,12 +204,13 @@ export function buildAssetGridLayout(list: AssetRecord[], viewportWidth: number,
   }
   const ownerHeight = thumbnailHeight ?? characterOwnerHeight(sizingWidth ?? viewport, padding) * CHARACTER_CARD_SIZE;
   const ownerWidth = ownerHeight * .75;
-  const cardHeight = fixed ? ownerHeight : characterGrid
+  const scale = fixed ? 1 : Math.min(MAX_CARD_SCALE, Math.max(MIN_CARD_SCALE, cardScale || 1));
+  const cardHeight = fixed ? ownerHeight : Math.round((characterGrid
     ? (narrow ? 190 : medium ? 250 : compact ? 260 : 300)
-    : (narrow ? 125 : medium ? 145 : compact ? 200 : 220);
-  const minWidth = fixed ? ownerWidth : characterGrid
+    : (narrow ? 125 : medium ? 145 : compact ? 200 : 220)) * scale);
+  const minWidth = fixed ? ownerWidth : Math.round((characterGrid
     ? (narrow ? 150 : medium ? 210 : compact ? 220 : 260)
-    : (narrow ? 110 : medium ? 130 : compact ? 180 : 220);
+    : (narrow ? 110 : medium ? 130 : compact ? 180 : 220)) * scale);
   const contentWidth = viewport - padding * 2;
   const columns = Math.max(1, Math.floor((contentWidth + gap) / (minWidth + gap)));
   // Keep card sizes consistent across rows; incomplete rows leave space on the right.

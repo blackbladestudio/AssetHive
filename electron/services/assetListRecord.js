@@ -20,6 +20,12 @@ function toAssetListRecord(asset) {
     subType: asset.subType,
     hasCollision: asset.hasCollision,
     animationAffiliation: asset.animationAffiliation || meta.animationAffiliation,
+    animationLabels: asset.animationLabels || meta.animationLabels,
+    animationGameTag: asset.animationGameTag || meta.animationGameTag,
+    ...(asset.assetType === 'animation' ? {
+      animationContentFingerprint: meta.identity?.contentFingerprint,
+      animationSendReceipts: (meta.animationUEExports || []).map(({ projectPath, at, contentFingerprint }) => ({ projectPath, at, contentFingerprint }))
+    } : {}),
     previewSkeletonPath: asset.previewSkeletonPath,
     previewSkeletalMeshPath: asset.previewSkeletalMeshPath,
     // Batch plant export options inspect the original model extensions.

@@ -59,6 +59,20 @@ test("visible animation cards generate a missing cover one at a time without ope
   }
 });
 
+test('an animation cache miss schedules a cover without opening details', async () => {
+  const file = 'Animation/Monster/ShangExecutor/AS_ShangExecutor_Walk.fbx';
+  const missing = [];
+  const loader = new PreviewLoader(async path => path, 6, 2048, path => missing.push(path));
+  const unsubscribe = loader.subscribe(file, () => {});
+  await setImmediate();
+  assert.deepEqual(missing, [file]);
+  loader.setResolved(file, 'cache/ShangExecutor.webm');
+  unsubscribe();
+  loader.subscribe(file, () => {});
+  await setImmediate();
+  assert.deepEqual(missing, [file]);
+});
+
 test("animation cover cache misses retry on remount and a recorded cover beats a late lookup", async () => {
   const file = "Animation/AS_Walk.fbx";
   let attempts = 0;

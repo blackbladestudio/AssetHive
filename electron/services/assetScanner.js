@@ -14,7 +14,7 @@ const { listPermanentlyDeletedAssets } = require("./characterDeletion");
 const { watchLibrary } = require("./libraryWatchService");
 const { changedDirectories } = require("./libraryChanges");
 const { ASSET_METADATA_FILE_NAME, isFolderAssetMetaFileName, isSidecarAssetMetaFileName, getSidecarStemFromMetaFileName, writeAssetMetadata, updateAssetMetadataFile } = require("./assetMetadata");
-const { applyAnimationIdentityMetadata, readAnimationIdentitySidecar } = require("./animationIdentity");
+const { animationIdentityDiffersFromRecord, applyAnimationIdentityMetadata, readAnimationIdentitySidecar } = require("./animationIdentity");
 const { resolveAssetModelPath, normalizeAssetModelPaths } = require("./assetModelPaths");
 const { activeCharacterFiles } = require("../../shared/characterComponents.mjs");
 const { isAllowedCharacterTextureFile } = require("../../shared/characterFilePolicy.mjs");
@@ -1704,6 +1704,8 @@ function buildLightMeta(meta) {
     return {};
   }
   const light = {};
+  if (typeof meta.createdAt === "string") light.createdAt = meta.createdAt;
+  if (typeof meta.updatedAt === "string") light.updatedAt = meta.updatedAt;
   if (meta.materialNames && typeof meta.materialNames === "object" && !Array.isArray(meta.materialNames)) light.materialNames = meta.materialNames;
   if (typeof meta.name === "string") light.name = meta.name;
   if (typeof meta.assetName === "string") light.assetName = meta.assetName;
@@ -1722,6 +1724,8 @@ function buildLightMeta(meta) {
   if (typeof meta.subType === "string") light.subType = meta.subType;
   if (typeof meta.category === "string") light.category = meta.category;
   if (typeof meta.animationAffiliation === "string") light.animationAffiliation = meta.animationAffiliation;
+  if (Array.isArray(meta.animationLabels)) light.animationLabels = meta.animationLabels.filter((label) => typeof label === "string" && label.trim());
+  if (meta.animationGameTag && typeof meta.animationGameTag === "object" && meta.animationGameTag.id) light.animationGameTag = meta.animationGameTag;
   if (meta.character && typeof meta.character === "object" && !Array.isArray(meta.character)) {
     light.characterDisplaySchema = 2;
     if (meta.characterComponents && typeof meta.characterComponents === "object") light.characterComponents = meta.characterComponents;
@@ -1816,6 +1820,8 @@ function buildLightMeta(meta) {
   if (Array.isArray(meta.importHistory)) {
     light.importHistory = meta.importHistory.filter((item) => item && typeof item === "object" && !Array.isArray(item)).slice(-20);
   }
+  if (Array.isArray(meta.animationOperationHistory)) light.animationOperationHistory = meta.animationOperationHistory.slice(-50);
+  if (Array.isArray(meta.animationUEExports)) light.animationUEExports = meta.animationUEExports.slice(-20);
   const colorTags = collectColorTagsFromMeta(meta);
   if (colorTags.length > 0) {
     light.colorTags = colorTags;
@@ -2001,6 +2007,8 @@ function createAssetRecord(assetDir, metaPath, meta, files, forcedSource, includ
     // 由导出面板的按钮弹层写入；这里读进索引供界面与导出使用。
     zionExportSubfolder: String(meta?.zionExportSubfolder || "").trim() || undefined,
     animationAffiliation: String(meta?.animationAffiliation || lightMeta.animationAffiliation || "").trim() || undefined,
+    animationLabels: lightMeta.animationLabels?.length ? lightMeta.animationLabels : undefined,
+    animationGameTag: lightMeta.animationGameTag,
     baseTiling,
     assetType,
     hasCollision: typeof meta?.hasCollision === "boolean" ? meta.hasCollision : undefined,
@@ -2140,6 +2148,7 @@ async function scanPath(rootPath, source, options = {}) {
           cachedMetaMtimeMs === Number(metaStats.mtimeMs) &&
           Number(cached?.metaSize) === Number(metaStats.size) &&
           dirState.unchanged &&
+          !animationIdentityDiffersFromRecord(cachedRecord, persistedAnimationIdentity) &&
           (!isModelAssetType(cachedRecord?.assetType) || isTextureAnalysisCurrent(cachedRecord?.textureAnalysis) || isAnimationModelMetaPath(metaPath))
         );
         if (canReuseCache) {

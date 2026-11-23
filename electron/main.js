@@ -2,6 +2,7 @@ const { saveUpdateResponse, verifyCachedUpdatePackage } = require("./services/up
 const { windowsPackageType, pickWindowsUpdateAsset, findLocalUpdatePackage, detectWindowsInstallation } = require("./services/windowsUpdate");
 const { createAppUpdateController } = require("./services/appUpdateController");
 const { createStartupWindow } = require("./services/startupWindow");
+const { createRendererDiagnostics, startLocalCrashReporting } = require("./services/rendererDiagnostics");
 const { createSharedDerivedCache } = require("./services/sharedDerivedCache");
 const { createCacheProcess } = require("./services/cacheProcess");
 const { hasPreviewSize, populatePreviewSize } = require("./services/previewSize");
@@ -12,13 +13,14 @@ const { analyzeAssetTextureUsage } = require("./services/textureAnalysis");
 const { stopLibraryWatch } = require("./services/libraryWatchService");
 const { opaqueBounds } = require("./services/previewCutout");
 const path = require("node:path");
+const { folderPickerPath } = require("./services/folderPickerPath");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { Buffer } = require("node:buffer");
 const fsSync = require("node:fs");
 const { transactionalFs: fs, protectFile, commitFileTransaction, withFileTransaction, recoverFileTransactions } = require("./services/assetFileTransaction");
 const { execFile } = require("node:child_process");
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeImage, powerMonitor } = require("electron");
+const { app, BrowserWindow, crashReporter, ipcMain, dialog, shell, clipboard, nativeImage, powerMonitor } = require("electron");
 const { createScanSchedule, CHANGE_CHECK_INTERVAL_MS } = require("./services/scanSchedule");
 const { recordLibraryChanges } = require("./services/libraryChanges");
 const { boundedMap } = require('./services/boundedMap');
@@ -40,7 +42,7 @@ const {
   computeContentIdentity,
   normalizeSourceToken
 } = require("./services/assetIdentity");
-const { getAnimationIdentitySidecarPath, writeAnimationIdentitySidecar } = require("./services/animationIdentity");
+const { getAnimationIdentitySidecarPath, writeAnimationIdentitySidecar, mergeAnimationMetadata } = require("./services/animationIdentity");
 const { normalizeTextureMaterialRole, isThumbsFolderPath } = require("./services/textureMaterialRole");
 const { isDropCandidateFile, parse7zTechnicalListing, selectDropArchiveEntries } = require("./services/dropArchiveSelection");
 const { evaluateSourceMatch, deriveStoredSourceIdentityFromMetadata } = require("./services/duplicateSourceMatch");
@@ -95,6 +97,17 @@ const { partitionCharacterPackageFiles, isAllowedCharacterPackageFile } = requir
 const { refreshCharacterTriangleMetrics } = require("./services/characterModelMetrics");
 const { activeCharacterFiles, componentParentId, characterModelPreviewComponents: listCharacterComponents } = require("../shared/characterComponents.mjs");
 const { sendSuitJob, refreshSuitStatus, isCharacterUEAsset } = require("./services/characterSuitExport");
+const { sendAnimationJob, isAnimationUEAsset } = require("./services/animationUnrealExport");
+const { persistAnimationExport, getAnimationUnrealStatus } = require('./services/animationActivity');
+const { listAnimationUnrealFolders } = require('./services/animationUnrealFolders');
+const { existingAnimationTargets } = require('./services/animationCheckout');
+const { parseAnimationLabels } = require("../shared/animationUnrealExport.mjs");
+const { animationGameTagKind, normalizeAnimationGameTag } = require("../shared/animationGameTags.mjs");
+
+function matchingAnimationGameTag(value, affiliation) {
+  const tag = normalizeAnimationGameTag(value);
+  return tag && tag.kind === animationGameTagKind(affiliation) ? tag : undefined;
+}
 let userFavorites;
 function getUserFavorites() {
   return userFavorites ||= createUserFavorites(path.join(app.getPath("userData"), "favorites.json"));
@@ -360,6 +373,8 @@ if (!gotTheLock) {
 } else {
   app.on("second-instance", showMainWindow);
 }
+const localCrashReporting = gotTheLock && !process.env.ASSETHIVE_MEGASCANS_IMPORT_JOB &&
+  process.env.ASSETHIVE_MEGASCANS_IMPORT_WORKER !== "1" ? startLocalCrashReporting(app, crashReporter) : null;
 
 let index = [];
 let settings = {
@@ -4264,6 +4279,8 @@ async function importCustomAsset(payload, sender) {
   const animationAffiliation = isAnimationAssetType(assetType)
     ? String(payload?.animationAffiliation || "").trim()
     : "";
+  const animationLabels = isAnimationAssetType(assetType) ? parseAnimationLabels(payload?.animationLabels) : [];
+  const animationGameTag = isAnimationAssetType(assetType) ? matchingAnimationGameTag(payload?.animationGameTag, animationAffiliation) : undefined;
   if (!assetName) {
     return { ok: false, message: "请填写资产名称" };
   }
@@ -5260,6 +5277,8 @@ async function importCustomAsset(payload, sender) {
     ...(typeof hasCollision === "boolean" ? { hasCollision } : {}),
     category,
     animationAffiliation: animationAffiliation || undefined,
+    animationLabels: animationLabels.length ? animationLabels : undefined,
+    animationGameTag,
     baseTiling: assetType === "surface" ? normalizedBaseTiling : undefined,
     tags: normalizedTags,
     previews: {
@@ -5401,6 +5420,8 @@ async function importCustomAsset(payload, sender) {
     standardAssetTags,
     zionTags,
     animationAffiliation: animationAffiliation || undefined,
+    animationLabels: animationLabels.length ? animationLabels : undefined,
+    animationGameTag,
     baseTiling: savedMeta.baseTiling,
     tags: normalizedTags,
     themes: [category.toLowerCase(), animationAffiliation].filter(Boolean),
@@ -5565,6 +5586,12 @@ async function updateCustomAssetFiles(payload, sender) {
   const nextAffiliation = isAnimationAssetType(nextAssetType)
     ? String(payload?.animationAffiliation !== undefined ? payload.animationAffiliation : previousAffiliation || "").trim()
     : "";
+  const nextAnimationLabels = isAnimationAssetType(nextAssetType)
+    ? parseAnimationLabels(payload?.animationLabels !== undefined ? payload.animationLabels : (meta.animationLabels || target.animationLabels))
+    : [];
+  const nextAnimationGameTag = isAnimationAssetType(nextAssetType)
+    ? matchingAnimationGameTag(payload?.animationGameTag !== undefined ? payload.animationGameTag : (meta.animationGameTag || target.animationGameTag), nextAffiliation)
+    : undefined;
   const mergedTags = [...new Set([nextAssetType, nextCategory.toLowerCase(), nextAffiliation, ...nextStandardAssetTags, ...regularInputTags, ...nextZionTags.map((tag) => tag.toLowerCase())].filter(Boolean))];
   const pbrMaxDecalTextureOptions = { assetType: nextAssetType, standardAssetTags: nextStandardAssetTags, tags: mergedTags };
   let nextNativePlantWind = null;
@@ -6187,6 +6214,8 @@ async function updateCustomAssetFiles(payload, sender) {
     : path.basename(assetDir);
   meta.category = nextCategory;
   meta.animationAffiliation = nextAffiliation || undefined;
+  meta.animationLabels = nextAnimationLabels.length ? nextAnimationLabels : undefined;
+  meta.animationGameTag = nextAnimationGameTag;
   meta.tags = mergedTags;
   meta.normalMapFormat = normalizedNormalMapFormat;
   meta.normalMapFormats = areaNormalMapFormats;
@@ -6414,6 +6443,8 @@ async function updateCustomAssetFiles(payload, sender) {
     standardAssetTags: nextStandardAssetTags,
     zionTags: nextZionTags,
     animationAffiliation: nextAffiliation || undefined,
+    animationLabels: nextAnimationLabels.length ? nextAnimationLabels : undefined,
+    animationGameTag: nextAnimationGameTag,
     baseTiling: meta.baseTiling,
     tags: mergedTags,
     themes: [nextCategory.toLowerCase(), nextAffiliation].filter(Boolean),
@@ -8007,12 +8038,11 @@ async function refreshAssetById(assetId) {
     fullDetails.themes = Array.isArray(target.themes) && target.themes.length ? target.themes : fullDetails.themes;
     fullDetails.zionTags = Array.isArray(target.zionTags) && target.zionTags.length ? target.zionTags : fullDetails.zionTags;
     fullDetails.animationAffiliation = target.animationAffiliation || fullDetails.animationAffiliation;
-    fullDetails.meta = {
-      ...(fullDetails.meta && typeof fullDetails.meta === "object" ? fullDetails.meta : {}),
-      ...(target.meta && typeof target.meta === "object" ? target.meta : {}),
-      assetID: target.id,
-      id: target.id
-    };
+    fullDetails.animationLabels = target.animationLabels || fullDetails.animationLabels;
+    fullDetails.animationGameTag = target.animationGameTag || fullDetails.animationGameTag;
+    fullDetails.meta = isAnimationUEAsset(fullDetails)
+      ? mergeAnimationMetadata(target.meta, fullDetails.meta, target.id)
+      : { ...(fullDetails.meta || {}), ...(target.meta || {}), assetID: target.id, id: target.id };
     applyPreservedAnimationPreview(fullDetails, target);
   }
   if (!fullDetails) {
@@ -8280,6 +8310,17 @@ function createWindow() {
     windowOptions.icon = appIconPath;
   }
   const win = new BrowserWindow(windowOptions);
+  const diagnostics = createRendererDiagnostics({
+    app, webContents: win.webContents, crashReporting: localCrashReporting, writeLog,
+    getActivity: () => ({
+      assetCount: index.length,
+      scanInProgress,
+      importInProgress: hasActiveBackgroundImport(),
+      activeExportCalls,
+      recycleInProgress
+    })
+  });
+  win.webContents.ipc.on("app:characterPreviewDiagnostic", (_, payload) => diagnostics.recordCharacterPreview(payload));
   win.on("close", (event) => {
     if (quitting) return;
     event.preventDefault();
@@ -8307,7 +8348,9 @@ function createWindow() {
   const rendererLoadStartedAt = Date.now();
   const reportStartupMilestone = (event, payload) => {
     if (event.sender !== win.webContents || !["preload-ready", "modules-ready", "ui-mounted"].includes(payload?.stage)) return;
-    writeLog("INFO", "renderer startup milestone", { stage: payload.stage, durationMs: Date.now() - rendererLoadStartedAt, navigation: payload.navigation });
+    const durationMs = Date.now() - rendererLoadStartedAt;
+    diagnostics.recordEvent("renderer startup milestone", { stage: payload.stage, durationMs });
+    writeLog("INFO", "renderer startup milestone", { stage: payload.stage, durationMs, navigation: payload.navigation });
   };
   ipcMain.on("app:startupMilestone", reportStartupMilestone);
   win.once("closed", () => ipcMain.removeListener("app:startupMilestone", reportStartupMilestone));
@@ -8381,10 +8424,8 @@ function createWindow() {
   });
 
   win.webContents.on("render-process-gone", async (_, details) => {
-    writeLog("ERROR", "render-process-gone", {
-      ...details, assetCount: index.length,
-      processes: app.getAppMetrics().map(({ pid, type, memory }) => ({ pid, type, memory }))
-    });
+    diagnostics.recordIncident("render-process-gone", { ...details, assetCount: index.length },
+      { persist: !quitting && details.reason !== "clean-exit" });
     if (quitting || win.isDestroyed() || rendererRecoveryPending) return;
     if (details.reason === "launch-failed") {
       rendererRecoveryPending = true;
@@ -8420,8 +8461,10 @@ function createWindow() {
   });
 
   win.on("unresponsive", () => {
-    writeLog("ERROR", "window unresponsive");
+    diagnostics.recordEvent("window unresponsive");
+    diagnostics.recordIncident("window unresponsive", { assetCount: index.length });
   });
+  win.on("responsive", () => diagnostics.recordEvent("window responsive"));
 
   win.webContents.on("preload-error", (_, preloadPath, error) => {
     writeLog("ERROR", "preload-error", { preloadPath, message: error?.message, stack: error?.stack });
@@ -8430,11 +8473,11 @@ function createWindow() {
   win.webContents.on("console-message", (event, legacyLevel, legacyMessage, legacyLine, legacySourceId) => {
     const level = typeof event?.level === "string" ? event.level : legacyLevel;
     if (level === "warning" || level === "error" || level >= 2) {
+      const line = event?.lineNumber ?? legacyLine;
+      const message = event?.message || legacyMessage;
+      diagnostics.recordEvent("renderer console", { level, line, message: String(message || "").slice(0, 300) });
       writeLog("RENDERER", "console-message", {
-        level,
-        sourceId: event?.sourceId || legacySourceId,
-        line: event?.lineNumber ?? legacyLine,
-        message: event?.message || legacyMessage
+        level, sourceId: event?.sourceId || legacySourceId, line, message
       });
     }
   });
@@ -8450,6 +8493,10 @@ app.whenReady().then(async () => {
   logManager.init({ app });
   setupLogger();
   writeLog("INFO", "app ready");
+  if (localCrashReporting) {
+    if (localCrashReporting.error) writeLog("WARN", "local crash reporter unavailable", localCrashReporting);
+    else writeLog("INFO", "local crash reporter started", localCrashReporting);
+  }
   if (process.env.ASSETHIVE_MEGASCANS_IMPORT_WORKER === "1") {
     if (!process.send) { app.exit(1); return; }
     if (sharp && typeof sharp.cache === "function") sharp.cache(false);
@@ -8702,6 +8749,15 @@ app.whenReady().then(async () => {
       writeLog("INFO", "log cleared from UI");
     }
     return { ok, message: ok ? "" : "日志文件尚未初始化或不可写" };
+  });
+
+  ipcMain.handle("animation:getGameTagOptions", async () => {
+    const liveProject = tcpClient.diagnostic?.state === "ready" ? tcpClient.diagnostic.projectPath : "";
+    return require("./services/animationGameTagOptions").loadAnimationGameTagOptions([settings.unrealProjectPath, liveProject]);
+  });
+
+  ipcMain.handle("animation:resolvePreviewRig", async (_, payload) => {
+    return require("./services/animationPreviewRig").resolveAnimationPreviewRig(payload || {});
   });
 
   ipcMain.handle("plugins:getStatus", async (_, { projectPath, editorPath }) => {
@@ -9167,6 +9223,42 @@ app.whenReady().then(async () => {
       return { ok: false, message: error.message };
     } finally { activeExportCalls--; }
   });
+  const animationTargetProject = async () => {
+    if (!settings.unrealEditorPath && /\.uproject$/i.test(settings.unrealProjectPath || '')) return path.resolve(settings.unrealProjectPath).replaceAll('\\', '/');
+    const editor = await tcpClient.getEditorInfo();
+    if (!editor) throw new Error('请选择目标工程，或连接当前 UE 工程');
+    return editor.projectPath;
+  };
+  ipcMain.handle('animation:unrealFolders', async () => {
+    return listAnimationUnrealFolders(await animationTargetProject());
+  });
+  ipcMain.handle('animation:pickUnrealFolder', async (_, request = {}) => {
+    const projectPath = await animationTargetProject();
+    if (projectPath !== request.projectPath) throw new Error('目标 UE 工程已改变，请重新选择');
+    const content = path.join(path.dirname(projectPath), 'Content');
+    const candidate = require('../shared/animationUnrealExport.mjs');
+    const folder = candidate.normalizeUnrealFolder(request.folder);
+    const start = folder ? path.join(content, ...folder.slice('/Game'.length).split('/').filter(Boolean)) : content;
+    const picked = await dialog.showOpenDialog({ title: '选择 UE 工程的 Content 目录', defaultPath: await fs.stat(start).catch(() => null) ? start : content, properties: ['openDirectory', 'createDirectory'] });
+    if (picked.canceled || !picked.filePaths[0]) return null;
+    if (await animationTargetProject() !== projectPath) throw new Error('目标 UE 工程已改变，请重新选择');
+    return require('./services/animationUnrealFolders').unrealFolderFromDirectory(projectPath, picked.filePaths[0]);
+  });
+  ipcMain.handle('animation:exportTargets', async (_, request = {}) => {
+    const projectPath = await animationTargetProject();
+    if (projectPath !== request.projectPath) throw new Error('目标 UE 工程已改变，请重新选择');
+    return existingAnimationTargets(projectPath, (request.targets || []).slice(0, 1000));
+  });
+  ipcMain.handle('animation:unrealStatus', async (_, assetId) => {
+    if (activeExportCalls || recycleInProgress) return { state: 'unverified', message: '正在处理资源，请稍后刷新检查' };
+    activeExportCalls++;
+    try {
+      const asset = await refreshAssetById(String(assetId || ''));
+      if (!asset || !isAnimationUEAsset(asset)) throw new Error('动画不存在，请刷新');
+      return await getAnimationUnrealStatus(asset, settings, tcpClient);
+    } catch (error) { return { state: 'error', message: error.message }; }
+    finally { activeExportCalls--; }
+  });
   ipcMain.handle('character:downloadRigFiles', async (event, assetId) => {
     if (recycleInProgress) return { ok: false, message: '删除/恢复处理中，请稍后下载' };
     try {
@@ -9271,11 +9363,36 @@ app.whenReady().then(async () => {
     };
     const hasSuits = target === "unreal" && selectedAssets.some(isCharacterUEAsset);
     if (hasSuits && !selectedAssets.every(isCharacterUEAsset)) return { ok: false, message: "请将套装、武器与其他类型分批发送" };
+    const hasAnimations = target === "unreal" && selectedAssets.some(isAnimationUEAsset);
+    if (hasAnimations && !selectedAssets.every(isAnimationUEAsset)) return { ok: false, message: "请将动画与其他类型分批发送" };
     const exporter = hasSuits ? (assets, options, progress) => sendSuitJob(assets, options, progress, tcpClient)
+      : hasAnimations ? (assets, options, progress) => sendAnimationJob(assets, options, progress, tcpClient)
       : target === "blender" ? exportToBlender : exportToUnreal;
     return await exporter(selectedAssets, mergedOptions, sendProgress)
       .then(async (result) => {
         setMainWindowTaskbarProgress(-1);
+        if (hasAnimations && result?.animationResult?.entries) {
+          const changed = [];
+          for (const row of result.animationResult.entries) {
+            try {
+              const current = await refreshAssetById(row.assetId || row.key);
+              if (!current) continue;
+              const meta = await persistAnimationExport(current, row, result.animationResult.projectPath);
+              const updated = { ...current, meta };
+              const position = index.findIndex(asset => asset.id === current.id);
+              if (position >= 0) index[position] = updated;
+              changed.push(updated);
+            } catch (error) {
+              row.message = `${row.message || ''}；操作历史保存失败：${error.message}`;
+              writeLog('WARN', 'animation export history save failed', { assetId: row.key, message: error.message });
+            }
+          }
+          if (changed.length) {
+            markInternalLibraryMutation(10000);
+            scheduleIndexSnapshotSave('animation_export_history');
+            event.sender.send('assets:change', { incremental: true, records: changed.map(toAssetListRecord), count: index.length });
+          }
+        }
         writeLog(result?.ok ? "INFO" : "WARN", `${exportLogName} complete`, {
           ok: Boolean(result?.ok),
           totalMs: Date.now() - exportStartedAt,
@@ -9310,6 +9427,26 @@ app.whenReady().then(async () => {
     }
   });
 
+  ipcMain.handle("assets:revealArchive", async (_, assetId) => {
+    try {
+      const asset = index.find(item => item.id === assetId);
+      if (!asset) throw new Error("资产不在当前索引中");
+      const candidates = String(asset.assetType || "").toLowerCase() === "animation"
+        ? [...(asset.modelFiles || []), asset.metaPath, asset.path] : [asset.metaPath, asset.path];
+      for (const location of candidates.filter(Boolean)) {
+        const stat = await fs.stat(location).catch(() => null);
+        if (!stat) continue;
+        if (stat.isFile()) shell.showItemInFolder(location);
+        else if (stat.isDirectory()) {
+          const error = await shell.openPath(location);
+          if (error) throw new Error(error);
+        } else continue;
+        return { ok: true };
+      }
+      throw new Error("归档文件或文件夹已不存在");
+    } catch (error) { return { ok: false, message: String(error.message || error) }; }
+  });
+
   ipcMain.handle("assets:revealCharacterModel", async (_, payload) => {
     try {
       const asset = index.find(item => item.id === payload?.assetId && item.source === "custom");
@@ -9335,10 +9472,12 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("assets:pickFolder", async (_, options) => {
-    const defaultPath = String(options?.defaultPath || "").trim();
+    const defaultPath = options?.nearestExistingParent
+      ? await folderPickerPath(options?.defaultPath)
+      : String(options?.defaultPath || "").trim() || undefined;
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory"],
-      defaultPath: defaultPath || undefined
+      defaultPath
     });
     if (result.canceled || result.filePaths.length === 0) {
       return null;

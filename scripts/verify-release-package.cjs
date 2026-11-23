@@ -13,12 +13,15 @@ const assert = require('node:assert/strict');
 const root = process.argv[2];
 const expected = process.argv[3];
 assert.equal(require(path.join(root, 'package.json')).version, expected);
-for (const relative of ['dist/index.html','shared/characterComponents.mjs','electron/scripts/render_groom_preview.py']) {
+for (const relative of ['dist/index.html','shared/characterComponents.mjs','electron/scripts/render_groom_preview.py',
+  'shared/animation-import-rules.json','electron/services/animationGameTags.snapshot.json']) {
   assert.ok(fs.statSync(path.join(root,relative)).size > 0, relative);
 }
-for (const relative of ['.tmp','.agents','.git','Output','src']) assert.equal(fs.existsSync(path.join(root,relative)),false,relative);
+for (const relative of ['.tmp','.agents','.git','Output','src','probe-animation.html']) assert.equal(fs.existsSync(path.join(root,relative)),false,relative);
 assert.equal(typeof require(path.join(root,'electron/services/groomPreview.js')).renderGroomPreview,'function');
-console.log('Packaged version, character resources and temporary-file exclusions OK');
+assert.equal(typeof require(path.join(root,'electron/services/animationUnrealExport.js')).sendAnimationJob,'function');
+assert.equal(typeof require(path.join(root,'electron/services/animationActivity.js')).getAnimationUnrealStatus,'function');
+console.log('Packaged version, character/animation resources and temporary-file exclusions OK');
 `;
 const result = spawnSync(path.join(directory, 'AssetHive.exe'), ['-', archive, require('../package.json').version], {
   input: probe, encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, timeout: 30000, windowsHide: true

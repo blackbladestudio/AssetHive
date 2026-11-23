@@ -1,12 +1,11 @@
 /**
  * AssetHive 自动发布脚本
  *
- * 流程：读取 package.json 版本号 → 检查远端 tag 是否已存在 → 输入更新内容
- *      → 创建 tag → 创建 GitHub Release → 上传安装包
- *
- * 说明：本脚本只负责发布 Release 与安装包，不提交/推送任何源码。
- *      仓库 Biscuits-Lab/Release 用于集中存放各产品（AssetHive/Omni/NeuralDraft…）的 Release，
- *      源码仓库见 git remote origin（Biscuits-Lab/Assethive_Sourcecode）。
+ * 流程：校验当前版本的发布物与校验和 → 确认更新内容 → 上传草稿 → 全部成功后发布。
+ * 桌面更新发布到 blackbladestudio/AssetHive，与客户端更新源保持一致。
+ * 不修改版本号，不提交源码，不覆盖已有 Release 或标签。
+ * 用法：node scripts/publish_release.js --notes-file docs/release-notes-2.3.5.md
+ *       添加 --dry-run 只校验本地发布物，不读取凭据或操作 GitHub。
  *
  * 认证：优先使用 Windows 凭据管理器中的 GitHub 凭据（git credential fill），
  *      若不可用则回退到 GITHUB_TOKEN 环境变量。
@@ -16,14 +15,17 @@
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
+const { createHash } = require("node:crypto");
+const { Buffer } = require('node:buffer');
 const { execFileSync } = require("child_process");
+const { getSourceProof, assertSourceMatches, isReleaseInput } = require('./release-source.cjs');
 
 // ============================================================
 // 配置
 // ============================================================
-const OWNER = "Biscuits-Lab";
-const REPO = "Release";
-const RELEASE_TAG_PREFIX = "AssetHive-";
+const OWNER = "blackbladestudio";
+const REPO = "AssetHive";
+const RELEASE_TAG_PREFIX = "v";
 const API = "https://api.github.com";
 const UPLOADS = "https://uploads.github.com";
 
@@ -58,11 +60,12 @@ function getTokenFromCredentialManager() {
     const out = execFileSync("git", ["credential", "fill"], {
       encoding: "utf8",
       input: "protocol=https\nhost=github.com\n\n",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
     });
     const line = out
       .split("\n")
       .find((l) => l.startsWith("password="));
-    return line ? line.slice("password=".length) : null;
+    return line ? line.slice("password=".length).trim() : null;
   } catch {
     return null;
   }
@@ -118,11 +121,6 @@ async function getBranchHeadSha(token, branch) {
   return r.data.commit.sha;
 }
 
-async function tagExists(token, tag) {
-  const r = await api("GET", `/repos/${OWNER}/${REPO}/git/refs/tags/${tag}`, token);
-  return r.status === 200;
-}
-
 async function createLightweightTag(token, tag, sha) {
   const r = await api("POST", `/repos/${OWNER}/${REPO}/git/refs`, token, {
     ref: "refs/tags/" + tag,
@@ -130,13 +128,6 @@ async function createLightweightTag(token, tag, sha) {
   });
   if (r.status !== 201) {
     throw new Error("创建 tag 失败: HTTP " + r.status + " " + JSON.stringify(r.data));
-  }
-}
-
-async function deleteTag(token, tag) {
-  const r = await api("DELETE", `/repos/${OWNER}/${REPO}/git/refs/tags/${tag}`, token);
-  if (r.status !== 204) {
-    throw new Error("删除 tag 失败: HTTP " + r.status + " " + JSON.stringify(r.data));
   }
 }
 
@@ -149,19 +140,12 @@ async function findReleaseByTag(token, tag) {
   return r.data;
 }
 
-async function deleteRelease(token, releaseId) {
-  const r = await api("DELETE", `/repos/${OWNER}/${REPO}/releases/${releaseId}`, token);
-  if (r.status !== 204) {
-    throw new Error("删除 Release 失败: HTTP " + r.status + " " + JSON.stringify(r.data));
-  }
-}
-
 async function createRelease(token, { tag, name, body }) {
   const r = await api("POST", `/repos/${OWNER}/${REPO}/releases`, token, {
     tag_name: tag,
     name,
     body,
-    draft: false,
+    draft: true,
     prerelease: false,
   });
   if (r.status !== 201) {
@@ -253,166 +237,98 @@ function makePrompt() {
   };
 }
 
-// ============================================================
-// 主流程
-// ============================================================
-async function main() {
-  log("");
-  log("==============================================");
-  log("   AssetHive 自动发布工具");
-  log("==============================================");
-  log("");
-
-  // 1. 读取版本号
-  if (!fs.existsSync(PACKAGE_PATH)) {
-    err("找不到 package.json");
-    process.exit(1);
+// 发布物在读取凭据之前检查，避免创建缺少附件或版本不匹配的 Release。
+async function createReleasePlan(version, directory = OUTPUT_DIR, sourceRoot = ROOT) {
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("版本号格式无效");
+  const names = [`AssetHive-${version}-Windows.msi`, `AssetHive-${version}-Windows-setup.exe`, `AssetHive-${version}-setup-win64.exe`];
+  const assets = [];
+  for (const name of names) {
+    const filePath = path.join(directory, name);
+    const size = fs.statSync(filePath).size;
+    if (size < 1048576) throw new Error(`安装包为空或不完整: ${name}`);
+    const checksumPath = filePath + ".sha256";
+    const checksum = fs.readFileSync(checksumPath, "utf8").trim().split(/\s+/);
+    if (!/^[a-f0-9]{64}$/i.test(checksum[0]) || checksum[1] !== name) throw new Error(`校验和文件格式或文件名不匹配: ${name}`);
+    const hash = createHash("sha256");
+    for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
+    if (hash.digest("hex") !== checksum[0].toLowerCase()) throw new Error(`SHA-256 不一致: ${name}`);
+    assets.push({ name, filePath, size, sha256: checksum[0].toLowerCase() });
+    assets.push({ name: name + ".sha256", filePath: checksumPath, size: fs.statSync(checksumPath).size });
   }
-  const pkg = JSON.parse(fs.readFileSync(PACKAGE_PATH, "utf8"));
-  let version = String(pkg.version || "").trim();
-  if (!/^\d+\.\d+\.\d+$/.test(version)) {
-    err(`package.json 中的版本号格式无效: "${version}"`);
-    process.exit(1);
-  }
-  log(`  当前 package.json 版本: ${version}`);
-
-  // 2. 认证
-  const token = getToken();
-  if (!token) {
-    err("未找到 GitHub 凭据（凭据管理器或 GITHUB_TOKEN）");
-    process.exit(1);
-  }
-  const valid = await verifyToken(token);
-  if (!valid) {
-    err("GitHub 凭据无效，请检查 Windows 凭据管理器中的 github.com 凭据");
-    process.exit(1);
-  }
-  log("  GitHub 凭据验证通过");
-
-  // 3. 检查远端 tag 是否已存在
-  const prompt = makePrompt();
-  const tag = RELEASE_TAG_PREFIX + version;
-  let overwrite = false;
-
-  if (await tagExists(token, tag)) {
-    warn(`远端已存在 tag ${tag}`);
-    const input = (await prompt.ask("  输入 [o] 覆盖重发该版本，或输入新版本号 (如 1.2.0): ")).trim();
-    if (input === "o" || input === "overwrite") {
-      overwrite = true;
-      log("  将覆盖该版本的 tag 与 Release 后重新发布");
-    } else if (/^\d+\.\d+\.\d+$/.test(input)) {
-      version = input;
-    } else {
-      err("输入无效，已取消");
-      prompt.close();
-      process.exit(1);
-    }
-  } else {
-    const input = (await prompt.ask(`  使用当前版本 v${version}？回车确认，或输入新版本号: `)).trim();
-    if (/^\d+\.\d+\.\d+$/.test(input)) version = input;
-  }
-
-  const finalTag = RELEASE_TAG_PREFIX + version;
-  const releaseName = `AssetHive v${version}`;
-  log("");
-  log(`  发布版本: ${finalTag}`);
-
-  // 4. 输入更新内容
-  log("");
-  log("  请输入本次更新内容 (release notes)，每行一条，空行结束:");
-  const notes = await prompt.readMultiLine();
-  if (!notes) {
-    warn("未输入更新内容");
-  }
-
-  // 5. 汇总确认
-  log("");
-  log("  --------------------------------------------");
-  log(`  版本:       ${finalTag}`);
-  log(`  更新内容:   ${notes ? notes.replace(/\n/g, " / ") : "(无)"}`);
-  log(`  发布仓库:   ${API}/repos/${OWNER}/${REPO}`);
-  log(`  说明:       仅发布 Release，不提交/推送源码`);
-  if (overwrite) {
-    err("  警告:       覆盖发布将删除远端该版本的旧 tag 与旧 Release 后重建");
-  }
-  log("  --------------------------------------------");
-  log("");
-  const confirm = (await prompt.ask("  确认发布？(y/N): ")).trim().toLowerCase();
-  if (confirm !== "y" && confirm !== "yes") {
-    log("  已取消");
-    prompt.close();
-    process.exit(0);
-  }
-
-  // 6. 创建 tag（轻量 tag，指向发布仓库 main 分支最新提交）
-  const branch = await getDefaultBranch(token);
-  const headSha = await getBranchHeadSha(token, branch);
-  log(`  在 ${branch} 分支最新提交上创建 tag ${finalTag} ...`);
-  if (await tagExists(token, finalTag)) {
-    if (overwrite) {
-      log(`  覆盖发布: 删除远端 tag ${finalTag} 与对应 Release ...`);
-      const rel = await findReleaseByTag(token, finalTag);
-      if (rel) {
-        await deleteRelease(token, rel.id);
-        ok(`  已删除旧 Release: ${rel.html_url}`);
-      } else {
-        log("  未找到对应 Release，跳过删除");
-      }
-      await deleteTag(token, finalTag);
-      await createLightweightTag(token, finalTag, headSha);
-      ok(`tag ${finalTag} 已重新创建`);
-    } else {
-      err(`远端已存在 tag ${finalTag}，且未选择覆盖，无法创建 Release`);
-      log("  请重新运行并选择覆盖 (输入 o) 或输入一个未发布过的新版本号");
-      prompt.close();
-      process.exit(1);
-    }
-  } else {
-    await createLightweightTag(token, finalTag, headSha);
-    ok(`tag ${finalTag} 已创建`);
-  }
-
-  // 7. 创建 GitHub Release
-  log("  创建 GitHub Release ...");
-  let release;
-  try {
-    release = await createRelease(token, {
-      tag: finalTag,
-      name: releaseName,
-      body: notes || `AssetHive ${version}`,
-    });
-  } catch (e) {
-    err(e.message);
-    log("  提示：tag 已创建，可到 GitHub 网页手动补建 Release");
-    process.exit(1);
-  }
-  ok(`Release 已创建: ${release.html_url}`);
-
-  // 8. 上传安装包
-  const exeName = `AssetHive-${version}-setup-win64.exe`;
-  const exePath = path.join(OUTPUT_DIR, exeName);
-  if (fs.existsSync(exePath)) {
-    try {
-      const asset = await uploadAsset(token, release.id, exePath, exeName);
-      ok(`安装包已上传: ${asset.browser_download_url}`);
-    } catch (e) {
-      warn("上传安装包失败: " + e.message);
-    }
-  } else {
-    warn(`未找到安装包 ${exeName}，请先运行 package_assethive_exe.bat 打包`);
-    warn("Release 已发布，可稍后在网页上手动上传附件");
-  }
-
-  prompt.close();
-
-  log("");
-  log("==============================================");
-  ok(`发布完成: ${finalTag}`);
-  log("  " + `https://github.com/${OWNER}/${REPO}/releases/tag/${finalTag}`);
-  log("==============================================");
+  return { repository: `${OWNER}/${REPO}`, version, tag: RELEASE_TAG_PREFIX + version, assets, source: getSourceProof(version, sourceRoot) };
 }
 
-main().catch((e) => {
+// 同时检查版本和完整应用源码，在创建任何标签或草稿之前拒绝旧源码。
+async function verifyRemoteSource(plan, token) {
+  const reference = await api('GET', `/repos/${OWNER}/${REPO}/git/ref/tags/${plan.tag}`, token);
+  let sha;
+  const createTag = reference.status === 404;
+  if (createTag) {
+    sha = await getBranchHeadSha(token, await getDefaultBranch(token));
+  } else {
+    if (reference.status !== 200) throw new Error(`无法读取发布标签: HTTP ${reference.status}`);
+    let object = reference.data.object;
+    while (object.type === 'tag') {
+      const annotated = await api('GET', `/repos/${OWNER}/${REPO}/git/tags/${object.sha}`, token);
+      if (annotated.status !== 200) throw new Error(`无法解析发布标签: HTTP ${annotated.status}`);
+      object = annotated.data.object;
+    }
+    sha = object.sha;
+  }
+  const descriptor = await api('GET', `/repos/${OWNER}/${REPO}/contents/package.json?ref=${sha}`, token);
+  if (descriptor.status !== 200) throw new Error(`无法读取发布仓库版本: HTTP ${descriptor.status}`);
+  const version = JSON.parse(Buffer.from(descriptor.data.content, 'base64').toString('utf8')).version;
+  const tree = await api('GET', `/repos/${OWNER}/${REPO}/git/trees/${sha}?recursive=1`, token);
+  if (tree.status !== 200 || tree.data.truncated) throw new Error('无法读取完整发布源码目录');
+  const files = Object.fromEntries(tree.data.tree.filter(entry => entry.type === 'blob' && isReleaseInput(entry.path)).map(entry => [entry.path, entry.sha]));
+  assertSourceMatches(plan.source, version, files);
+  return { sha, createTag };
+}
+
+// 附件上传失败时保留草稿，客户端只能发现附件齐全的正式版本。
+async function publishPlan(plan, token, notes) {
+  const existing = await findReleaseByTag(token, plan.tag);
+  if (existing) throw new Error(`Release ${plan.tag} 已存在，不覆盖；请检查现有发布状态`);
+  const source = await verifyRemoteSource(plan, token);
+  if (source.createTag) await createLightweightTag(token, plan.tag, source.sha);
+  const release = await createRelease(token, { tag: plan.tag, name: `AssetHive v${plan.version}`, body: notes });
+  for (const asset of plan.assets) await uploadAsset(token, release.id, asset.filePath, asset.name);
+  const result = await api("PATCH", `/repos/${OWNER}/${REPO}/releases/${release.id}`, token, { draft: false });
+  if (result.status !== 200) throw new Error(`草稿转为正式发布失败: HTTP ${result.status}`);
+  return result.data;
+}
+
+async function main() {
+  const version = String(JSON.parse(fs.readFileSync(PACKAGE_PATH, "utf8")).version || "").trim();
+  const plan = await createReleasePlan(version);
+  const notesIndex = process.argv.indexOf("--notes-file");
+  let notes = notesIndex < 0 ? "" : fs.readFileSync(path.resolve(process.argv[notesIndex + 1]), "utf8").trim();
+  log(`发布仓库: ${plan.repository}，版本: ${plan.tag}`);
+  for (const asset of plan.assets) log(`  ${asset.name} (${asset.size} bytes)`);
+  if (process.argv.includes("--dry-run")) {
+    log(notes || "尚未提供更新说明");
+    ok("本地发布物与 SHA-256 校验通过；未读取凭据、创建标签或发布");
+    return;
+  }
+  const prompt = makePrompt();
+  try {
+    if (!notes) {
+      log("请输入更新内容，每行一条，空行结束:");
+      notes = await prompt.readMultiLine();
+    }
+    if (!notes) throw new Error("更新说明不能为空");
+    log(notes);
+    const confirm = (await prompt.ask("确认发布当前版本？(y/N): ")).toLowerCase();
+    if (confirm !== "y" && confirm !== "yes") { log("已取消"); return; }
+    const token = getToken();
+    if (!token || !await verifyToken(token)) throw new Error("未找到有效 GitHub 凭据");
+    const release = await publishPlan(plan, token, notes);
+    ok(`发布完成: ${release.html_url}`);
+  } finally { prompt.close(); }
+}
+
+module.exports = { createReleasePlan, publishPlan, verifyRemoteSource };
+if (require.main === module) main().catch((e) => {
   err("发布过程中发生错误: " + (e && e.message ? e.message : e));
   process.exit(1);
 });

@@ -3,6 +3,12 @@
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "版本标签，例如 v2.3.5"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -18,27 +24,29 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       ASSETHIVE_NO_PAUSE: "1"
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v5
         with:
           lfs: true
+          ref: ${{ inputs.tag || github.ref_name }}
       - uses: actions/setup-node@v5
         with:
           node-version: "24.21.0"
           cache: npm
-      - name: Validate version and immutable release
+      - name: Validate source and existing release
+        id: preflight
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag must match package.json' }
-          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) { throw 'This release already exists; use a new version' }
-          $global:LASTEXITCODE = 0
-          if (-not (Test-Path "docs/release-notes-$version.md")) { throw 'Missing release notes' }
+          node scripts/verify-release-source.cjs --tag "$env:RELEASE_TAG" --check-published
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           "ASSETHIVE_VERSION=$version" >> $env:GITHUB_ENV
       - name: Install locked dependencies
+        if: steps.preflight.outputs.publish_needed == 'true'
         run: npm ci --include=optional
       - name: Check types and update compatibility
+        if: steps.preflight.outputs.publish_needed == 'true'
         shell: pwsh
         run: |
           npm run typecheck
@@ -48,6 +56,7 @@ jobs:
           npm run test:character
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Install official Inno Setup
+        if: steps.preflight.outputs.publish_needed == 'true'
         shell: pwsh
         run: |
           $release = gh api repos/jrsoftware/issrc/releases/tags/is-6_7_3 | ConvertFrom-Json
@@ -58,9 +67,10 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $installer
           if ((Get-AuthenticodeSignature $installer).Status -ne 'Valid') { throw 'Invalid Inno Setup signature' }
           $target = Join-Path $env:GITHUB_WORKSPACE 'tools/InnoSetup'
-          $process = Start-Process $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/NOICONS',"/DIR=$target" -Wait -PassThru
+          $process = Start-Process $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/NOICONS',"/DIR=$target" -WindowStyle Hidden -Wait -PassThru
           if ($process.ExitCode) { throw 'Inno Setup installation failed' }
       - name: Build and verify Windows installers
+        if: steps.preflight.outputs.publish_needed == 'true'
         shell: pwsh
         run: |
           npm run package:msi -- -KeepStage
@@ -68,6 +78,7 @@ jobs:
           node scripts/verify-release-package.cjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Optional signing and final checksums
+        if: steps.preflight.outputs.publish_needed == 'true'
         shell: pwsh
         env:
           CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
@@ -90,6 +101,7 @@ jobs:
             "$hash  $name" | Set-Content "$file.sha256" -Encoding ascii
           }
       - name: Publish immutable release
+        if: steps.preflight.outputs.publish_needed == 'true'
         shell: pwsh
         run: |
           $assets = @()
@@ -98,5 +110,5 @@ jobs:
             $assets += $file
             $assets += "$file.sha256"
           }
-          gh release create $env:GITHUB_REF_NAME @assets --repo $env:GITHUB_REPOSITORY --verify-tag --title "AssetHive $env:ASSETHIVE_VERSION" --notes-file "docs/release-notes-$env:ASSETHIVE_VERSION.md" --latest
+          gh release create $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY --verify-tag --title "AssetHive $env:ASSETHIVE_VERSION" --notes-file "docs/release-notes-$env:ASSETHIVE_VERSION.md" --latest
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

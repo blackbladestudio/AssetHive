@@ -3,7 +3,7 @@ const Fuse = require("fuse.js");
 const FUSE_OPTIONS = {
   includeScore: true,
   threshold: 0.35,
-  keys: ["id", "slug", "name", "tags", "zionTags", "path"]
+  keys: ["id", "slug", "name", "tags", "zionTags", "animationLabels", "animationGameTag.name", "animationGameTag.id", "path"]
 };
 
 const RESULT_CACHE_LIMIT = 200;

@@ -147,9 +147,8 @@ function recoveryFixture({ active = false, exports = 0, response = 0, showDialog
     quitting: false, rendererRecoveryPending: false, activeExportCalls: exports,
     hasActiveBackgroundImport: () => active,
     index: [{ id: "cached" }],
-    writeLog: (...args) => calls.logs.push(args),
-    app: { quit: () => { calls.quit++; }, relaunch: () => { calls.relaunch++; },
-      getAppMetrics: () => [{ pid: 42, type: "Browser", memory: { privateBytes: 1024 } }] },
+    diagnostics: { recordIncident: (...args) => calls.logs.push(args) },
+    app: { quit: () => { calls.quit++; }, relaunch: () => { calls.relaunch++; } },
     win: { isDestroyed: () => false, webContents: { on: (_name, callback) => { handler = callback; } } },
     dialog: { showMessageBox: async (_win, options) => {
       calls.dialogs.push(options);
@@ -165,8 +164,7 @@ test("renderer launch failure lets the user restart or exit the old process", as
   for (const response of [0, 1]) {
     const f = recoveryFixture({ response });
     await f.fail();
-    assert.equal(f.calls.logs[0][2].assetCount, 1);
-    assert.deepEqual(f.calls.logs[0][2].processes, [{ pid: 42, type: "Browser", memory: { privateBytes: 1024 } }]);
+    assert.deepEqual(f.calls.logs[0], ["render-process-gone", { reason: "launch-failed", exitCode: 65, assetCount: 1 }, { persist: true }]);
     assert.equal(f.calls.quit, 1);
     assert.equal(f.calls.relaunch, response === 0 ? 1 : 0);
     assert.deepEqual(f.calls.dialogs[0].buttons, ["重新启动", "关闭软件"]);

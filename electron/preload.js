@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("arkhive", {
       responseWaitMs: navigation.responseStart - navigation.requestStart
     } : undefined });
   },
+  reportCharacterPreviewDiagnostic: (payload) => ipcRenderer.send("app:characterPreviewDiagnostic", payload),
   getThreeDCoatImportInfo: (assetId) => ipcRenderer.invoke("threeDCoat:info", assetId),
   getThreeDCoatStatus: () => ipcRenderer.invoke("threeDCoat:status"),
   configureThreeDCoat: (patch) => ipcRenderer.invoke("threeDCoat:configure", patch),
@@ -75,6 +76,10 @@ contextBridge.exposeInMainWorld("arkhive", {
   foliageOpaqueStatus: () => ipcRenderer.invoke("assets:foliageOpaqueStatus"),
   regenerateFoliageOpaque: (payload) => ipcRenderer.invoke("assets:regenerateFoliageOpaque", payload),
   updateCustomAsset: (payload) => ipcRenderer.invoke("assets:updateCustom", payload),
+  getAnimationUnrealStatus: (assetId) => ipcRenderer.invoke('animation:unrealStatus', assetId),
+  getAnimationUnrealFolders: () => ipcRenderer.invoke('animation:unrealFolders'),
+  pickAnimationUnrealFolder: (request) => ipcRenderer.invoke('animation:pickUnrealFolder', request),
+  getAnimationExportTargets: (request) => ipcRenderer.invoke('animation:exportTargets', request),
   setZionExportSubfolder: (payload) => ipcRenderer.invoke("assets:setZionExportSubfolder", payload),
   cropPreviewSelection: (payload) => ipcRenderer.invoke("assets:cropPreviewSelection", payload),
   autoPreviewCutout: (payload) => ipcRenderer.invoke("assets:autoPreviewCutout", payload),
@@ -92,6 +97,7 @@ contextBridge.exposeInMainWorld("arkhive", {
   exportToBlender: (payload) => ipcRenderer.invoke("assets:exportToBlender", payload),
   copyText: (text) => ipcRenderer.invoke("assets:copyText", text),
   openFolder: (path) => ipcRenderer.invoke("assets:openFolder", path),
+  revealAssetArchive: (assetId) => ipcRenderer.invoke("assets:revealArchive", assetId),
   revealCharacterModel: (payload) => ipcRenderer.invoke("assets:revealCharacterModel", payload),
   revealCharacterTexture: (payload) => ipcRenderer.invoke("assets:revealCharacterTexture", payload),
   onExportProgress: (callback) => {
@@ -157,6 +163,8 @@ contextBridge.exposeInMainWorld("arkhive", {
     return () => ipcRenderer.removeListener("plugins:installProgress", subscription);
   },
   getPluginStatus: (payload) => ipcRenderer.invoke("plugins:getStatus", payload),
+  getAnimationGameTagOptions: () => ipcRenderer.invoke("animation:getGameTagOptions"),
+  resolveAnimationPreviewRig: (payload) => ipcRenderer.invoke("animation:resolvePreviewRig", payload),
   // 不透明裁切的透明度来源体检（开启 OPAQUE 前先问一次，不可用就禁用入口）。
   getFoliageOpaqueMaskStatus: (payload) => ipcRenderer.invoke("assets:foliageOpaqueMaskStatus", payload),
   // 「输出日志」窗口：历史尾部读取 + 实时订阅 + 打开所在文件夹 / 清空。

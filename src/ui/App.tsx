@@ -10,16 +10,25 @@ import { partitionCharacterPackageFiles, isAllowedCharacterTextureFile } from ".
 import type { AppSettings, AssetRecord, TextureAnalysis } from "../types";
 import { monsterBodyMetrics, characterDisplayName, componentParentId, characterComponentLabel, listCharacterComponents, characterModelPreviewComponents, characterMeshAssetRecord, componentAssetRecord, expandCharacterCards, activeCharacterFiles, characterRigProgress, characterRigReviewSignature, characterModelGroups, characterModelUpdateGroups } from "../../shared/characterComponents.mjs";
 import { WEAPON_TYPES, weaponCategory, splitWeaponPackage } from "../../shared/weaponRules.mjs";
+import { parseAnimationLabels } from "../../shared/animationUnrealExport.mjs";
+import animationImportRules from '../../shared/animation-import-rules.json';
+import { animationPlanningLabels, syncAnimationPlanning } from './animationRules';
+import { animationGameTagKind, formatAnimationGameTag, syncAnimationGameTag, type AnimationGameTag, type AnimationGameTagOption } from "../../shared/animationGameTags.mjs";
+import { getAnimationNavigationSelection, animationNavigationNodes, matchesAnimationNavigation, animationNodeForAsset } from "./animationNavigation";
 import { finishCharacterImportTasks } from "../../shared/characterImportTasks.mjs";
 import { DEFAULT_CHARACTER_FILTERS, defaultCharacterFilters, characterStatus, characterFilterContext, characterFilterDefinitions, changeCharacterFilter, filterCharacterCards, deduplicateCharacterCategoryTags, matchesCharacterCategoryTag, type CharacterFilters } from "../../shared/characterFilters.mjs";
 import { resolveZion3DCategoryFolder } from "./unrealExportPaths";
-import { buildAssetGridLayout, getCardWidthClass, getGridPlaceholderTop, getVisibleAssetGridItems, getAssetGridItemsInRange, getDirectionalGridItem, type GridDirection, type AssetGridItemLayout } from "./assetGridLayout";
+import { buildAssetGridLayout, MAX_CARD_SCALE, MIN_CARD_SCALE, getCardWidthClass, getGridPlaceholderTop, getVisibleAssetGridItems, getAssetGridItemsInRange, getDirectionalGridItem, type GridDirection, type AssetGridItemLayout } from "./assetGridLayout";
 import { AssetThumbnail } from "./AssetThumbnail";
 import { ImportPreviewThumbnail } from "./ImportPreviewThumbnail";
 import { DetailPreview } from "./DetailPreview";
 import { ImagePreviewModal } from "./ImagePreviewModal";
 import { ThreeDCoatImportModal } from "./ThreeDCoatImportModal";
 import { SuitExportDialog } from "./SuitExportDialog";
+import { AnimationExportDialog } from "./AnimationExportDialog";
+import { AnimationAssetActivity } from './AnimationAssetActivity';
+import { AnimationRulesPanel } from './AnimationRulesPanel';
+import { AnimationSendBadge } from './AnimationSendBadge';
 import { DialogCloseButton } from "./DialogCloseButton";
 import { CharacterRigPanel } from './CharacterRigPanel';
 import { MonsterModelPanel } from './MonsterModelPanel';
@@ -34,7 +43,8 @@ import type { ThreeDCoatConnection } from "../threeDCoat";
 import { PreviewLoader } from "./previewLoader";
 import { AnimationCoverQueue, type AnimationCoverTarget } from "./animationCoverQueue";
 import { getPreviewUrl } from "./previewUrl";
-import { evaluateAnimationImportRules, getAnimationAssetNameIssue, getAnimationRuleErrors, type AnimationFbxStats } from "./animationRules";
+import { evaluateUnifiedAnimationRules as evaluateAnimationImportRules, loadAnimationRuleReference } from "./animationRuleEvaluation";
+import { getAnimationAssetNameIssue, getMissingAnimationFields, suggestAnimationArchiveRelativePath, type AnimationFbxStats } from "./animationRules";
 import { parseSearchTags } from "./assetSearch";
 import { createAssetIndexSync } from "./assetIndexSync";
 import {
@@ -104,13 +114,19 @@ import unrealWordmark from "./icons/wordmarks/unrealengine.svg";
 
 const AnimationPreview = lazy(() => import("./AnimationPreview").then(module => ({ default: module.AnimationPreview })));
 
-function AnimationCoverWorker({ queue, loader, bridge, enabled }: {
+function AnimationCoverWorker({ queue, loader, bridge, enabled, assets, resolveRig, rememberedRig }: {
+  assets: AssetRecord[];
+  resolveRig: Parameters<typeof useAutoAnimationRig>[0];
+  rememberedRig: AnimationPreviewRig;
   queue: AnimationCoverQueue;
   loader: PreviewLoader;
   bridge: typeof window.arkhive;
   enabled: boolean;
 }) {
   const target = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
+  const captureAsset = assets.find(asset => asset.id === target?.assetId);
+  const autoRig = useAutoAnimationRig(resolveRig, target?.modelPath || '', captureAsset?.animationGameTag?.id);
+  const rig = chooseAnimationPreviewRig({ skeletonPath: captureAsset?.previewSkeletonPath, skeletalMeshPath: captureAsset?.previewSkeletalMeshPath }, autoRig || '', rememberedRig);
   const [prepared, setPrepared] = useState<{ target: AnimationCoverTarget; key: string } | null>(null);
   useEffect(() => {
     const update = () => queue.setEnabled(Boolean(enabled && bridge?.getAnimationPreview && bridge.cacheAnimationPreview)
@@ -139,10 +155,10 @@ function AnimationCoverWorker({ queue, loader, bridge, enabled }: {
     return () => { active = false; window.clearTimeout(timer); };
   }, [queue, target, bridge, loader]);
 
-  if (!target || prepared?.target !== target) return null;
-  const { assetId, modelPath, skeletonPath, skeletalMeshPath } = target;
+  if (!target || prepared?.target !== target || autoRig === undefined) return null;
+  const { assetId, modelPath } = target;
   return <Suspense fallback={null}>
-    <AnimationPreview key={modelPath} filePath={modelPath} skeletonPath={skeletonPath} skeletalMeshPath={skeletalMeshPath}
+    <AnimationPreview key={modelPath} filePath={modelPath} skeletonPath={rig.skeletonPath} skeletalMeshPath={rig.skeletalMeshPath}
       emptyLabel="" playLabel="" pauseLabel="" failedLabel="" missingMeshLabel="" captureOnly
       onMotionCapture={async capture => {
         const blob = await capture();
@@ -157,9 +173,10 @@ function AnimationCoverWorker({ queue, loader, bridge, enabled }: {
   </Suspense>;
 }
 
-async function loadAnimationFbxStats(filePath: string, skeletonPath = "") {
+type ImportRuleReference = import('./animationMonsterRules').MonsterLoopReference;
+async function loadAnimationFbxStats(filePath: string, skeletonPath = "", revision = "") {
   const module = await import("./animationFbxStats");
-  return module.loadAnimationFbxStats(filePath, skeletonPath);
+  return module.loadAnimationFbxStats(filePath, skeletonPath, revision);
 }
 
 // 植被不透明裁切变体：透贴优先级与主进程保持一致，用于导入界面可用性提示。
@@ -519,6 +536,8 @@ function Icon({ name }: { name: string }) {
           <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
         </svg>
       );
+    case "search-folder":
+      return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 18H3V5h6l2 3h10v5" /><circle cx="16" cy="16" r="4" /><path d="m19 19 3 3" /></svg>;
     case "zoom":
       return (
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1321,9 +1340,9 @@ const categoryTree: CategoryNode[] = [
         id: "animation",
         label: "Animation",
         children: [
-          { id: "animation-hero", label: "主角", children: ["基础移动", "攻击", "受击"] },
-          { id: "animation-monster", label: "怪物", children: ["基础移动", "攻击", "受击"] },
-          { id: "animation-npc", label: "NPC", children: ["基础移动", "攻击", "受击"] }
+          { id: "animation-hero", label: "主角", children: [] },
+          { id: "animation-monster", label: "怪物", children: [] },
+          { id: "animation-npc", label: "NPC", children: [] }
         ]
       }
     ]
@@ -1773,13 +1792,9 @@ const assetTypeDisplayLabels: Record<string, [string, string]> = {
 const LAST_IMPORT_DESTINATION_STORAGE_KEY = "assethive.lastImportDestination";
 const ANIMATION_PREVIEW_RIG_STORAGE_KEY = "assethive.animationPreviewRig";
 const DEFAULT_ANIMATION_SKELETON_PATH = "\\\\fileshare\\share\\Artist\\Animation\\Rig\\Character\\SK_Male\\SK_Male.fbx";
-const ANIMATION_TYPE_OPTIONS = ["基础移动", "攻击", "受击"] as const;
+const ANIMATION_TYPE_OPTIONS = animationImportRules.types.map(type => type.name);
 const ANIMATION_TYPE_SET = new Set<string>(ANIMATION_TYPE_OPTIONS);
-const ANIMATION_TYPE_DISPLAY_LABELS: Record<string, [string, string]> = {
-  基础移动: ["基础移动", "Locomotion"],
-  攻击: ["攻击", "Attack"],
-  受击: ["受击", "Hit"]
-};
+const ANIMATION_TYPE_DISPLAY_LABELS: Record<string, [string, string]> = Object.fromEntries(animationImportRules.types.map(type => [type.name, [type.name, type.english]]));
 const ANIMATION_AFFILIATION_OPTIONS = ["主角", "怪物", "NPC"] as const;
 const ANIMATION_AFFILIATION_SET = new Set<string>(ANIMATION_AFFILIATION_OPTIONS);
 const ANIMATION_AFFILIATION_DISPLAY_LABELS: Record<string, [string, string]> = {
@@ -1842,6 +1857,17 @@ function withAnimationTypeFields<T extends { assetType: string; subCategory: str
   };
 }
 
+function syncAnimationArchiveForm(form: ImportFormState, libraryRoot: string): ImportFormState {
+  if (form.assetType !== 'animation') return form;
+  form = syncAnimationPlanning(form);
+  if (form.animationArchiveManual) return form;
+  const fileName = getFirstFbxPath(Object.values(form.modelSlots)).replaceAll('\\', '/').split('/').pop() || '';
+  const relative = suggestAnimationArchiveRelativePath(form.assetName === defaultImportForm.assetName ? fileName : form.assetName,
+    resolveAnimationAffiliationValue(form.animationAffiliation, form.zionTags), resolveAnimationTypeValue(form.zionTags, form.subCategory));
+  const destinationPath = joinLibraryPath(libraryRoot, relative);
+  return destinationPath === form.destinationPath ? form : { ...form, destinationPath };
+}
+
 function readAnimationPreviewRig(): AnimationPreviewRig {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(ANIMATION_PREVIEW_RIG_STORAGE_KEY) || "{}");
@@ -1862,6 +1888,50 @@ function rememberAnimationPreviewRig(rig: Partial<AnimationPreviewRig>) {
   window.localStorage.setItem(ANIMATION_PREVIEW_RIG_STORAGE_KEY, JSON.stringify(next));
   return next;
 }
+
+const ASSET_CARD_SCALE_STORAGE_KEY = "assethive.assetCardScale";
+
+function readAssetCardScale() {
+  const value = Number(window.localStorage.getItem(ASSET_CARD_SCALE_STORAGE_KEY));
+  return Number.isFinite(value) && value > 0 ? Math.min(MAX_CARD_SCALE, Math.max(MIN_CARD_SCALE, value)) : 1;
+}
+
+const ANIMATION_RIG_ROOT = "\\\\fileshare\\share\\Artist\\Animation\\Rig";
+const autoAnimationRigCache = new Map<string, Promise<string>>();
+
+// Monster clips cannot play on the default hero skeleton; find the rig named
+// after the character (AS_<Name>_... or the Monster_<Name> game tag).
+function useAutoAnimationRig(resolve: ((payload: { rigRoot: string; animationPath: string; gameTagId?: string }) => Promise<string>) | undefined, animationPath: string, gameTagId = "") {
+  const key = `${animationPath}|${gameTagId}`.toLowerCase();
+  const [resolved, setResolved] = useState<{ key: string; path: string } | null>(null);
+  useEffect(() => {
+    setResolved(null);
+    if (!resolve || !animationPath) return;
+    let pending = autoAnimationRigCache.get(key);
+    if (!pending) {
+      pending = resolve({ rigRoot: ANIMATION_RIG_ROOT, animationPath, gameTagId }).then((value) => String(value || ""), () => "");
+      autoAnimationRigCache.set(key, pending);
+    }
+    let active = true;
+    void pending.then((value) => { if (active) setResolved({ key, path: value }); });
+    return () => { active = false; };
+  }, [resolve, animationPath, gameTagId, key]);
+  return !resolve || !animationPath ? "" : resolved?.key === key ? resolved.path : undefined;
+}
+
+function chooseAnimationPreviewRig(explicit: Partial<AnimationPreviewRig>, autoSkeletonPath: string, remembered: AnimationPreviewRig): AnimationPreviewRig {
+  const explicitSkeleton = String(explicit.skeletonPath || "").trim();
+  const explicitMesh = String(explicit.skeletalMeshPath || "").trim();
+  if (explicitMesh || (explicitSkeleton && explicitSkeleton !== DEFAULT_ANIMATION_SKELETON_PATH)) {
+    return { skeletonPath: explicitSkeleton || DEFAULT_ANIMATION_SKELETON_PATH, skeletalMeshPath: explicitMesh };
+  }
+  if (autoSkeletonPath) return { skeletonPath: autoSkeletonPath, skeletalMeshPath: "" };
+  return {
+    skeletonPath: remembered.skeletonPath || DEFAULT_ANIMATION_SKELETON_PATH,
+    skeletalMeshPath: remembered.skeletalMeshPath || ""
+  };
+}
+
 const defaultImportRelativeDirByAssetType: Record<string, string> = {
   "3d": "Environment\\3D Assets",
   "3dplant": "Environment\\Foliage",
@@ -1890,7 +1960,7 @@ function isAnimatedPreviewPath(filePath: string) {
 
 function getAssetThumbnailSource(asset: AssetRecord) {
   const preview = String(asset.previewImage || asset.preview || "").trim();
-  return asset.assetType === "animation" && !isAnimatedPreviewPath(preview)
+  return asset.assetType === "animation"
     ? getFirstFbxPath(asset.modelFiles || []) || preview
     : preview;
 }
@@ -2689,6 +2759,7 @@ const AssetCard = memo(({
   monsterFormCounter = "01/01",
   savingProgress = -1,
   uiLanguage,
+  animationProjectPath = '',
   x, y, width, height
 }: {
   asset: AssetRecord;
@@ -2711,6 +2782,7 @@ const AssetCard = memo(({
   monsterFormCounter?: string;
   savingProgress?: number;
   uiLanguage: "zh" | "en";
+  animationProjectPath?: string;
   exportTitle?: string;
   exportTarget?: "unreal" | "blender" | "3dcoat";
   x: number;
@@ -2742,6 +2814,8 @@ const AssetCard = memo(({
   const componentView = asset.meta?.componentView as { parentId: string; visibleMeshKind?: "staticMesh" | "skeletalMesh"; meshSlots?: Record<"staticMesh" | "skeletalMesh", { hasModel?: boolean; previewPath?: string }> } | undefined;
   const componentMeshSlots = componentView?.meshSlots;
   const cardAssetName = characterDisplayName(asset);
+  const cardAnimationLabels = String(asset.assetType || "").trim().toLowerCase() === "animation" ? asset.animationLabels || [] : [];
+  const cardAnimationGameTag = String(asset.assetType || "").trim().toLowerCase() === "animation" ? asset.animationGameTag : undefined;
   const characterChineseName = String(characterInfo?.fields.displayNameZh || "").trim();
   const heroPart = characterInfo ? heroPartKind(characterInfo.fields) : '';
   const cardManifest = asset.meta?.characterManifest as { files?: Array<{ storedPath?: string; normalizedName?: string }> } | undefined;
@@ -2839,7 +2913,7 @@ const AssetCard = memo(({
         )}
       </button>}
       <div
-        className={`thumb ${String(asset.assetType || "").trim().toLowerCase() === "hdri" ? "thumb-hdri" : ""}${componentMeshSlots ? " character-component-mesh-grid" : ""}`}
+        className={`thumb ${String(asset.assetType || "").trim().toLowerCase() === "hdri" ? "thumb-hdri" : ""}${String(asset.assetType || "").trim().toLowerCase() === "animation" ? " thumb-animation" : ""}${componentMeshSlots ? " character-component-mesh-grid" : ""}`}
         style={componentMeshSlots ? { gridTemplateRows: componentView?.visibleMeshKind ? "minmax(0, 1fr)" : "repeat(2, minmax(0, 1fr))" } : String(asset.assetType || "").trim().toLowerCase() === "hdri" ? { padding: 0 } : undefined}
       >
         {componentMeshSlots ? (["staticMesh", "skeletalMesh"] as const).filter(kind => !componentView?.visibleMeshKind || kind === componentView.visibleMeshKind).map(kind => {
@@ -2874,6 +2948,11 @@ const AssetCard = memo(({
             ? () => setFailedAnimationCover(sourcePath) : undefined}
           fallback={<div style={{ opacity: 0.7 }}><Icon name="image-preview" /></div>}
         />}
+        {(cardAnimationLabels.length > 0 || cardAnimationGameTag) && <div className="animation-labels animation-card-labels">
+          {cardAnimationGameTag && <span className="animation-game-tag" title={cardAnimationGameTag.id}>{cardAnimationGameTag.name}</span>}
+          {cardAnimationLabels.map(label => <span key={label}>{label}</span>)}
+        </div>}
+        {asset.assetType === 'animation' && <AnimationSendBadge asset={asset} language={uiLanguage} projectPath={animationProjectPath} />}
       </div>
       {characterInfo && !componentView && characterRigProgress(asset).needsAttention && <span className="character-model-rig-dot character-owner-rig-dot" title={uiLanguage === 'en' ? 'Rigging needs attention' : '请查看绑定提醒'} />}
       {characterInfo && !componentView && <span className="character-card-family" style={{ '--character-name-length': Math.max(1, Array.from(characterChineseName).length) } as CSSProperties}>{!heroPart && <span className="character-card-chinese-name">{characterChineseName}</span>}<span className={`character-card-status status-${characterStatus(characterInfo.maturity).value}`} lang={uiLanguage === "en" ? "en" : "zh"}>{characterStatus(characterInfo.maturity)[uiLanguage === "en" ? "en" : "zh"]}</span></span>}
@@ -2887,7 +2966,7 @@ const AssetCard = memo(({
             {heroPartLabel && !componentView && <span className="character-card-category">{heroPartLabel}</span>}
           </div>
         </div>
-      ) : !characterInfo ? <div className="name">{cardAssetName}</div> : null}
+      ) : !characterInfo && asset.assetType !== 'animation' ? <div className="name">{cardAssetName}</div> : null}
       {savingProgress >= 0 && (
         <div
           className={`card-saving-mask ${saveComplete ? "complete" : ""}`}
@@ -3028,7 +3107,9 @@ const DarkSelect = memo(({
   itemClassName = "",
   ariaLabel,
   title,
-  invalid = false
+  invalid = false,
+  searchPlaceholder,
+  emptySearchLabel
 }: {
   value: string;
   mixed?: boolean;
@@ -3045,11 +3126,17 @@ const DarkSelect = memo(({
   ariaLabel: string;
   title?: string;
   invalid?: boolean;
+  searchPlaceholder?: string;
+  emptySearchLabel?: string;
 }) => {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement | null>(null);
   const activeOption = options.find((option) => option.value === value) || options[0];
   const multiSelect = options.some(option => option.checked !== undefined);
+  const filteredOptions = searchPlaceholder && query.trim()
+    ? options.filter(option => `${option.label} ${option.value}`.toLowerCase().includes(query.trim().toLowerCase()))
+    : options;
 
   useEffect(() => {
     const onPointerDown = (event: MouseEvent) => {
@@ -3089,13 +3176,17 @@ const DarkSelect = memo(({
             return;
           }
           setOpen((prev) => !prev);
+          setQuery("");
         }}
       >
         <span>{mixed ? "Multiple Value" : triggerContent ?? <>{activeOption?.icon}{activeOption?.labelContent ?? (activeOption?.label || value)}</>}</span>
       </button>
       {open && !lockOpen && (
-        <div className={`dark-select-menu ${menuClassName}`.trim()} role="listbox" aria-multiselectable={multiSelect || undefined} aria-label={ariaLabel}>
-          {options.map((option) => (
+        <div className={`dark-select-menu ${menuClassName}`.trim()}>
+          {searchPlaceholder && <input className="dark-select-search" autoFocus value={query} placeholder={searchPlaceholder}
+            aria-label={searchPlaceholder} onChange={event => setQuery(event.target.value)} />}
+          <div role="listbox" aria-multiselectable={multiSelect || undefined} aria-label={ariaLabel}>
+          {filteredOptions.map((option) => (
             <button
               key={option.value}
               type="button"
@@ -3115,11 +3206,15 @@ const DarkSelect = memo(({
               {option.icon}{option.labelContent ?? option.label}
             </button>
           ))}
+          {!filteredOptions.length && <div className="dark-select-empty" role="status">{emptySearchLabel}</div>}
+          </div>
         </div>
       )}
     </div>
   );
 });
+
+
 
 function monsterFormLabel(asset: AssetRecord, language: string) {
   const ids = (asset.meta?.character as Partial<CharacterImportFields> | undefined)?.formIds || [];
@@ -3350,19 +3445,6 @@ function isTaxonomyTag(tag: unknown, taxonomyTagKeys: Set<string>) {
   return taxonomyTagKeys.has(normalizeTagKey(tag));
 }
 
-function assetHasAnimationAffiliation(asset: AssetRecord, affiliation: string) {
-  const wanted = normalizeThemeToken(affiliation);
-  if (!wanted) return false;
-  const stored = String(asset.animationAffiliation || (asset.meta as { animationAffiliation?: string } | undefined)?.animationAffiliation || "").trim();
-  if (stored && normalizeThemeToken(stored) === wanted) return true;
-  const tags = [
-    ...(asset.tags || []),
-    ...(asset.zionTags || []),
-    ...(Array.isArray(asset.themes) ? asset.themes : [])
-  ].map((tag) => normalizeThemeToken(String(tag || "")));
-  return tags.includes(wanted);
-}
-
 function CharacterAdvancedConfiguration({ enabled, children }: { enabled: boolean; children: ReactNode }) {
   return enabled ? <details className="character-import-advanced"><summary>高级配置 · 模型与贴图（可选）</summary>{children}</details> : <>{children}</>;
 }
@@ -3575,7 +3657,12 @@ export function App() {
   const importDedupeQueueRef = useRef<Array<{ index: number; form: ImportFormState; signature: string }>>([]);
   const importDedupeRunningRef = useRef(false);
   const [animationPreviewRig, setAnimationPreviewRig] = useState<AnimationPreviewRig>(readAnimationPreviewRig);
+  const [animationMotionHost, setAnimationMotionHost] = useState<HTMLDivElement | null>(null);
+  const [animationGameTagOptions, setAnimationGameTagOptions] = useState<{ weapons: AnimationGameTagOption[]; monsters: AnimationGameTagOption[] }>({ weapons: [], monsters: [] });
+  const animationNavigationOptions = useMemo(() => [...animationGameTagOptions.weapons, ...animationGameTagOptions.monsters], [animationGameTagOptions]);
+  const [assetFocusRequest, setAssetFocusRequest] = useState("");
   const [importAnimationStats, setImportAnimationStats] = useState<AnimationFbxStats | null>(null);
+  const [importAnimationReference, setImportAnimationReference] = useState<ImportRuleReference>({});
   const [importAnimationStatsLoading, setImportAnimationStatsLoading] = useState(false);
   const [characterPreviewGenerating, setCharacterPreviewGenerating] = useState(false);
   const [characterPreviewProgress, setCharacterPreviewProgress] = useState({ done: 0, total: 0 });
@@ -4075,6 +4162,29 @@ export function App() {
   const isAllOverviewView = (activeMenu === "home" && !hasActiveSearch) || isCharacterOverviewView;
 
   const compactAssetGrid = Boolean(selectedAssetId);
+  const isAnimationGrid = activeMenu === "animation" || Boolean(getAnimationNavigationSelection(activeMenu))
+    || (orderedAssets.length > 0 && orderedAssets.every(asset => asset.assetType === "animation"));
+  const [assetCardScale, setAssetCardScale] = useState(readAssetCardScale);
+  const cardScaleScrollRatioRef = useRef<number | null>(null);
+  useEffect(() => {
+    const node = assetStageRef.current;
+    if (!node || !isAnimationGrid) return;
+    // Animation cards zoom with the wheel; Shift keeps list scrolling.
+    const onWheel = (event: WheelEvent) => {
+      if (event.shiftKey || event.deltaY === 0) return;
+      if ((event.target as HTMLElement).closest("input, textarea, select, .dark-select-menu")) return;
+      event.preventDefault();
+      setAssetCardScale((prev) => {
+        const next = Math.round(Math.min(MAX_CARD_SCALE, Math.max(MIN_CARD_SCALE, prev * (event.deltaY < 0 ? 1.1 : 1 / 1.1))) * 100) / 100;
+        if (next === prev) return prev;
+        cardScaleScrollRatioRef.current = node.scrollHeight > 0 ? node.scrollTop / node.scrollHeight : 0;
+        window.localStorage.setItem(ASSET_CARD_SCALE_STORAGE_KEY, String(next));
+        return next;
+      });
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, [isAnimationGrid]);
   const [characterSizingWidth, setCharacterSizingWidth] = useState<number>();
   const inCharacterContext = Boolean(characterContext);
   useLayoutEffect(() => {
@@ -4090,15 +4200,35 @@ export function App() {
   }, [inCharacterContext]);
   const packedAssetGrid = useMemo(
     () => {
-      return buildAssetGridLayout(orderedAssets, assetStageMetrics.viewportWidth, compactAssetGrid, undefined, Boolean(characterContext && characterFilters.display === "all"), Boolean(characterContext), undefined, characterSizingWidth, activeMenu === "character" && characterFilters.display === "all");
+      return buildAssetGridLayout(orderedAssets, assetStageMetrics.viewportWidth, compactAssetGrid, undefined, Boolean(characterContext && characterFilters.display === "all"), Boolean(characterContext), undefined, characterSizingWidth, activeMenu === "character" && characterFilters.display === "all", isAnimationGrid ? assetCardScale : 1);
     },
-    [orderedAssets, assetStageMetrics.viewportWidth, compactAssetGrid, characterContext, characterFilters.display, characterSizingWidth, activeMenu]
+    [orderedAssets, assetStageMetrics.viewportWidth, compactAssetGrid, characterContext, characterFilters.display, characterSizingWidth, activeMenu, assetCardScale, isAnimationGrid]
   );
+  useLayoutEffect(() => {
+    const node = assetStageRef.current;
+    const ratio = cardScaleScrollRatioRef.current;
+    if (!node || ratio === null) return;
+    cardScaleScrollRatioRef.current = null;
+    node.scrollTop = ratio * node.scrollHeight;
+  }, [packedAssetGrid]);
   const assetGridLayout = useMemo(() => ({
     ...packedAssetGrid,
     totalHeight: Math.max(assetStageMetrics.viewportHeight, packedAssetGrid.totalHeight),
     visibleItems: getVisibleAssetGridItems(packedAssetGrid.items, assetStageMetrics.viewportHeight, assetStageMetrics.scrollTop, packedAssetGrid.cardHeight)
   }), [packedAssetGrid, assetStageMetrics.viewportHeight, assetStageMetrics.scrollTop]);
+  useEffect(() => {
+    if (!assetFocusRequest) return;
+    const item = assetGridLayout.items.find(item => item.asset.id === assetFocusRequest);
+    const stage = assetStageRef.current;
+    if (!item || !stage) return;
+    stage.scrollTo({ top: Math.max(0, item.y - (stage.clientHeight - item.height) / 2), behavior: "instant" });
+    const card = document.getElementById(`asset-card-${assetFocusRequest}`);
+    if (card) {
+      card.classList.add("flash-highlight");
+      setTimeout(() => card.classList.remove("flash-highlight"), 1000);
+      setAssetFocusRequest("");
+    }
+  }, [assetFocusRequest, assetGridLayout]);
   useLayoutEffect(() => {
     renderedGridScrollTopRef.current = assetStageMetrics.scrollTop;
     // The scroll handler runs outside React, so mirror the row geometry it needs.
@@ -4244,14 +4374,8 @@ export function App() {
             && environmentTypes.includes(String(asset.assetType || "").trim().toLowerCase());
         });
       }
-      else if (ANIMATION_AFFILIATION_BY_NODE_ID[activeMenu]) {
-        const affiliation = ANIMATION_AFFILIATION_BY_NODE_ID[activeMenu];
-        filtered = filtered.filter((asset) => {
-          const topCategory = String(asset.topCategory || "").trim().toLowerCase();
-          const isAnimation = topCategory === "animation" || String(asset.assetType || "").trim().toLowerCase() === "animation";
-          if (!isAnimation) return false;
-          return assetHasAnimationAffiliation(asset, affiliation);
-        });
+      else if (getAnimationNavigationSelection(activeMenu)) {
+        filtered = filtered.filter(asset => matchesAnimationNavigation(asset, activeMenu, animationNavigationOptions));
       }
       else if (activeMenu === "fav-3d") filtered = filtered.filter(a => favoriteIds.has(a.id) && a.assetType === "3d");
       else if (activeMenu === "fav-3dplant") filtered = filtered.filter(a => favoriteIds.has(a.id) && a.assetType === "3dplant");
@@ -4311,7 +4435,7 @@ export function App() {
 
     setAssets(filtered);
 
-  }, [search, allAssets, activeMenu, favoriteIds, setAssets, textSearch.ids, characterContext]);
+  }, [search, allAssets, activeMenu, favoriteIds, setAssets, textSearch.ids, characterContext, animationNavigationOptions]);
 
   async function executeSearch(nextSearch: SearchState) {
     // Legacy stub - search is now reactive via useEffect
@@ -4335,6 +4459,10 @@ export function App() {
   const [blenderPathDraft, setBlenderPathDraft] = useState(settings.blenderExecutablePath || "");
   const canExport = !pluginInstalling && (isBlenderTarget ? bridgeAvailable && blenderStatus.connected
     : isThreeDCoatTarget ? bridgeAvailable && threeDCoatStatus.ready : canExportToUnreal);
+  // The animation dialog reports the UE connection itself and blocks sending until it is ready.
+  const canOpenAnimationExport = bridgeAvailable && !pluginInstalling && !isBlenderTarget && !isThreeDCoatTarget;
+  const isAnimationExportRecord = (asset?: AssetRecord) => String(asset?.assetType || "").trim().toLowerCase() === "animation";
+  const assetCanExport = (asset?: AssetRecord) => canExport || (canOpenAnimationExport && isAnimationExportRecord(asset));
   const exportUnavailableTitle = isBlenderTarget
     ? blenderStatus.message || t("请打开 Blender 并启用 AssetHive 插件", "Open Blender and enable the AssetHive add-on")
     : isThreeDCoatTarget
@@ -4491,6 +4619,10 @@ export function App() {
     const populateCharacterCategories = (nodes: Array<CategoryNode | string>) => {
       for (const node of nodes) {
         if (typeof node === "string") continue;
+        if (ANIMATION_AFFILIATION_BY_NODE_ID[node.id]) {
+          node.children = animationNavigationNodes(node.id, allAssets, animationNavigationOptions);
+          continue;
+        }
         const selected = getCharacterNavigationSelection(node.id);
         if (selected && !selected.category) {
           node.children = getCharacterCategoryNodes(selected.family, allAssets);
@@ -4505,7 +4637,7 @@ export function App() {
     newTree.push(favNode);
 
     return newTree;
-  }, [allAssets, favoriteIds, t]);
+  }, [allAssets, favoriteIds, t, animationNavigationOptions]);
 
   function getSubCategoryOptions(assetType: string) {
     return subCategoryOptionsByAssetType[String(assetType || "").trim().toLowerCase()] || ["Other"];
@@ -4539,6 +4671,9 @@ export function App() {
   }
 
   function getNodeDisplayLabel(nodeId: string, fallback: string) {
+    const animationSelection = getAnimationNavigationSelection(nodeId);
+    if (animationSelection?.animationType) return ANIMATION_TYPE_DISPLAY_LABELS[fallback] ? t(...ANIMATION_TYPE_DISPLAY_LABELS[fallback]) : t("未分类", "Unclassified");
+    if (animationSelection?.key !== undefined) return fallback === "未指定" ? t("未指定", "Unassigned") : fallback;
     const characterSelection = getCharacterNavigationSelection(nodeId);
     if (characterSelection?.family === 'item' && characterSelection.category) return getCharacterCategoryDisplayLabel('item', characterSelection.category, uiLanguage).split(' / ').at(-1) || fallback;
     if (characterSelection?.category) return getCharacterCategoryDisplayLabel(characterSelection.family, characterSelection.category, uiLanguage);
@@ -4660,6 +4795,7 @@ export function App() {
       return [];
     }
     const characterSelection = getCharacterNavigationSelection(nodeId);
+    if (getAnimationNavigationSelection(nodeId)) return ["animation"];
     if (characterSelection) return [characterSelection.family];
     if (nodeId.startsWith("fav-")) {
       return [nodeId.replace("fav-", "")];
@@ -4872,7 +5008,8 @@ export function App() {
       if (assetIds.length > 1) return threeDCoatSingleSelectionTitle;
       if (assetIds.some(id => !supportsThreeDCoatExport(allAssets.find(asset => asset.id === id)))) return threeDCoatAssetUnavailableTitle;
     }
-    return !canExport ? exportUnavailableTitle : undefined;
+    const animationOnly = assetIds.length > 0 && assetIds.every(id => isAnimationExportRecord(allAssets.find(asset => asset.id === id)));
+    return !canExport && !(canOpenAnimationExport && animationOnly) ? exportUnavailableTitle : undefined;
   }
   const detailExportUnavailableTitle = getAssetExportUnavailableTitle(detailExportAssetIds);
   const canExportDetail = !detailExportUnavailableTitle && !savingOverwritePolicy;
@@ -5011,14 +5148,33 @@ export function App() {
   const selectedAnimationFile = selectedAsset && String(selectedAsset.assetType || "").trim().toLowerCase() === "animation"
     ? getFirstFbxPath(selectedAsset.modelFiles)
     : "";
-  const selectedPreviewSkeletonPath = String(selectedAsset?.previewSkeletonPath || animationPreviewRig.skeletonPath || DEFAULT_ANIMATION_SKELETON_PATH).trim();
-  const selectedPreviewSkeletalMeshPath = String(selectedAsset?.previewSkeletalMeshPath || animationPreviewRig.skeletalMeshPath || "").trim();
+  const resolveAnimationRig = bridgeAvailable ? bridge.resolveAnimationPreviewRig : undefined;
+  const selectedAutoRig = useAutoAnimationRig(resolveAnimationRig, selectedAnimationFile, selectedAsset?.animationGameTag?.id);
+  const selectedPreviewRig = chooseAnimationPreviewRig(
+    { skeletonPath: selectedAsset?.previewSkeletonPath, skeletalMeshPath: selectedAsset?.previewSkeletalMeshPath },
+    selectedAutoRig || "",
+    animationPreviewRig
+  );
+  const selectedPreviewSkeletonPath = selectedPreviewRig.skeletonPath.trim();
+  const selectedPreviewSkeletalMeshPath = selectedPreviewRig.skeletalMeshPath.trim();
   const importAnimationFile = isAnimationAssetImportType(importForm.assetType)
     ? getFirstFbxPath(Object.values(importForm.modelSlots))
     : "";
+  useEffect(() => {
+    setImportForm(form => syncAnimationArchiveForm(syncAnimationGameTag(form, animationGameTagOptions), settings.customLibraryPath));
+    setImportDrafts(drafts => {
+      const next = drafts.map(draft => {
+        const form = syncAnimationArchiveForm(syncAnimationGameTag(draft.form, animationGameTagOptions), settings.customLibraryPath);
+        return form === draft.form ? draft : { ...draft, form };
+      });
+      return next.some((draft, index) => draft !== drafts[index]) ? next : drafts;
+    });
+  }, [importForm, importDrafts, animationGameTagOptions, settings.customLibraryPath, setImportForm, setImportDrafts]);
   const editAnimationFile = isAnimationAssetImportType(editForm.assetType)
     ? getFirstFbxPath(Object.values(editForm.modelSlots))
     : "";
+  const editAutoRig = useAutoAnimationRig(resolveAnimationRig, editAnimationFile, editForm.animationGameTag?.id);
+  const editPreviewRig = chooseAnimationPreviewRig(animationPreviewRig, editAutoRig || "", animationPreviewRig);
   const importAnimationRuleChecks = useMemo(
     () => (isAnimationAssetImportType(importForm.assetType)
       ? evaluateAnimationImportRules({
@@ -5028,9 +5184,9 @@ export function App() {
         animationType: resolveAnimationTypeValue(importForm.zionTags, importForm.subCategory),
         animationAffiliation: resolveAnimationAffiliationValue(importForm.animationAffiliation, importForm.zionTags),
         stats: importAnimationStats
-      })
+      }, importAnimationReference)
       : []),
-    [importAnimationFile, importAnimationStats, importForm.assetName, importForm.assetType, importForm.destinationPath, importForm.subCategory, importForm.zionTags, importForm.animationAffiliation]
+    [importAnimationFile, importAnimationStats, importAnimationReference, importForm.assetName, importForm.assetType, importForm.destinationPath, importForm.subCategory, importForm.zionTags, importForm.animationAffiliation]
   );
 
   useEffect(() => {
@@ -5040,16 +5196,18 @@ export function App() {
       return;
     }
     let active = true;
+    setImportAnimationStats(null); setImportAnimationReference({});
     setImportAnimationStatsLoading(true);
-    void loadAnimationFbxStats(importAnimationFile, importForm.skeletonPath).then((stats) => {
+    const drafts = importDrafts.filter(draft => draft.form.assetType === 'animation').map(draft => ({ sourcePath: getFirstFbxPath(Object.values(draft.form.modelSlots)), destinationPath: draft.form.destinationPath }));
+    void Promise.all([loadAnimationFbxStats(importAnimationFile, importForm.skeletonPath), loadAnimationRuleReference(importAnimationFile, importForm.destinationPath, allAssets, drafts, loadAnimationFbxStats)]).then(([stats, reference]) => {
       if (!active) return;
-      setImportAnimationStats(stats);
+      setImportAnimationStats(stats); setImportAnimationReference(reference);
       setImportAnimationStatsLoading(false);
-    });
+    }).catch(() => { if (active) setImportAnimationStatsLoading(false); });
     return () => {
       active = false;
     };
-  }, [importAnimationFile, importForm.skeletonPath]);
+  }, [importAnimationFile, importForm.skeletonPath, importForm.destinationPath, importDrafts, allAssets]);
 
   useEffect(() => {
     setSelectedAssetDetails(previous => previous?.id === selectedAssetId ? previous : null);
@@ -5060,6 +5218,7 @@ export function App() {
   }, [refreshAssetFromDisk, selectedAssetId]);
 
   useEffect(() => { setSelectedAssetDetails(null); }, [settings.customLibraryPath]);
+
 
   const relatedAssets = useMemo(() => {
     if (!selectedAsset) {
@@ -5783,6 +5942,46 @@ export function App() {
 
   const [suitExportAssetIds, setSuitExportAssetIds] = useState<string[] | null>(null);
   const [suitExportHidden, setSuitExportHidden] = useState(false);
+  const [animationExportAssetIds, setAnimationExportAssetIds] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!bridgeAvailable || typeof bridge.getAnimationGameTagOptions !== "function") return;
+    let disposed = false;
+    bridge.getAnimationGameTagOptions().then((result) => {
+      if (!disposed && result) setAnimationGameTagOptions({ weapons: result.weapons || [], monsters: result.monsters || [] });
+    }).catch(() => {});
+    return () => { disposed = true; };
+  }, [bridge, bridgeAvailable, unrealConnected]);
+  function renderAnimationGameTagSelect(affiliation: string, value: AnimationGameTag | null | undefined, mixed: boolean, onChange: (tag: AnimationGameTag | null) => void, required = false) {
+    const kind = animationGameTagKind(affiliation);
+    if (!kind) return null;
+    const list = kind === "weapon" ? animationGameTagOptions.weapons : animationGameTagOptions.monsters;
+    const current = value && value.kind === kind ? value : null;
+    const options = current && !list.some(option => option.id === current.id) ? [{ ...current, group: "" }, ...list] : list;
+    return (
+      <div className="settings-row">
+        <div className="settings-label">{kind === "weapon" ? t("武器类别", "Weapon Category") : t("怪物", "Monster")}{required && <span className="required-asterisk" aria-hidden="true">*</span>}</div>
+        <div className="settings-field-col">
+          <DarkSelect
+            value={current?.id || ""}
+            mixed={mixed}
+            ariaLabel={kind === "weapon" ? t("武器类别", "Weapon Category") : t("怪物", "Monster")}
+            className="settings-dark-select"
+            searchPlaceholder={kind === "weapon" ? t("搜索武器名称或编号", "Search weapon name or ID") : t("搜索怪物名称或编号", "Search monster name or ID")}
+            emptySearchLabel={t("没有匹配项", "No matches")}
+            options={[
+              { value: "", label: t("未指定", "Not set") },
+              ...options.map(option => ({ value: option.id, label: formatAnimationGameTag(option) }))
+            ]}
+            onChange={(nextValue) => {
+              const option = options.find(item => item.id === nextValue);
+              onChange(option ? { kind: option.kind, id: option.id, name: option.name } : null);
+            }}
+          />
+          <div className="settings-field-hint">{kind === "weapon" ? t("来自 UE DT_WeaponCategoryConfig，显示在动画上并可搜索", "From UE DT_WeaponCategoryConfig; shown on the animation and searchable") : t("来自 UE DT_MonsterPrototype，显示在动画上并可搜索", "From UE DT_MonsterPrototype; shown on the animation and searchable")}</div>
+        </div>
+      </div>
+    );
+  }
   const selectedSuitOwnerId = selectedAsset && ['suit', 'weapon', 'monster', 'npc', 'item'].includes(selectedAsset.assetType) ? componentParentId(selectedAsset.id) : '';
   useEffect(() => {
     if (!selectedSuitOwnerId || !unrealConnected || suitExportAssetIds || !bridge.getSuitUnrealStatus) return;
@@ -5829,6 +6028,13 @@ export function App() {
       if (suits.length !== assetIds.length) { showStatus(t("请将套装与其他类型分批发送", "Send suits separately from other types"), 6000); return; }
       setSuitExportAssetIds([...new Set(assetIds.map(componentParentId))]);
       setSuitExportHidden(false);
+      return;
+    }
+    const animationIds = assetIds.filter(id => String(allAssets.find(item => item.id === id)?.assetType || "").trim().toLowerCase() === "animation");
+    if (!isBlenderTarget && !isThreeDCoatTarget && animationIds.length) {
+      if (animationIds.length !== assetIds.length) { showStatus(t("请将动画与其他类型分批发送", "Send animations separately from other types"), 6000); return; }
+      assetIds.forEach((id) => recordAssetUsage(id));
+      setAnimationExportAssetIds([...new Set(assetIds)]);
       return;
     }
     assetIds.forEach((id) => recordAssetUsage(id));
@@ -8749,7 +8955,7 @@ export function App() {
   }
 
   function getActiveAnimationAffiliation() {
-    return ANIMATION_AFFILIATION_BY_NODE_ID[activeMenu] || "";
+    return getAnimationNavigationSelection(activeMenu)?.affiliation || "";
   }
 
   function getDefaultImportAssetType() {
@@ -8901,6 +9107,7 @@ export function App() {
     const affiliation = String(assetType || "").trim().toLowerCase() === "animation"
       ? resolveAnimationAffiliationValue(getActiveAnimationAffiliation())
       : "";
+    const navigationType = useNavigation ? getAnimationNavigationSelection(activeMenu)?.animationType : undefined;
     return withAnimationTypeFields({
       ...structuredClone(defaultImportForm),
       queueId: crypto.randomUUID(),
@@ -8915,7 +9122,7 @@ export function App() {
       skeletonPath: previewRig.skeletonPath || DEFAULT_ANIMATION_SKELETON_PATH,
       skeletalMeshPath: previewRig.skeletalMeshPath,
       animationAffiliation: affiliation
-    }, assetType, undefined, affiliation);
+    }, assetType, ANIMATION_TYPE_SET.has(navigationType || "") ? navigationType : undefined, affiliation);
   }
 
   async function pickAnimationRigFile() {
@@ -8978,10 +9185,11 @@ export function App() {
     const nameIssue = animationName && nameFilled ? getAnimationAssetNameIssue(selectedName || "") : null;
     return (
       <div className="settings-row">
-        <div className="settings-label">{monsterName ? t("资产名（UE）", "Asset Name (UE)") : t("资产名", "Asset Name")}</div>
+        <div className="settings-label">{monsterName ? t("资产名（UE）", "Asset Name (UE)") : t("资产名", "Asset Name")}{animationName && <span className="required-asterisk" aria-hidden="true">*</span>}</div>
         <div className="settings-field-col">
           <input
             className={`settings-input${nameIssue ? " invalid-name" : ""}`}
+            aria-required={animationName}
             value={monsterName ? getImportSelectionValue((form) => buildMonsterAssetName(normalizeMonsterNames(form.characterFields).name, form.characterFields.formIds)) ?? "" : selectedName === defaultImportForm.assetName && animationName ? "" : selectedName ?? ""}
             readOnly={monsterName}
             onChange={(event) => applyImportBatchPatch((form) => ({ ...form, assetName: event.target.value }))}
@@ -9356,7 +9564,7 @@ export function App() {
     const filePath = importForm.modelSlots[modelType] || "";
     return (
       <div className="settings-row">
-        <div className="settings-label">{t("导入文件", "Import File")}</div>
+        <div className="settings-label">{t("导入文件", "Import File")}<span className="required-asterisk" aria-hidden="true">*</span></div>
         <div className="settings-field-col">
           <div
             className="path-display-row"
@@ -9373,6 +9581,7 @@ export function App() {
               <input
                 className={`settings-input${isPathMissing(filePath) ? " missing-file-path" : ""}`}
                 value={filePath}
+                aria-required="true"
                 readOnly
                 placeholder={t("选择或拖拽动画 FBX", "Select or drop an animation FBX")}
                 title={filePath || t("选择或拖拽动画 FBX", "Select or drop an animation FBX")}
@@ -9428,6 +9637,7 @@ export function App() {
       assetName: detected?.assetName || form.assetName,
       subCategory,
       destinationPath: resolveImportDestinationForType(nextAssetType, form.animationAffiliation, subCategory),
+      animationArchiveManual: nextAssetType === form.assetType ? form.animationArchiveManual : false,
       characterFields: fields
     };
   }
@@ -9439,7 +9649,7 @@ export function App() {
     }
     const current = importForm.destinationPath.trim() || getDefaultImportDestinationPath(importForm.assetType, importForm.animationAffiliation) || settings.customLibraryPath;
     const picked = typeof bridge.pickAssetFolder === "function"
-      ? await bridge.pickAssetFolder({ defaultPath: current })
+      ? await bridge.pickAssetFolder({ defaultPath: current, nearestExistingParent: isAnimationAssetImportType(importForm.assetType) })
       : "";
     if (!picked) return;
     const library = String(settings.customLibraryPath || "").trim();
@@ -9448,7 +9658,7 @@ export function App() {
       return;
     }
     rememberImportDestination(importForm.assetType, picked);
-    applyImportBatchPatch((form) => ({ ...form, destinationPath: picked }));
+    applyImportBatchPatch((form) => ({ ...form, destinationPath: picked, animationArchiveManual: form.assetType === 'animation' }));
   }
 
   async function pickCharacterPackageFolder() {
@@ -9619,7 +9829,7 @@ export function App() {
   function resetImportDestination() {
     forgetImportDestination(importForm.assetType);
     const nextPath = getDefaultImportDestinationPath(importForm.assetType, importForm.animationAffiliation);
-    applyImportBatchPatch((form) => ({ ...form, destinationPath: nextPath }));
+    applyImportBatchPatch((form) => ({ ...form, destinationPath: nextPath, animationArchiveManual: false }));
   }
 
   function commitImportDestinationPath(rawPath: string) {
@@ -9632,7 +9842,9 @@ export function App() {
     if (nextPath) {
       rememberImportDestination(importForm.assetType, nextPath);
     }
-    applyImportBatchPatch((form) => ({ ...form, destinationPath: nextPath || getDefaultImportDestinationPath(form.assetType, form.animationAffiliation) }));
+    applyImportBatchPatch((form) => ({ ...form, destinationPath: nextPath || getDefaultImportDestinationPath(form.assetType, form.animationAffiliation),
+      animationArchiveManual: form.assetType === 'animation' && Boolean(nextPath)
+        && normalizePathForCompare(nextPath) !== normalizePathForCompare(syncAnimationArchiveForm({ ...form, animationArchiveManual: false }, settings.customLibraryPath).destinationPath) }));
   }
 
   // Required texture validation (md 3.1.5): ORM is optional, so a missing ORM
@@ -9899,7 +10111,9 @@ export function App() {
       animationAffiliation: resolveAnimationAffiliationValue(
         String((meta as { animationAffiliation?: string }).animationAffiliation || asset.animationAffiliation || ""),
         [...zionTags, ...(allTags || [])]
-      )
+      ),
+      animationLabelsText: parseAnimationLabels((meta as { animationLabels?: string[] }).animationLabels || asset.animationLabels).join(", "),
+      animationGameTag: (meta as { animationGameTag?: AnimationGameTag }).animationGameTag || asset.animationGameTag || null
     }, assetTypeFromMeta);
     setEditForm(nextForm);
     setEditBaseline(nextForm);
@@ -10356,7 +10570,7 @@ export function App() {
     else if (assetType === "imperfection") targetNodeId = "imperfections";
     else if (assetType === "displacement") targetNodeId = "displacements";
     else if (assetType === "hdri") targetNodeId = "hdri";
-    else if (assetType === "animation") targetNodeId = "animation";
+    else if (assetType === "animation") targetNodeId = animationNodeForAsset(selectedAsset, animationNavigationOptions);
 
     // If currently in favorites, check if we should stay in favorite context
     const isCurrentFav = activeMenu === "favorite" || activeMenu.startsWith("fav-");
@@ -10385,36 +10599,64 @@ export function App() {
         if (targetNodeId === "animation" || targetNodeId === "character") {
           return ["home", targetNodeId];
         }
+        const animationSelection = getAnimationNavigationSelection(targetNodeId);
+        if (animationSelection) return ["home", "animation", animationSelection.parent, ...(animationSelection.animationType && animationSelection.key ? [`${animationSelection.parent}:${encodeURIComponent(animationSelection.key)}`] : [])];
         return ["home", "environment", targetNodeId];
       });
 
-      const isFavTarget = targetNodeId.startsWith("fav-");
-      executeSearch({
-        ...search,
-        text: "",
-        tags: [],
-        assetTypes: mapNodeIdToAssetTypes(targetNodeId),
-        themes: subCategory ? [subCategory] : [],
-        onlyFavorites: isFavTarget
-      });
-    }
-
-    // Scroll into view
-    setTimeout(() => {
-      const layoutItem = assetGridLayout.items.find((item) => item.asset.id === targetId);
-      const stage = assetStageRef.current;
-      if (layoutItem && stage) {
-        stage.scrollTo({
-          top: Math.max(0, layoutItem.y - (stage.clientHeight - layoutItem.height) / 2),
-          behavior: "smooth"
+      if (assetType !== "animation") {
+        const isFavTarget = targetNodeId.startsWith("fav-");
+        executeSearch({
+          ...search,
+          text: "",
+          tags: [],
+          assetTypes: mapNodeIdToAssetTypes(targetNodeId),
+          themes: subCategory ? [subCategory] : [],
+          onlyFavorites: isFavTarget
         });
       }
-      const card = document.getElementById(`asset-card-${targetId}`);
-      if (card) {
-        card.classList.add("flash-highlight");
-        setTimeout(() => card.classList.remove("flash-highlight"), 1000);
-      }
-    }, 100);
+    }
+    if (assetType === "animation") {
+      setAssetFocusRequest(targetId);
+      executeSearch({ ...defaultSearchState, assetTypes: mapNodeIdToAssetTypes(targetNodeId), themes: [], onlyFavorites: targetNodeId.startsWith("fav-") });
+    } else {
+      // Scroll into view
+      setTimeout(() => {
+        const layoutItem = assetGridLayout.items.find((item) => item.asset.id === targetId);
+        const stage = assetStageRef.current;
+        if (layoutItem && stage) {
+          stage.scrollTo({
+            top: Math.max(0, layoutItem.y - (stage.clientHeight - layoutItem.height) / 2),
+            behavior: "smooth"
+          });
+        }
+        const card = document.getElementById(`asset-card-${targetId}`);
+        if (card) {
+          card.classList.add("flash-highlight");
+          setTimeout(() => card.classList.remove("flash-highlight"), 1000);
+        }
+      }, 100);
+    }
+  }
+
+  async function revealSelectedAssetArchive() {
+    if (!selectedAsset || !bridgeAvailable) return;
+    try {
+      const result = await bridge.revealAssetArchive(componentParentId(selectedAsset.id));
+      if (!result.ok) throw new Error(result.message);
+    } catch (error) {
+      showStatus(t(`无法定位归档文件：${String(error)}`, `Could not locate archived file: ${String(error)}`), 8000);
+    }
+  }
+
+  function renderDetailHeading() {
+    if (!selectedAsset) return null;
+    const name = selectedAsset.name;
+    return <div className="detail-heading-row animation-detail-heading">
+      <h2><span className="detail-asset-name preserve-asset-name-case" title={name}>{name}</span></h2>
+      <button type="button" className="detail-name-copy" title={t("复制资产名", "Copy asset name")} aria-label={t(`复制资产名 ${name}`, `Copy asset name ${name}`)} onClick={() => { void copyAssetName(name); }}><Icon name="copy" /></button>
+      <button className="heart-icon-btn detail-heading-heart" style={{ border: "none", background: "transparent", cursor: "pointer", color: favoriteIds.has(selectedAsset.id) ? "#e74c3c" : "var(--text-2)" }} onClick={() => toggleFavorite(selectedAsset.id)}><Icon name={favoriteIds.has(selectedAsset.id) ? "heart-filled" : "heart"} /></button>
+    </div>;
   }
 
   function formatDetailTag(tag: string) {
@@ -10716,6 +10958,12 @@ export function App() {
       ? resolveAnimationAffiliationValue(editBaseline.animationAffiliation, editBaseline.zionTags)
       : "";
     const affiliationChanged = nextAffiliation !== baselineAffiliation;
+    const nextAnimationLabels = parseAnimationLabels(editForm.animationLabelsText);
+    const animationLabelsChanged = isAnimationAssetImportType(editForm.assetType)
+      && nextAnimationLabels.join("|") !== parseAnimationLabels(editBaseline.animationLabelsText).join("|");
+    const nextAnimationGameTag = editForm.animationGameTag?.kind === animationGameTagKind(nextAffiliation) ? editForm.animationGameTag : null;
+    const animationGameTagChanged = isAnimationAssetImportType(editForm.assetType)
+      && (nextAnimationGameTag?.id || "") !== (editBaseline.animationGameTag?.kind === animationGameTagKind(baselineAffiliation) ? editBaseline.animationGameTag.id : "");
     const nextStandardAssetTags = tagsChanged ? getSelectedStandardAssetTags(editForm.assetType, editForm.tagsText) : [];
     const batchStandardTag = editBatchAssetIds.length > 1 ? editBatchStandardTag : "";
     const nameChanged = editForm.assetName.trim() !== editBaseline.assetName.trim();
@@ -10729,7 +10977,7 @@ export function App() {
     const hasEmptySlots = editBaseline.hasEmptySlots
       || editForm.textureEntries.some(entry => !String(entry.filePath || "").trim())
       || Object.values(editForm.modelSlots).some(filePath => !String(filePath || "").trim());
-    if (!hasEmptySlots && !textureEntriesChanged && !batchStandardTag && !materialNamesChanged && !nameChanged && !typeChanged && !categoryChanged && !baseTilingChanged && !normalMapFormatChanged && !normalMapFormatsChanged && !previewChanged && !tagsChanged && !zionTagsChanged && !affiliationChanged
+    if (!hasEmptySlots && !textureEntriesChanged && !batchStandardTag && !materialNamesChanged && !nameChanged && !typeChanged && !categoryChanged && !baseTilingChanged && !normalMapFormatChanged && !normalMapFormatsChanged && !previewChanged && !tagsChanged && !zionTagsChanged && !affiliationChanged && !animationLabelsChanged && !animationGameTagChanged
       && Object.keys(changedModelSlots).length === 0 && Object.keys(changedTextureSlots).length === 0
       && removedModelSlots.length === 0 && removedTextureSlots.length === 0) {
       setEditOpen(false);
@@ -10774,7 +11022,9 @@ export function App() {
           ].filter(Boolean))]
           : undefined,
         zionTags: zionTagsChanged ? normalizedZionTags : undefined,
-        animationAffiliation: affiliationChanged ? nextAffiliation : undefined
+        animationAffiliation: affiliationChanged ? nextAffiliation : undefined,
+        animationLabels: animationLabelsChanged ? nextAnimationLabels : undefined,
+        animationGameTag: animationGameTagChanged ? nextAnimationGameTag : undefined
       };
       setEditOpen(false);
       console.info("[assets:updateCustom] request", {
@@ -10869,10 +11119,13 @@ export function App() {
       throw new Error(t("请先填写资产名", "Enter an asset name first"));
     }
     if (isAnimationAssetImportType(form.assetType)) {
-      const nameIssue = getAnimationAssetNameIssue(form.assetName);
-      if (nameIssue) {
-        throw new Error(t(nameIssue.zh, nameIssue.en));
-      }
+      const missing = getMissingAnimationFields({
+        assetName: form.assetName, filePath: getFirstFbxPath(Object.values(form.modelSlots)),
+        destinationPath: form.destinationPath, affiliation: resolveAnimationAffiliationValue(form.animationAffiliation, form.zionTags),
+        animationType: resolveAnimationTypeValue(form.zionTags, form.subCategory), labels: parseAnimationLabels([...parseAnimationLabels(form.animationLabelsText), ...animationPlanningLabels(form)]),
+        gameTag: form.animationGameTag
+      });
+      if (missing.length) throw new Error(t(`请补齐必填项：${missing.map(field => field.zh).join("、")}`, `Fill required fields: ${missing.map(field => field.en).join(", ")}`));
       if (!isAnimationTypeValue(resolveAnimationTypeValue(form.zionTags, form.subCategory))) {
         throw new Error(t("请选择动画类型", "Select an animation type"));
       }
@@ -11029,6 +11282,8 @@ export function App() {
           ? String(form.characterRelationGroupId || "").trim() || undefined
           : undefined,
         animationAffiliation: animationAffiliation || undefined,
+        animationLabels: isAnimationAssetImportType(form.assetType) ? parseAnimationLabels([...parseAnimationLabels(form.animationLabelsText), ...animationPlanningLabels(form)]) : undefined,
+        animationGameTag: isAnimationAssetImportType(form.assetType) && form.animationGameTag?.kind === animationGameTagKind(animationAffiliation) ? form.animationGameTag : undefined,
         standardAssetTags: selectedStandardAssetTags.length ? selectedStandardAssetTags : undefined,
         baseTiling: form.assetType === "surface" ? normalizeBaseTilingValue(form.baseTiling) : undefined,
         modelSlots: selectedModelSlots,
@@ -11315,14 +11570,16 @@ export function App() {
     const completedTaskIds: string[] = [];
     const skipDuplicateCheck = !importDuplicateCheckEnabled;
     // 导入前统一校验表单：单个导入时无效表单立即弹窗并中止，避免进入后台导入
-    // 后才失败；批量导入交由导入循环逐项处理，失败项保留待重试。
-    if (!isBatchImport) {
-      try {
-        buildImportPayload(targets[0].draft.form, {});
-      } catch (error) {
-        const reason = String(error instanceof Error ? error.message : error ?? "").trim();
-        showImportSaveFailure(reason);
-        return;
+    // 后才失败；动画批量导入也先校验所有必填字段，保留原队列供补全。
+    if (!isBatchImport || targets.some(target => isAnimationAssetImportType(target.draft.form.assetType))) {
+      for (const target of targets) {
+        try { buildImportPayload(target.draft.form, {}); }
+        catch (error) {
+          const reason = String(error instanceof Error ? error.message : error ?? "").trim();
+          if (isBatchImport) switchImportAsset(target.index);
+          showImportSaveFailure(isBatchImport ? `${target.draft.form.assetName || t("未命名动画", "Unnamed animation")}：${reason}` : reason);
+          return;
+        }
       }
     }
     // Character identity conflicts never fall through to generic duplicate handling.
@@ -11401,21 +11658,6 @@ export function App() {
         }
         let progressAssetId = "";
         try {
-          if (isAnimationAssetImportType(draft.form.assetType)) {
-            const animationFile = getFirstFbxPath(Object.values(draft.form.modelSlots));
-            const animationStats = animationFile ? await loadAnimationFbxStats(animationFile, draft.form.skeletonPath) : null;
-            const animationErrors = getAnimationRuleErrors(evaluateAnimationImportRules({
-              assetName: draft.form.assetName,
-              destinationPath: draft.form.destinationPath,
-              filePath: animationFile,
-              animationType: resolveAnimationTypeValue(draft.form.zionTags, draft.form.subCategory),
-              animationAffiliation: resolveAnimationAffiliationValue(draft.form.animationAffiliation, draft.form.zionTags),
-              stats: animationStats
-            }));
-            if (animationErrors[0]) {
-              throw new Error(t(animationErrors[0].zh, animationErrors[0].en));
-            }
-          }
           let dedupeAction: "skip" | "update" | "new" = "new";
           let dedupeContentIdentity: ImportDedupeState["contentIdentity"];
           const draftSignature = skipDuplicateCheck ? "" : buildImportDedupeSignature(draft.form);
@@ -12573,6 +12815,8 @@ export function App() {
       const ROOT_TREE_LINE_OFFSET = 13;
       const INDENT_STEP = 32;
       const navigationIndent = (id: string | null | undefined, level: number) => {
+        const animationSelection = getAnimationNavigationSelection(id || '');
+        if (animationSelection) return 16 + Math.min(level, 1) * INDENT_STEP + Math.max(0, level - 1) * 16;
         const selection = getCharacterNavigationSelection(id || '');
         if (selection?.family === 'item' && selection.category) {
           const categoryDepth = selection.category.split('/').length;
@@ -12609,7 +12853,7 @@ export function App() {
       return (
         <div key={node.id} className={`nav-group ${isHovered ? "hovered" : ""}`}>
           <div
-            className={`left-item ${isActive ? "active" : ""}${characterSelection?.family === 'weapon' ? ' weapon-navigation-item' : ''}`}
+            className={`left-item ${isActive ? "active" : ""}${node.id === "animation" || getAnimationNavigationSelection(node.id) ? " animation-navigation-item" : ""}${characterSelection?.family === 'weapon' ? ' weapon-navigation-item' : ''}`}
             style={{ paddingLeft: `${indentPixels}px` }}
             onMouseEnter={(e) => {
               e.stopPropagation();
@@ -13310,7 +13554,7 @@ export function App() {
       {assetModalMode && (
         <div className="settings-overlay">
           <div
-            className={`settings-modal import-modal compact-modal ${assetModalMode !== "edit" && isCharacterAssetType(importSelectionAssetType) ? "character-import-modal" : ""} ${assetModalMode === "edit" ? "edit-wide" : `import-with-sidebar${importSidebarCollapsed ? " sidebar-collapsed" : ""}`}`}
+            className={`settings-modal import-modal compact-modal ${isAnimationAssetImportType(importSelectionAssetType) ? "animation-import-modal" : ""} ${assetModalMode !== "edit" && isCharacterAssetType(importSelectionAssetType) ? "character-import-modal" : ""} ${assetModalMode === "edit" ? "edit-wide" : `import-with-sidebar${importSidebarCollapsed ? " sidebar-collapsed" : ""}`}`}
             onClick={(e) => e.stopPropagation()}
             onDragOverCapture={(event) => event.preventDefault()}
             onDropCapture={(event) => {
@@ -13461,7 +13705,7 @@ export function App() {
                   ) : null}
                   <div className="asset-form-card">
                     <div className="settings-row">
-                      <div className="settings-label">{t("资产大类", "Top Category")}</div>
+                      <div className="settings-label">{t("资产大类", "Top Category")}{isAnimationAssetImportType(importSelectionAssetType) && <span className="required-asterisk" aria-hidden="true">*</span>}</div>
                       <div className="settings-field-col">
                         <DarkSelect
                           value={getImportSelectionValue((form) => form.assetType ? getTopCategoryForImportType(form.assetType) : "") ?? ""}
@@ -13797,46 +14041,6 @@ export function App() {
                     )}
                     {isAnimationAssetImportType(importSelectionAssetType) && renderImportAnimationFileRow()}
                     {isAnimationAssetImportType(importSelectionAssetType) && renderImportAssetNameRow()}
-                    {isAnimationAssetImportType(importSelectionAssetType) && (
-                      <div className="settings-row">
-                        <div className="settings-label">{t("归档目录", "Archive Folder")}</div>
-                        <div className="settings-field-col">
-                          <div className="path-display-row">
-                            <div className={`slot-input-wrap ${importForm.destinationPath && importForm.destinationPath !== getDefaultImportDestinationPath(importForm.assetType, importForm.animationAffiliation) ? "has-clear" : ""}`}>
-                              <input
-                                className="settings-input"
-                                {...getImportBatchInputProps("destinationPath", getDefaultImportDestinationPath(importForm.assetType, importForm.animationAffiliation) || t("选择归档目录", "Choose archive folder"))}
-                                onChange={(event) => applyImportBatchPatch((form) => ({ ...form, destinationPath: event.target.value }))}
-                                onBlur={(event) => {
-                                  if (getImportSelectionValue((form) => form.destinationPath) !== null) commitImportDestinationPath(event.target.value);
-                                }}
-                                title={importForm.destinationPath || t("选择归档目录", "Choose archive folder")}
-                              />
-                              {importForm.destinationPath && importForm.destinationPath !== getDefaultImportDestinationPath(importForm.assetType, importForm.animationAffiliation) && (
-                                <button
-                                  type="button"
-                                  className="path-clear-btn"
-                                  title={t("恢复默认路径", "Reset to default")}
-                                  onClick={resetImportDestination}
-                                >
-                                  <Icon name="close" />
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                className="path-icon-btn browse-icon-btn"
-                                title={t("浏览", "Browse")}
-                                onClick={() => {
-                                  void pickImportDestination();
-                                }}
-                              >
-                                <Icon name="folder" />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
                     {getStandardAssetTagOptions(importSelectionAssetType).length > 0 && (() => {
                       const presets = getStandardAssetTagOptions(importSelectionAssetType);
                       const selectedValue = getImportSelectionValue((form) => getSelectedStandardAssetTags(form.assetType, form.tagsText)[0] || "");
@@ -13864,8 +14068,9 @@ export function App() {
                       );
                     })()}
                     {isAnimationAssetImportType(importSelectionAssetType) ? (
+                    <>
                     <div className="settings-row">
-                      <div className="settings-label">{t("动画归属", "Affiliation")}</div>
+                      <div className="settings-label">{t("动画归属", "Affiliation")}<span className="required-asterisk" aria-hidden="true">*</span></div>
                       <div className="settings-field-col import-type-category-row">
                         <DarkSelect
                           value={getImportSelectionValue((form) => resolveAnimationAffiliationValue(form.animationAffiliation, form.zionTags)) ?? ""}
@@ -13878,17 +14083,20 @@ export function App() {
                           }))}
                           onChange={(nextValue) => {
                             applyImportBatchPatch((form) => {
-                              const previousDefault = getDefaultImportDestinationPath(form.assetType, form.animationAffiliation);
                               const nextForm = withAnimationTypeFields(form, form.assetType, undefined, nextValue);
-                              const keepCustom = form.destinationPath && form.destinationPath !== previousDefault;
                               return {
                                 ...nextForm,
-                                destinationPath: keepCustom ? form.destinationPath : getDefaultImportDestinationPath(form.assetType, nextValue)
+                                animationGameTag: form.animationGameTag?.kind === animationGameTagKind(nextValue) ? form.animationGameTag : null,
+                                animationGameTagManual: animationGameTagKind(form.animationAffiliation) === animationGameTagKind(nextValue) ? form.animationGameTagManual : false
                               };
                             });
                           }}
                         />
-                        <span className="inline-text-label">{t("动画类型", "Type")}</span>
+                      </div>
+                    </div>
+                    <div className="settings-row">
+                      <div className="settings-label">{t("动画类型", "Type")}<span className="required-asterisk" aria-hidden="true">*</span></div>
+                      <div className="settings-field-col import-animation-type-row">
                         <DarkSelect
                           value={getImportSelectionValue((form) => resolveAnimationTypeValue(form.zionTags, form.subCategory)) ?? ""}
                           mixed={getImportSelectionValue((form) => resolveAnimationTypeValue(form.zionTags, form.subCategory)) === null}
@@ -13902,8 +14110,23 @@ export function App() {
                             applyImportBatchPatch((form) => withAnimationTypeFields(form, form.assetType, nextValue, form.animationAffiliation));
                           }}
                         />
+                        {getImportSelectionValue(form => resolveAnimationTypeValue(form.zionTags, form.subCategory)) === "基础移动" && ([
+                          { key: "animationMotionContext", zh: "状态", en: "Context", values: animationImportRules.planning.contexts, labels: ["Alert", "Idle", "Battle"] },
+                          { key: "animationGait", zh: "走跑", en: "Gait", values: animationImportRules.planning.gaits, labels: ["Walk", "Run", "Stand"] },
+                          { key: "animationPhase", zh: "阶段", en: "Phase", values: animationImportRules.planning.phases, labels: ["Start", "Loop", "Stop"] }
+                        ] as const).filter(field => field.key !== "animationMotionContext" || getImportSelectionValue(form => form.animationAffiliation) !== "主角").map(field => {
+                          const battle = field.key === "animationPhase" && getImportSelectionValue(form => form.animationAffiliation !== "主角" ? form.animationMotionContext || "" : "") === "战斗";
+                          const value = getImportSelectionValue(form => field.key === "animationPhase" && form.animationAffiliation !== "主角" && form.animationMotionContext === "战斗" ? animationImportRules.planning.battlePhase : form[field.key] || "");
+                          return <DarkSelect key={field.key} className="settings-dark-select" value={value ?? ""} mixed={value === null}
+                            ariaLabel={t(field.zh, field.en)} disabled={battle}
+                            options={[{ value: "", label: t(`${field.zh}（可选）`, `${field.en} (optional)`) }, ...field.values.map((item, index) => ({ value: item, label: t(item, field.labels[index]) }))]}
+                            onChange={nextValue => applyImportBatchPatch(form => ({ ...form, [field.key]: nextValue,
+                              animationPlanningManualFields: [...new Set([...(form.animationPlanningManualFields || []), field.key])],
+                              ...(field.key === "animationMotionContext" && form.animationAffiliation !== "主角" && nextValue === "战斗" ? { animationPhase: animationImportRules.planning.battlePhase } : {}) }))} />;
+                        })}
                       </div>
                     </div>
+                    </>
                     ) : (
                     <div className="settings-row zion-tags-row" hidden={isCharacterAssetType(importSelectionAssetType)}>
                       <div className="settings-label">{t("Zion Tags", "Zion Tags")}</div>
@@ -13926,6 +14149,71 @@ export function App() {
                       </div>
                     </div>
                     )}
+                    {isAnimationAssetImportType(importSelectionAssetType) && (
+                      <div className="settings-row">
+                        <div className="settings-label">{t("动作标签", "Action Labels")}<span className="required-asterisk" aria-hidden="true">*</span></div>
+                        <div className="settings-field-col">
+                          <input
+                            className="settings-input"
+                            aria-label={t("动作标签", "Action Labels")}
+                            aria-required="true"
+                            {...getImportBatchInputProps("animationLabelsText", t("例如：跑，急停（逗号分隔，显示在预览上并可搜索）", "e.g. run, quick stop (comma separated; shown on previews and searchable)"))}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              applyImportBatchPatch((form) => ({ ...form, animationLabelsText: value }));
+                            }}
+                          />
+                          <div className="animation-import-labels">{parseAnimationLabels([...parseAnimationLabels(importForm.animationLabelsText), ...animationPlanningLabels(importForm)]).map(label => <span key={label}>{label}</span>)}</div>
+                        </div>
+                      </div>
+                    )}
+                    {isAnimationAssetImportType(importSelectionAssetType) && (
+                      <div className="settings-row">
+                        <div className="settings-label">{t("归档目录", "Archive Folder")}<span className="required-asterisk" aria-hidden="true">*</span></div>
+                        <div className="settings-field-col">
+                          <div className="path-display-row">
+                            <div className={`slot-input-wrap ${importForm.animationArchiveManual ? "has-clear" : ""}`}>
+                              <input
+                                className="settings-input"
+                                {...getImportBatchInputProps("destinationPath", getDefaultImportDestinationPath(importForm.assetType, importForm.animationAffiliation) || t("选择归档目录", "Choose archive folder"))}
+                                onChange={(event) => applyImportBatchPatch((form) => ({ ...form, destinationPath: event.target.value, animationArchiveManual: true }))}
+                                onBlur={(event) => {
+                                  if (getImportSelectionValue((form) => form.destinationPath) !== null) commitImportDestinationPath(event.target.value);
+                                }}
+                                title={importForm.destinationPath || t("选择归档目录", "Choose archive folder")}
+                              />
+                              {importForm.animationArchiveManual && (
+                                <button
+                                  type="button"
+                                  className="path-clear-btn"
+                                  title={t("恢复默认路径", "Reset to default")}
+                                  onClick={resetImportDestination}
+                                >
+                                  <Icon name="close" />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="path-icon-btn browse-icon-btn"
+                                title={t("浏览", "Browse")}
+                                onClick={() => {
+                                  void pickImportDestination();
+                                }}
+                              >
+                                <Icon name="folder" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {isAnimationAssetImportType(importSelectionAssetType) && (() => {
+                      const affiliation = getImportSelectionValue((form) => resolveAnimationAffiliationValue(form.animationAffiliation, form.zionTags));
+                      if (affiliation === null) return null;
+                      const tagId = getImportSelectionValue((form) => form.animationGameTag?.id || "");
+                      return renderAnimationGameTagSelect(affiliation, tagId === null ? null : getImportSelectionValue((form) => form.animationGameTag), tagId === null,
+                        (tag) => applyImportBatchPatch((form) => ({ ...form, animationGameTag: tag, animationGameTagManual: true })), true);
+                    })()}
                     {isAnimationAssetImportType(importForm.assetType) && (
                       <div className="settings-row">
                         <div className="settings-label">{t("动画规范", "Animation Rules")}</div>
@@ -13936,7 +14224,7 @@ export function App() {
                             )}
                             {importAnimationRuleChecks.map((item) => (
                               <div key={item.id} className={`animation-rule-item ${item.status}`}>
-                                <span className="animation-rule-mark">{item.status === "ok" ? "✓" : item.status === "fail" ? "✕" : item.status === "warn" ? "!" : "–"}</span>
+                                <span className="animation-rule-mark">{item.status === "ok" ? "✓" : item.status === "fail" ? "✕" : item.status === "warn" ? "!" : "⊘"}</span>
                                 <span>{t(item.zh, item.en)}</span>
                               </div>
                             ))}
@@ -14647,6 +14935,27 @@ export function App() {
                       </div>
                     </div>
                     )}
+                    {isAnimationAssetImportType(editForm.assetType) && (
+                      <div className="settings-row">
+                        <div className="settings-label">{t("动作标签", "Action Labels")}</div>
+                        <div className="settings-field-col">
+                          <input
+                            className="settings-input"
+                            aria-label={t("动作标签", "Action Labels")}
+                            value={editForm.animationLabelsText}
+                            placeholder={t("例如：跑，急停（逗号分隔，显示在预览上并可搜索）", "e.g. run, quick stop (comma separated; shown on previews and searchable)")}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setEditForm((prev) => ({ ...prev, animationLabelsText: value }));
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {isAnimationAssetImportType(editForm.assetType) && renderAnimationGameTagSelect(
+                      resolveAnimationAffiliationValue(editForm.animationAffiliation, editForm.zionTags),
+                      editForm.animationGameTag, false,
+                      (tag) => setEditForm((prev) => ({ ...prev, animationGameTag: tag })))}
                     <div className="settings-row tags-row">
                       <div className="settings-label">{t("标签", "Tags")}</div>
                       <div className="settings-field-col">
@@ -14713,7 +15022,7 @@ export function App() {
                             </div>
                             {renderAnimationRigPathRow(
                               t("骨骼", "Skeleton"),
-                              animationPreviewRig.skeletonPath,
+                              editPreviewRig.skeletonPath,
                               () => {
                                 void pickAnimationRigFile().then((picked) => {
                                   if (!picked) return;
@@ -14724,7 +15033,7 @@ export function App() {
                             )}
                             {renderAnimationRigPathRow(
                               t("骨骼 Mesh", "Skeletal Mesh"),
-                              animationPreviewRig.skeletalMeshPath,
+                              editPreviewRig.skeletalMeshPath,
                               () => {
                                 void pickAnimationRigFile().then((picked) => {
                                   if (!picked) return;
@@ -14734,13 +15043,13 @@ export function App() {
                               () => applyAnimationPreviewRig({ skeletalMeshPath: "" })
                             )}
                           </div>
-                          {editAnimationFile ? (
+                          {editAnimationFile && editAutoRig !== undefined ? (
                           <div className="import-animation-preview-wrap">
                             <Suspense fallback={<div className="animation-preview"><div className="preview-shimmer" /></div>}>
                             <AnimationPreview
                               filePath={editAnimationFile}
-                              skeletonPath={animationPreviewRig.skeletonPath || DEFAULT_ANIMATION_SKELETON_PATH}
-                              skeletalMeshPath={animationPreviewRig.skeletalMeshPath}
+                              skeletonPath={editPreviewRig.skeletonPath}
+                              skeletalMeshPath={editPreviewRig.skeletalMeshPath}
                               emptyLabel=""
                               playLabel={t("播放", "Play")}
                               pauseLabel={t("暂停", "Pause")}
@@ -15082,6 +15391,7 @@ export function App() {
           </div>
         </div>
       )}
+
       {modalAlert && modalAlert.visible && (
         <div className="cutout-overlay" onClick={() => setModalAlert(null)}>
           <div className="cutout-modal" role="alertdialog" aria-modal="true" aria-label={modalAlert.title || "Message"} onClick={(e) => e.stopPropagation()} style={{ width: "400px", minHeight: "auto" }}>
@@ -15341,7 +15651,7 @@ export function App() {
       </aside>
 
       <main className="center">
-        <AnimationCoverWorker queue={animationCoverQueue} loader={previewLoader} bridge={bridge}
+        <AnimationCoverWorker queue={animationCoverQueue} loader={previewLoader} bridge={bridge} assets={allAssets} resolveRig={resolveAnimationRig} rememberedRig={animationPreviewRig}
           enabled={!busy && !importOpen && !editOpen && !importSaving && !isExporting} />
         <header className="top-strip">
           <div className="search-wrap">
@@ -15472,8 +15782,8 @@ export function App() {
                   />
                 </div>
               )}
-              {quickDropBusy ? <div className="import-spinner" /> : <Icon name="import" />}
-              <span className="import-cta-label">{quickDropBusy ? (quickDropStage === "Extracting" ? `${t("解压中", "Extracting")}${quickDropProgressKnown ? ` ${Math.round(quickDropProgress)}%` : ""}` : quickDropStage === "Building" ? t("识别中", "Detecting") : quickDropStage === "Grouping" ? t("整理中", "Grouping") : t("扫描中", "Scanning")) : quickDropActive ? t("拖拽导入", "Drop") : importSaving ? t("拖入新资产", "Drop new assets") : importDrafts.length > 0 ? t("继续导入", "Resume import") : t("导入", "Import")}</span>
+              {quickDropBusy || importSaving ? <div className="import-spinner" /> : <Icon name="import" />}
+              <span className="import-cta-label">{quickDropBusy ? (quickDropStage === "Extracting" ? `${t("解压中", "Extracting")}${quickDropProgressKnown ? ` ${Math.round(quickDropProgress)}%` : ""}` : quickDropStage === "Building" ? t("识别中", "Detecting") : quickDropStage === "Grouping" ? t("整理中", "Grouping") : t("扫描中", "Scanning")) : quickDropActive ? t("拖拽导入", "Drop") : importSaving ? t("导入中…", "Importing…") : importDrafts.length > 0 ? t("继续导入", "Resume import") : t("导入", "Import")}</span>
               <span className="import-cta-cancel">{t("取消", "Cancel")}</span>
             </button>
             {characterPreviewGenerating && !importOpen && <div className="character-preview-progress-toast" role="status">
@@ -15534,6 +15844,14 @@ export function App() {
             <button type="button" className="character-filter-clear" onClick={clearCharacterFilters}>{t("清除筛选", "Clear filters")}</button>
           </div>}
         </> : <div className="filter-bar">
+          {(["animation", "fav-animation"].includes(activeMenu) || getAnimationNavigationSelection(activeMenu)) && !getAnimationNavigationSelection(activeMenu)?.animationType && <div className="animation-type-filters" role="group" aria-label={t("动画类型", "Animation type")}>
+            <button type="button" className={`animation-type-tag${search.themes.length === 0 ? " active" : ""}`} aria-pressed={search.themes.length === 0} onClick={() => executeSearch({ ...search, themes: [] })}>{t("全部动作", "All motions")}</button>
+            {ANIMATION_TYPE_OPTIONS.map(type => {
+              const token = normalizeThemeToken(type);
+              const selected = search.themes.includes(token);
+              return <button type="button" key={type} className={`animation-type-tag${selected ? " active" : ""}`} aria-pressed={selected} onClick={() => executeSearch({ ...search, themes: selected ? [] : [token] })}>{t(...ANIMATION_TYPE_DISPLAY_LABELS[type])}</button>;
+            })}
+          </div>}
           <DarkSelect
             value={search.assetTypes[0] || "all"}
             className="filter-select"
@@ -15548,7 +15866,7 @@ export function App() {
               { value: "imperfection", label: t("瑕疵贴图", "Imperfections") },
               { value: "displacement", label: t("置换贴图", "Displacements") },
               { value: "hdri", label: "HDRI" },
-              ...(["animation", "fav-animation", ...Object.keys(ANIMATION_AFFILIATION_BY_NODE_ID)].includes(activeMenu)
+              ...(["animation", "fav-animation"].includes(activeMenu) || getAnimationNavigationSelection(activeMenu)
                 ? [{ value: "animation", label: t("动画", "Animation") }] : [])
             ]}
             onChange={(nextValue) => executeSearch({ ...search, assetTypes: nextValue === "all" ? [] : [nextValue] })}
@@ -15639,6 +15957,7 @@ export function App() {
         <div className={`stage-container${characterContext ? " fixed-character-cards" : ""}`}>
           <div className="asset-stage" ref={assetStageRef} onScroll={handleAssetStageScroll}
             tabIndex={0} aria-label={t("资产卡片", "Asset cards")}
+            title={t("滚轮缩放卡片 · Shift＋滚轮滚动列表", "Wheel to zoom cards · Shift + wheel to scroll")}
             onKeyDown={handleAssetStageKeyDown}
             onClickCapture={(event) => {
               const target = event.target as HTMLElement;
@@ -15683,6 +16002,7 @@ export function App() {
                       {({ asset, x, y, width, height }) => (
                         <AssetCard
                           key={asset.id}
+                          animationProjectPath={settings.unrealProjectPath}
                           asset={asset}
                           monsterFormCounter={monsterFormCounters.get(asset.id)}
                           x={x} y={y} width={width} height={height}
@@ -15699,13 +16019,13 @@ export function App() {
                           onContextMenu={handleContextMenu}
                           onQuickExport={handleQuickExport}
                           exportTarget={settings.exportTarget}
-                          exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !canExport || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
-                          exportDimmed={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : (isExporting && !importingAssetIds.includes(asset.id)) || !canExport || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
+                          exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
+                          exportDimmed={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : (isExporting && !importingAssetIds.includes(asset.id)) || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
                           exportLoading={isExporting && importingAssetIds.includes(asset.id)}
                           exportProgress={isExporting && importingAssetIds.includes(asset.id) ? exportProgress : 0}
                           savingProgress={savingProgressMap[asset.id]}
                           uiLanguage={uiLanguage}
-                          exportTitle={isFolderOnlyAsset(asset) ? t("打开文件夹", "Open folder") : isBlenderTarget && !supportsBlenderExport(asset) ? blenderAssetUnavailableTitle : isThreeDCoatTarget && !supportsThreeDCoatExport(asset) ? threeDCoatAssetUnavailableTitle : !canExport ? exportUnavailableTitle : undefined}
+                          exportTitle={isFolderOnlyAsset(asset) ? t("打开文件夹", "Open folder") : isBlenderTarget && !supportsBlenderExport(asset) ? blenderAssetUnavailableTitle : isThreeDCoatTarget && !supportsThreeDCoatExport(asset) ? threeDCoatAssetUnavailableTitle : !assetCanExport(asset) ? exportUnavailableTitle : undefined}
                         />
                       )}
                     </OverviewAssetGrid>
@@ -15745,6 +16065,7 @@ export function App() {
                           {({ asset, x, y, width, height }) => (
                             <AssetCard
                               key={asset.id}
+                              animationProjectPath={settings.unrealProjectPath}
                               asset={asset}
                           monsterFormCounter={monsterFormCounters.get(asset.id)}
                               x={x} y={y} width={width} height={height}
@@ -15761,13 +16082,13 @@ export function App() {
                               onContextMenu={handleContextMenu}
                               onQuickExport={handleQuickExport}
                               exportTarget={settings.exportTarget}
-                              exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !canExport || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
-                              exportDimmed={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : (isExporting && !importingAssetIds.includes(asset.id)) || !canExport || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
+                              exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
+                              exportDimmed={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : (isExporting && !importingAssetIds.includes(asset.id)) || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
                               exportLoading={isExporting && importingAssetIds.includes(asset.id)}
                               exportProgress={isExporting && importingAssetIds.includes(asset.id) ? exportProgress : 0}
                               savingProgress={savingProgressMap[asset.id]}
                               uiLanguage={uiLanguage}
-                              exportTitle={isFolderOnlyAsset(asset) ? t("打开文件夹", "Open folder") : isBlenderTarget && !supportsBlenderExport(asset) ? blenderAssetUnavailableTitle : isThreeDCoatTarget && !supportsThreeDCoatExport(asset) ? threeDCoatAssetUnavailableTitle : !canExport ? exportUnavailableTitle : undefined}
+                              exportTitle={isFolderOnlyAsset(asset) ? t("打开文件夹", "Open folder") : isBlenderTarget && !supportsBlenderExport(asset) ? blenderAssetUnavailableTitle : isThreeDCoatTarget && !supportsThreeDCoatExport(asset) ? threeDCoatAssetUnavailableTitle : !assetCanExport(asset) ? exportUnavailableTitle : undefined}
                             />
                           )}
                       </OverviewAssetGrid>
@@ -15819,6 +16140,7 @@ export function App() {
               {assetGridLayout.visibleItems.map(({ asset, x, y, width, height }) => (
                 <AssetCard
                   key={asset.id}
+                  animationProjectPath={settings.unrealProjectPath}
                   asset={asset}
                           monsterFormCounter={monsterFormCounters.get(asset.id)}
                   x={x} y={y} width={width} height={height}
@@ -15835,33 +16157,43 @@ export function App() {
                   onContextMenu={handleContextMenu}
                   onQuickExport={handleQuickExport}
                   exportTarget={settings.exportTarget}
-                  exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !canExport || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
-                  exportDimmed={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : (isExporting && !importingAssetIds.includes(asset.id)) || !canExport || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
+                  exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
+                  exportDimmed={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : (isExporting && !importingAssetIds.includes(asset.id)) || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
                   exportLoading={isExporting && importingAssetIds.includes(asset.id)}
                   exportProgress={isExporting && importingAssetIds.includes(asset.id) ? exportProgress : 0}
                   savingProgress={savingProgressMap[asset.id]}
                   uiLanguage={uiLanguage}
-                  exportTitle={isFolderOnlyAsset(asset) ? t("打开文件夹", "Open folder") : isBlenderTarget && !supportsBlenderExport(asset) ? blenderAssetUnavailableTitle : isThreeDCoatTarget && !supportsThreeDCoatExport(asset) ? threeDCoatAssetUnavailableTitle : !canExport ? exportUnavailableTitle : undefined}
+                  exportTitle={isFolderOnlyAsset(asset) ? t("打开文件夹", "Open folder") : isBlenderTarget && !supportsBlenderExport(asset) ? blenderAssetUnavailableTitle : isThreeDCoatTarget && !supportsThreeDCoatExport(asset) ? threeDCoatAssetUnavailableTitle : !assetCanExport(asset) ? exportUnavailableTitle : undefined}
                 />
               ))}
             </section>
             )}
           </div>
 
-          <aside className={`right-panel ${selectedAsset ? "open" : ""}${selectedCharacterInfo ? " character-detail-panel" : ""}`}>
+          <aside className={`right-panel ${selectedAsset ? "open" : ""}${selectedCharacterInfo ? " character-detail-panel" : ""}${selectedAnimationFile ? " animation-detail-panel" : ""}`}>
             {selectedAsset ? (
               <>
-                <div className="right-content">
+                <div key={selectedAnimationFile ? `detail:${selectedAsset.id}:${selectedAsset.metaPath}` : undefined} className="right-content">
                   <div className="detail-info">
                   <div className="preview-main">
                     <div className="preview-overlay-actions">
-                      <button className="action-btn" onClick={focusSelectedAssetCard}><Icon name="search" /></button>
+                      <button className="action-btn" title={t("在 Hive 中找到", "Locate in Hive")} aria-label={t("在 Hive 中找到", "Locate in Hive")} onClick={focusSelectedAssetCard}><Icon name="search" /></button>
+                      {selectedAnimationFile && <button className="action-btn" title={t("在归档文件夹中找到", "Locate in archive folder")} aria-label={t("在归档文件夹中找到", "Locate in archive folder")} disabled={!bridgeAvailable} onClick={() => { void revealSelectedAssetArchive(); }}><Icon name="search-folder" /></button>}
                       <button className="action-btn" onClick={() => setSelectedAssetId(null)}><Icon name="close" /></button>
                     </div>
-                    {selectedAnimationFile ? (
+                    {selectedAnimationFile && ((selectedAsset.animationLabels || []).length > 0 || selectedAsset.animationGameTag) && (
+                      <div className="animation-labels animation-preview-labels">
+                        {selectedAsset.animationGameTag && <span className="animation-game-tag" title={selectedAsset.animationGameTag.id}>{selectedAsset.animationGameTag.name}</span>}
+                        {(selectedAsset.animationLabels || []).map(label => <span key={label}>{label}</span>)}
+                      </div>
+                    )}
+                    {selectedAnimationFile && selectedAutoRig === undefined ? <div className="animation-preview"><div className="preview-shimmer" /></div> : selectedAnimationFile ? (
                       <Suspense fallback={<div className="animation-preview"><div className="preview-shimmer" /></div>}>
                       <AnimationPreview
+                        key={selectedAsset.id}
                         filePath={selectedAnimationFile}
+                        motionDetailsHost={animationMotionHost}
+                        language={uiLanguage}
                         skeletonPath={selectedPreviewSkeletonPath}
                         skeletalMeshPath={selectedPreviewSkeletalMeshPath}
                         emptyLabel={t("没有可预览的动画文件", "No animation file to preview")}
@@ -15922,11 +16254,13 @@ export function App() {
                       </>
                     )}
                   </div>
+                  {selectedAnimationFile && renderDetailHeading()}
+                  {selectedAnimationFile && <AnimationAssetActivity key={`activity:${selectedAsset.id}`} asset={selectedAsset} projectPath={settings.unrealProjectPath} t={t} />}
+                  {selectedAnimationFile && <section className="animation-detail-section animation-info-section"><h3>{t('动画信息', 'Animation information')}</h3><div ref={setAnimationMotionHost} className="animation-motion-host" /></section>}
+                  {selectedAnimationFile && <AnimationRulesPanel key={`rules:${selectedAsset.id}`} asset={selectedAsset} assets={allAssets} filePath={selectedAnimationFile} skeletonPath={selectedPreviewSkeletonPath} loadStats={loadAnimationFbxStats} language={uiLanguage} />}
                   {selectedAnimationFile ? (
                     <div className="animation-rig-fields detail-animation-rig-fields">
-                      <div className="animation-rig-hint">
-                        {t("动画 FBX 通常只有动作数据。要看到角色，请选择骨骼和骨骼 Mesh。", "Animation FBX files usually contain motion only. Choose a skeleton and skeletal mesh to see the character.")}
-                      </div>
+                      <h3>{t('预览骨骼与 Mesh', 'Preview Skeleton and Mesh')}</h3>
                       {renderAnimationRigPathRow(
                         t("骨骼", "Skeleton"),
                         selectedPreviewSkeletonPath,
@@ -15974,6 +16308,7 @@ export function App() {
                     </div>
                   ) : null}
 
+                  {!selectedAnimationFile && <>
                   <div className="detail-hero">
                     <div className="detail-heading-row">
                       <h2>
@@ -16508,8 +16843,10 @@ export function App() {
                     </div>
                   )}
 
+                  </>}
                   </div>
 
+                  {!selectedAnimationFile && (
                   <div className="detail-list detail-related">
                     <h3>{t("相关资产", "Related Assets")}</h3>
                     <div className="related-grid">
@@ -16529,6 +16866,7 @@ export function App() {
                       {relatedAssets.length === 0 && ownedMonsterWeapons.length === 0 && <div className="related-empty">{t("暂无相关资产", "No related assets")}</div>}
                     </div>
                   </div>
+                  )}
                 </div>
 
                 <div className={`bottom-actions${showMeshOverwritePolicy ? " has-mesh-overwrite" : ""}`}>
@@ -16711,7 +17049,7 @@ export function App() {
                       )}
                     </div>
                     )}
-                    {!isThreeDCoatTarget && (
+                    {!isThreeDCoatTarget && !selectedAnimationFile && (
                     <div className="detail-export-select-wrap">
                       <DarkSelect
                         value={activeExportResolutionValue}
@@ -16919,6 +17257,13 @@ export function App() {
             </div>
           </div>
         )}
+        {animationExportAssetIds && <AnimationExportDialog
+          assets={animationExportAssetIds.map(id => allAssets.find(asset => asset.id === id)).filter((asset): asset is AssetRecord => Boolean(asset))}
+          settings={settings} t={t}
+          connected={canExportToUnreal} connectionMessage={unrealConnected ? "" : unrealConnectionMessage}
+          onSaveSettings={async (patch) => { setSettings(await bridge.updateSettings(patch)); }}
+            onCompleted={() => { if (selectedAssetId) void refreshAssetFromDisk(selectedAssetId); }}
+          onClose={() => setAnimationExportAssetIds(null)} />}
         {suitExportAssetIds && <SuitExportDialog assetIds={suitExportAssetIds} weapon={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === id)?.assetType === 'weapon')} monster={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === id)?.assetType === 'monster')} settings={settings} t={t}
           npc={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === componentParentId(id))?.assetType === 'npc')}
           item={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === componentParentId(id))?.assetType === 'item')}

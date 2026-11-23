@@ -260,6 +260,13 @@ async function renderCharacterViews(modelPaths: string[], texturePaths: Characte
   batch?: { owner: boolean; partPaths?: Set<string>; onPart: (path: string, images: Record<CharacterPreviewView, Blob>) => Promise<void>; onView: () => void }, heroPart = "", separateModels = false) {
   const models = [...new Set(modelPaths.map((value) => String(value || "").trim()).filter((value) => /\.fbx$/i.test(value)))];
   if (models.length === 0) throw new Error("没有可用于生成角色预览的 FBX 模型");
+  const reportStage = (stage: "load" | "render" | "webgl-context-lost" | "render-ended") => {
+    window.arkhive?.reportCharacterPreviewDiagnostic?.({
+      stage, modelCount: models.length, textureCount: texturePaths.length,
+      viewCount: views.length, imageSize: batch?.owner ? Math.max(1024, size) : size, skeletonPreview
+    });
+  };
+  reportStage("load");
   const texturesByStem = resolvePreviewTextures(texturePaths);
   const manager = new THREE.LoadingManager();
   manager.addHandler(/\.tga(?:$|[?#])/i, new TGALoader(manager));
@@ -320,7 +327,10 @@ async function renderCharacterViews(modelPaths: string[], texturePaths: Characte
   const skeletonHelper = skeletonPreview ? createSkeletonOverlay(root) : null;
   if (skeletonHelper) scene.add(skeletonHelper);
 
+  reportStage("render");
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
+  const onContextLost = () => reportStage("webgl-context-lost");
+  renderer.domElement.addEventListener("webglcontextlost", onContextLost);
   renderer.setPixelRatio(1);
   renderer.setSize(size, size, false);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -389,11 +399,13 @@ async function renderCharacterViews(modelPaths: string[], texturePaths: Characte
     }
     return await renderViews(bounds, batch?.owner ? 1024 : size);
   } finally {
+    renderer.domElement.removeEventListener("webglcontextlost", onContextLost);
     renderer.dispose();
     renderer.forceContextLoss();
     renderer.domElement.remove();
     disposeObject(root);
     disposeSkeletonOverlay(skeletonHelper);
+    reportStage("render-ended");
   }
 }
 

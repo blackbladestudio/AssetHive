@@ -1,0 +1,13 @@
+export type AnimationGameTagKind = 'weapon' | 'monster';
+export type AnimationGameTag = { kind: AnimationGameTagKind; id: string; name: string };
+export type AnimationGameTagOption = AnimationGameTag & { group: string };
+export type DataTableRow = { name: string; values: Record<string, unknown> };
+export const WEAPON_CATEGORY_TABLE: string;
+export const MONSTER_PROTOTYPE_TABLE: string;
+export function animationGameTagKind(affiliation: unknown): AnimationGameTagKind | '';
+export function normalizeAnimationGameTag(value: unknown): AnimationGameTag | undefined;
+export function formatAnimationGameTag(tag: unknown): string;
+export function inferAnimationGameTag(assetName: string, affiliation: string, options: AnimationGameTagOption[]): AnimationGameTag | undefined;
+export function syncAnimationGameTag<T extends { assetType: string; assetName: string; animationAffiliation: string; animationGameTag: AnimationGameTag | null; animationGameTagManual?: boolean }>(form: T, options: { weapons: AnimationGameTagOption[]; monsters: AnimationGameTagOption[] }): T;
+export function weaponOptionsFromRows(rows: DataTableRow[]): AnimationGameTagOption[];
+export function monsterOptionsFromRows(rows: DataTableRow[]): AnimationGameTagOption[];

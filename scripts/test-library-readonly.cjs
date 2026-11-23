@@ -35,6 +35,7 @@ test("successful UE and Blender export requests leave legacy metadata bytes and 
   const context = vm.createContext({ index: [asset], settings: {}, appUpdates: null, activeExportCalls: 0,
     componentParentId: require('../shared/characterComponents.mjs').componentParentId,
     isCharacterUEAsset: require('../electron/services/characterSuitExport').isCharacterUEAsset,
+    isAnimationUEAsset: require('../electron/services/animationUnrealExport').isAnimationUEAsset,
     recycleInProgress: false, filterRecycledIndex: async () => {},
     ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, refreshAssetById: async () => asset,
     exportToUnreal: async assets => { calls.push(assets); return { ok: true, exportedAssetIds: ["asset"], results: [{ status: "success" }] }; },

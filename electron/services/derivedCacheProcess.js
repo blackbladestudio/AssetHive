@@ -261,7 +261,7 @@ async function probeAnimationPreview({ sourcePath, root, localDir }) {
   const stat = await fs.stat(sourcePath).catch(() => null);
   if (!stat?.isFile()) return null;
   const key = createHash("sha256").update(JSON.stringify([
-    "animation-webm-v1", relative.toLowerCase(), stat.size, stat.mtimeMs
+    "animation-webm-v4", relative.toLowerCase(), stat.size, stat.mtimeMs
   ])).digest("hex");
   const localFile = animationPreviewFile(localDir, key);
   return { key, path: await animationPreviewBytes(localFile) ? localFile : "" };

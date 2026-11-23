@@ -26,7 +26,8 @@ export class PreviewLoader {
   constructor(
     private resolve: (path: string) => Promise<string>,
     private concurrency = 6,
-    private capacity = 2048
+    private capacity = 2048,
+    private onMissingMotionPreview: (path: string) => void = () => {}
   ) {}
 
   get(path: string): string {
@@ -103,7 +104,10 @@ export class PreviewLoader {
       // Consume a speculative request once, even if its cache entry is evicted.
       this.prefetch = this.prefetch.filter((candidate) => candidate !== path);
       void Promise.resolve().then(() => this.resolve(path)).catch(() => path).then((result) => {
-        if ((this.versions.get(path) || 0) === version) this.cache.set(path, result || path);
+        if ((this.versions.get(path) || 0) === version) {
+          this.cache.set(path, result || path);
+          if ((!result || result === path) && /\.fbx$/i.test(path)) this.onMissingMotionPreview(path);
+        }
         this.inFlight.delete(path);
         this.trim();
         this.listeners.get(path)?.forEach((listener) => listener());

@@ -1,0 +1,18 @@
+export type AnimationArchiveLocation = { segments: string[]; stem: string };
+export type AnimationExportOptions = { root: string; skeletons: Record<string, string>; targetFolders?: Record<string, string>; enableRootMotion: boolean; forceRootLock: boolean; showImportDialog: boolean; allowEngineCompressionFallback: boolean };
+export type AnimationExportPlanRow = { assetId: string; name: string; characterKey: string; sourcePath: string; targetPath: string; skeletonPath: string; error: string };
+export const ANIMATION_UE_EXPORT_VERSION: number;
+export const ANIMATION_UE_CAPABILITY: string;
+export const DEFAULT_ANIMATION_UE_ROOT: string;
+export const DEFAULT_HERO_ANIMATION_SKELETON: string;
+export const ANIMATION_LABEL_LIMIT: number;
+export const ANIMATION_LABEL_MAX_LENGTH: number;
+export function parseAnimationLabels(value: unknown): string[];
+export function normalizeUnrealFolder(value: unknown): string;
+export function animationArchiveLocation(fbxPath: string, libraryRoot?: string): AnimationArchiveLocation | null;
+export function animationCharacterKey(location: AnimationArchiveLocation | null): string;
+export function animationDestinationKey(location: AnimationArchiveLocation | null): string;
+export function suggestAnimationFolders(folders: string[], location: AnimationArchiveLocation | null, query?: string): string[];
+export function defaultAnimationSkeleton(affiliation: string, location: AnimationArchiveLocation | null): string;
+export function resolveAnimationExportOptions(saved?: Partial<AnimationExportOptions>): AnimationExportOptions;
+export function planAnimationExport(items: { assetId: string; name: string; fbxPath: string; affiliation?: string }[], options?: Partial<AnimationExportOptions>, libraryRoot?: string): AnimationExportPlanRow[];

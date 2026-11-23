@@ -130,6 +130,8 @@ function buildAnimationMetaFromModel(modelPath, cached = {}) {
   const assetID = String(cached.id || cached.assetID || cachedMeta.assetID || cachedMeta.id || stem).trim();
   const name = String(cached.name || cachedMeta.name || stem).trim();
   const preservedPreview = pickPreservedAnimationPreview(cached, cachedMeta);
+  const labels = Array.isArray(cached.animationLabels) ? cached.animationLabels
+    : (Array.isArray(cachedMeta.animationLabels) ? cachedMeta.animationLabels : []);
   return {
     ...cachedMeta,
     name,
@@ -141,6 +143,8 @@ function buildAnimationMetaFromModel(modelPath, cached = {}) {
     topCategory: "animation",
     category,
     animationAffiliation: affiliation || undefined,
+    animationLabels: labels.length ? labels : undefined,
+    animationGameTag: cached.animationGameTag || cachedMeta.animationGameTag || undefined,
     ...(preservedPreview ? { previewImage: preservedPreview, detailImage: preservedPreview } : {}),
     zionTags: Array.isArray(cached.zionTags)
       ? cached.zionTags

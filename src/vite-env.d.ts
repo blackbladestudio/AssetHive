@@ -47,6 +47,14 @@ declare global {
       pickThreeDCoatProgram: () => Promise<ThreeDCoatResult<ThreeDCoatConnection | { canceled: true }>>;
       pickThreeDCoatDataDirectory: () => Promise<ThreeDCoatResult<ThreeDCoatConnection | { canceled: true }>>;
       reportStartupMilestone?: (stage: "modules-ready" | "ui-mounted") => void;
+      reportCharacterPreviewDiagnostic?: (payload: {
+        stage: "load" | "render" | "webgl-context-lost" | "render-ended";
+        modelCount: number;
+        textureCount: number;
+        viewCount: number;
+        imageSize: number;
+        skeletonPreview: boolean;
+      }) => void;
       getSettings: () => Promise<AppSettings>;
       updateSettings: (patch: Partial<AppSettings>) => Promise<AppSettings>;
       windowMinimize?: () => Promise<{ ok: boolean }>;
@@ -69,6 +77,10 @@ declare global {
       loadImportQueue?: (libraryPath?: string) => Promise<ImportQueueSnapshot>;
       saveImportQueue?: (snapshot: ImportQueueSnapshot) => Promise<ImportQueueSnapshot>;
       getAssetById?: (assetId: string) => Promise<{ ok: boolean; asset: AssetRecord | null; listAsset?: AssetRecord | null }>;
+      getAnimationUnrealStatus?: (assetId: string) => Promise<{ state: string; projectPath?: string; targetPath?: string; at?: string; message?: string }>;
+      getAnimationUnrealFolders?: () => Promise<{ projectPath: string; folders: string[]; truncated: boolean }>;
+      pickAnimationUnrealFolder?: (request: { projectPath: string; folder?: string }) => Promise<string | null>;
+      getAnimationExportTargets?: (request: { projectPath: string; targets: { key: string; targetPath: string }[] }) => Promise<{ key: string; exists: boolean; targetPath: string }[]>;
       getUnrealConnectionStatus: () => Promise<{ connected: boolean; targetName?: string; reason?: string; message?: string; port?: number }>;
       getSuitUnrealStatus: (assetId: string) => Promise<{ ok: boolean; changed?: boolean; message?: string }>;
       downloadCharacterRigFiles: (assetId: string) => Promise<{ ok: boolean; canceled?: boolean; path?: string; count?: number; message?: string }>;
@@ -77,7 +89,7 @@ declare global {
       installBlenderPlugin: () => Promise<{ ok: boolean; path?: string; message?: string }>;
       rescanAssets: () => Promise<AssetRecord[]>;
       searchAssets: (query: { text: string; tags: string[]; assetTypes: string[]; themes: string[]; source: string }) => Promise<AssetRecord[]>;
-      pickAssetFolder: (options?: { defaultPath?: string }) => Promise<string | null>;
+      pickAssetFolder: (options?: { defaultPath?: string; nearestExistingParent?: boolean }) => Promise<string | null>;
       pickAssetImage: () => Promise<string | null>;
       pickAssetFile: (kind: "model" | "hairModel" | "animation" | "texture" | "displacement" | "hdri" | "any") => Promise<string | null>;
       renderGroomPreview?: (sourcePath: string) => Promise<Record<'front' | 'left' | 'right' | 'back', string>>;
@@ -321,6 +333,7 @@ declare global {
       }>;
       copyText: (text: string) => Promise<{ ok: boolean }>;
       openFolder: (path: string) => Promise<void>;
+      revealAssetArchive: (assetId: string) => Promise<{ ok: boolean; message?: string }>;
       revealCharacterModel?: (payload: { assetId: string; storedPath: string }) => Promise<{ ok: boolean; message?: string }>;
       revealCharacterTexture?: (payload: { assetId: string; storedPath: string }) => Promise<{ ok: boolean; message?: string }>;
       onExportProgress: (callback: (payload: { percent: number; message: string }) => void) => () => void;
@@ -368,6 +381,8 @@ declare global {
         callback: (payload: { stage: string; progress: number }) => void
       ) => () => void;
       getPluginStatus?: (payload: { projectPath?: string; editorPath?: string }) => Promise<{ installed: boolean; enabled?: boolean; canInstall?: boolean; message?: string }>;
+      getAnimationGameTagOptions?: () => Promise<{ weapons: import("../shared/animationGameTags.mjs").AnimationGameTagOption[]; monsters: import("../shared/animationGameTags.mjs").AnimationGameTagOption[]; source: string; partial: boolean }>;
+      resolveAnimationPreviewRig?: (payload: { rigRoot: string; animationPath: string; gameTagId?: string }) => Promise<string>;
       installPlugin?: (repo: string, targetPath: string) => Promise<{ ok: boolean; message?: string; path?: string; version?: string }>;
       installPluginFromGithub?: () => Promise<{ ok: boolean; message?: string; path?: string; version?: string }>;
       checkAppUpdate?: () => Promise<{
@@ -436,7 +451,8 @@ declare global {
       exportToBlender: Window["arkhive"]["exportToUnreal"];
       exportToUnreal: (payload: {
         assetIds: string[];
-        options: Partial<AppSettings> & import('./ui/suitExportTypes').SuitExportRequest;
+        options: Partial<AppSettings> & import('./ui/suitExportTypes').SuitExportRequest
+          & { animationExport?: Partial<import('../shared/animationUnrealExport.mjs').AnimationExportOptions> };
       }) => Promise<{
         ok: boolean;
         message: string;
@@ -447,6 +463,7 @@ declare global {
         results?: ExportResultItem[];
         partial?: boolean;
         suitResult?: import('./ui/suitExportTypes').SuitExportResult;
+        animationResult?: { projectPath: string; entries: Array<{ key: string; assetId: string; name: string; status: string; action?: string; path: string; targetPath: string; skeletonPath?: string; message?: string }> };
       }>;
     };
   }

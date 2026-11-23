@@ -14,7 +14,8 @@ export function createSearchDocument(asset: AssetRecord): SearchDocument {
     fields: strings([asset.name, asset.id, asset.assetID, asset.meta?.assetID, asset.meta?.slug,
       ...(["suit", "monster", "npc", "weapon"].includes(String(asset.assetType))
         ? [characterNames?.displayNameZh, characterNames?.displayNameEn] : []),
-      ...(asset.tags || []), ...(asset.standardAssetTags || []), ...(asset.zionTags || [])]),
+      ...(asset.tags || []), ...(asset.standardAssetTags || []), ...(asset.zionTags || []), ...(asset.animationLabels || []),
+      asset.animationGameTag?.name, asset.animationGameTag?.id]),
     identifiers: strings([asset.id, asset.assetID, asset.meta?.assetID])
   };
 }
