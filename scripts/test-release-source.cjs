@@ -48,13 +48,15 @@ function publishedFixture() {
 
 test('existing published release is validated through GET only and marked to skip all publishing', async () => {
   const { release, bodies } = publishedFixture(), calls = [];
+  release.body = '动画更新\n规范检查';
   const fetcher = async (url, options) => {
     calls.push(options.method || 'GET');
     return url.includes('api.github.com') ? { status: 200, json: async () => release } : { status: 200, text: async () => bodies.get(url) };
   };
-  const result = await checkPublishedRelease('blackbladestudio/AssetHive', { version: '2.3.5', sourceTag: 'v2.3.5' }, '动画更新', fetcher);
+  const result = await checkPublishedRelease('blackbladestudio/AssetHive', { version: '2.3.5', sourceTag: 'v2.3.5' }, '动画更新\r\n规范检查\r\n', fetcher);
   assert.equal(result.publishNeeded, false);
   assert.deepEqual(calls, ['GET', 'GET', 'GET', 'GET']);
+  await assert.rejects(checkPublishedRelease('blackbladestudio/AssetHive', { version: '2.3.5', sourceTag: 'v2.3.5' }, '动画更新\r\n其他内容', fetcher), /说明/);
 });
 
 test('missing or corrupted published assets fail validation rather than being silently replaced', async () => {

@@ -24,7 +24,8 @@ async function checkPublishedRelease(repository, proof, notes, fetcher = fetch) 
   if (response.status !== 200) throw new Error(`无法检查已发布版本: HTTP ${response.status}`);
   const release = await response.json();
   const pairs = validatePublishedRelease(release, proof.version);
-  if (release.body.trim() !== notes.trim()) throw new Error('已发布说明与版本源码中的说明不一致');
+  const normalizeNotes = text => text.replace(/\r\n/g, '\n').trim();
+  if (normalizeNotes(release.body) !== normalizeNotes(notes)) throw new Error('已发布说明与版本源码中的说明不一致');
   for (const { installer, checksum } of pairs) {
     const downloaded = await fetcher(checksum.browser_download_url, { headers: { 'User-Agent': 'AssetHive-release-validation' } });
     if (downloaded.status !== 200) throw new Error(`校验文件下载失败：${checksum.name}`);
