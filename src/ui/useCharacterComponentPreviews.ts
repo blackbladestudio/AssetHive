@@ -9,6 +9,9 @@ import { generateCharacterFourViewBlobs, generateCharacterPartFrontBlob, generat
 export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boolean, onUpdated: (asset: AssetRecord) => void) {
   const bridge = window.arkhive;
   const attempted = useRef(new Set<string>());
+  const retries = useRef(new Map<string, number>());
+  const retryTimers = useRef(new Set<number>());
+  useEffect(() => { const timers = retryTimers.current; return () => { for (const timer of timers) window.clearTimeout(timer); }; }, []);
   const hydrated = useRef(new Set<string>());
   const running = useRef(false);
   const onUpdatedRef = useRef(onUpdated);
@@ -41,7 +44,7 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
       const parts = listCharacterComponents(owner);
       const pending = characterSuitPendingPreviewViews(owner);
       const changes = parts.flatMap(part => (['staticMesh', 'skeletalMesh'] as const).filter(kind => needsCharacterMeshPreview(part, kind))
-        .map(kind => [part.slot, kind, characterMeshPreviewRevision(part.files, kind)]));
+        .map(kind => [part.slot, kind, characterMeshPreviewRevision(part.previewFiles || part.files, kind)]));
       return { kind: 'suit' as const, owner, pending, changes,
         key: JSON.stringify([owner.path, owner.id, changes, pending, pending.length ? (owner.meta.characterComponents as { contentRevision?: string })?.contentRevision : null]) };
     }).filter(job => job.pending.length || job.changes.length), [assets]);
@@ -111,16 +114,16 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
                 && /\.fbx$/i.test(file.normalizedName) && !/_LOD[1-9]\d*(?=\.[^.]+$)/i.test(file.normalizedName)).map(file => owner.path + '/' + file.storedPath)) : changed.map(task => task.path);
               // Normalize separators so paths from model slots and manifest share one scene.
               const normalize = (path: string) => path.replace(/\\/g, '/');
-              const texturePaths = kind === 'skeletalMesh' ? [] : renderOwner ? owner.textureFiles
+              const texturePaths = kind === 'skeletalMesh' ? [] : renderOwner || owner.assetType === 'suit' ? activeCharacterFiles(owner).filter(file => file.role === 'texture').map(file => owner.path + '/' + file.storedPath)
                 : [...new Set(changed.flatMap(task => componentAssetRecord(owner, task.part).textureFiles))];
               const textures = await Promise.all(texturePaths.map(async sourcePath => ({ sourcePath,
-                previewPath: bridge.getPreviewThumbnail ? await bridge.getPreviewThumbnail(sourcePath).catch(() => sourcePath) || sourcePath : sourcePath })));
+                previewPath: bridge.getPreviewThumbnail ? await bridge.getPreviewThumbnail(sourcePath, { character: true }).catch(() => sourcePath) || sourcePath : sourcePath })));
               if (cancelled) return;
               const ownerBlobs = await generateCharacterUpdatePreviews(models.map(normalize), textures, new Set(changed.map(task => normalize(task.path))), renderOwner, kind === 'skeletalMesh',
                 async (source, blobs) => {
                   const task = changed.find(task => normalize(task.path) === source)!;
                   saves.push({ action: 'updateCharacterPreview', payload: { assetId: owner.id, slot: task.part.slot,
-                    automatic: true, meshKind: kind, expectedRevision: characterMeshPreviewRevision(task.part.files, kind),
+                    automatic: true, meshKind: kind, expectedRevision: characterMeshPreviewRevision(task.part.previewFiles || task.part.files, kind),
                     expectedPreviewUri: task.part.meshPreviews[kind].previewUri, images: await materialize(blobs) } });
                 }, () => setProgress({ done: ++done, total, message: '正在生成预览…' }), heroPartKind(owner.meta?.character as { variant?: string } | undefined), owner.assetType === 'weapon');
               if (renderOwner) saves.push({ action: 'updateCharacterAutoPreviews', payload: { assetId: owner.id,
@@ -143,7 +146,7 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
             const models = card.modelFiles.filter(file => /\.fbx$/i.test(file) && !/_LOD\d+(?=\.[^.]+$)/i.test(file));
             if (models.length !== 1) throw new Error("自动正面照需要一个独立 FBX 主模型；当前格式请手动上传预览图");
             const textures = await Promise.all(card.textureFiles.map(async sourcePath => ({ sourcePath,
-              previewPath: bridge.getPreviewThumbnail ? await bridge.getPreviewThumbnail(sourcePath).catch(() => sourcePath) || sourcePath : sourcePath
+              previewPath: bridge.getPreviewThumbnail ? await bridge.getPreviewThumbnail(sourcePath, { character: true }).catch(() => sourcePath) || sourcePath : sourcePath
             })));
             if (cancelled) return;
             const blob = await generateCharacterPartFrontBlob(models[0], textures, 768, heroPartKind(owner.meta?.character as { variant?: string } | undefined));
@@ -171,7 +174,7 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
             const models = primary.map(file => owner.path + '/' + file.storedPath);
             if (!models.length) throw new Error("自动四视图需要 FBX 模型；当前格式请手动上传预览图");
             const textures = await Promise.all(owner.textureFiles.map(async sourcePath => ({ sourcePath,
-              previewPath: bridge.getPreviewThumbnail ? await bridge.getPreviewThumbnail(sourcePath).catch(() => sourcePath) || sourcePath : sourcePath
+              previewPath: bridge.getPreviewThumbnail ? await bridge.getPreviewThumbnail(sourcePath, { character: true }).catch(() => sourcePath) || sourcePath : sourcePath
             })));
             const blobs = await generateCharacterFourViewBlobs(models, textures, 1024, false, heroPartKind(owner.meta?.character as { variant?: string } | undefined), owner.assetType === 'weapon');
             const images = [];
@@ -186,10 +189,25 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
             }
           }
           if (!result.ok) throw new Error(result.message || "保存部件正面照失败");
+          retries.current.delete(job.key);
           if (!cancelled && result.asset) onUpdatedRef.current(result.asset);
           if (!cancelled) setErrors(previous => { const next = { ...previous }; delete next[job.kind === "part" ? job.part.id : job.owner.id]; return next; });
         } catch (error) {
           console.warn('Character preview failed', job.owner.id, error);
+          // A concurrent metadata refresh or transient share failure should heal
+          // automatically. Completed per-mesh revisions are skipped on retry.
+          const count = retries.current.get(job.key) || 0;
+          if (!cancelled && count < 3) {
+            retries.current.set(job.key, count + 1);
+            const timer = window.setTimeout(() => {
+              retryTimers.current.delete(timer);
+              attempted.current.delete(job.key);
+              void bridge.getAssetById!(job.owner.id).then(result => {
+                if (result.ok && result.asset) onUpdatedRef.current(result.asset);
+              }).catch(() => {}).finally(() => setIteration(value => value + 1));
+            }, [1000, 3000, 10000][count]);
+            retryTimers.current.add(timer);
+          }
           if (!cancelled) setErrors(previous => ({ ...previous, [job.kind === "part" ? job.part.id : job.owner.id]: error instanceof Error ? error.message : String(error) }));
         } finally {
           if (cancelled) attempted.current.delete(job.key);
@@ -207,8 +225,9 @@ export function useCharacterComponentPreviews(assets: AssetRecord[], paused: boo
   }, [bridge, jobSignature, paused, iteration]);
 
   function retry(assetId: string) {
-    for (const job of jobs) if ((job.kind === "part" ? job.part.id : job.owner.id) === assetId) attempted.current.delete(job.key);
-    setErrors(previous => { const next = { ...previous }; delete next[assetId]; return next; });
+    const ownerId = assetId.split('::part::')[0];
+    for (const job of jobs) if (job.owner.id === ownerId) attempted.current.delete(job.key);
+    setErrors(previous => { const next = { ...previous }; delete next[assetId]; delete next[ownerId]; return next; });
     setIteration(value => value + 1);
   }
   return { activeId, activeMeshKind, activeOwnerId, progress, errors, retry };

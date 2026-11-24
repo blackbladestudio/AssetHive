@@ -74,6 +74,8 @@ export type CharacterImportFields = {
   entityKey?: string;
   relatedAssetId?: string;
   formIds?: string[];
+  monsterVariant?: string;
+  monsterVariantOnly?: boolean;
   serial: string;
   variant: string;
   maturity: "wip" | "needs_rig" | "rigged" | "approved" | "final";

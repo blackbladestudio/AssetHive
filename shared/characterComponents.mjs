@@ -42,10 +42,16 @@ export function characterMeshKind(file) {
 }
 
 // Each model kind owns its preview revision. Uploading SK must not invalidate SM.
+const suitMaterialPreview = (files, kind) => kind === 'staticMesh' && files.some(file =>
+  isPrimaryModel(file) && characterMeshKind(file) === 'staticMesh'
+  && /^(?:SM|SK)_[MF]\d+_(?:Light|Medium|Heavy)\d+_/i.test(base(file.normalizedName || file.storedPath)));
 export function characterMeshPreviewRevision(files, kind) {
   const weapon = files.some(file => /^(?:SM|SK)_(?:Bow|Arrow|Dagger|DualHands|DualAxe|GreatAxe|GreatSword|Jade|LongSword|PairedSwords|ShieldAxe|Spear|Sword)\d+_/i.test(file.normalizedName || ''));
-  return (weapon ? 'weapon-material-joints-v2:' : '') + JSON.stringify(files.filter(file => isPrimaryModel(file) && characterMeshKind(file) === kind
-    || kind === 'staticMesh' && file.role === 'texture').map(file => [file.role, file.sha256 || file.storedPath]).sort());
+  const suit = suitMaterialPreview(files, kind);
+  return (suit ? 'suit-material-pool-v3:' : weapon ? 'weapon-material-joints-v2:' : '') + JSON.stringify(files.filter(file => isPrimaryModel(file) && characterMeshKind(file) === kind
+    || kind === 'staticMesh' && file.role === 'texture').map(file => suit
+      ? [file.role, file.sha256 || file.storedPath, base(file.normalizedName || file.storedPath)]
+      : [file.role, file.sha256 || file.storedPath]).sort());
 }
 
 export function needsCharacterMeshPreview(part, kind) {
@@ -56,7 +62,8 @@ export function needsCharacterMeshPreview(part, kind) {
   const complete = ['front', 'left', 'right', 'back'].every(view => preview?.previewImages?.some(image =>
     image.uri && image.tags?.includes(`view:${view}`)));
   if (!complete || !preview?.previewUri) return true;
-  if (preview.previewRevision === characterMeshPreviewRevision(part.files, kind)) return false;
+  if (preview.previewRevision === characterMeshPreviewRevision(part.previewFiles || part.files, kind)) return false;
+  if (suitMaterialPreview(part.files, kind)) return true;
   // Older desktop processes included artist LODs in this signature, although
   // the rendered view uses only LOD0. Accept the exact legacy signature only
   // while every recorded model and texture is still unchanged.
@@ -67,8 +74,13 @@ export function needsCharacterMeshPreview(part, kind) {
 }
 
 export function characterSuitPendingPreviewViews(asset) {
-  if (asset?.assetType !== 'suit' || asset.meta?.componentView || !asset.meta?.characterComponents?.suitPreviewNeedsUpdate) return [];
+  if (asset?.assetType !== 'suit' || asset.meta?.componentView) return [];
+  const files = activeCharacterFiles(asset);
   const images = asset.meta.previews?.images || [];
+  const staleMaterials = images.some(image => image.tags?.some(tag => tag.startsWith('view:')))
+    && suitMaterialPreview(files, 'staticMesh') && files.some(file => file.role === 'texture')
+    && asset.meta?.characterComponents?.suitMaterialPreviewRevision !== characterMeshPreviewRevision(files, 'staticMesh');
+  if (!asset.meta?.characterComponents?.suitPreviewNeedsUpdate && !staleMaterials) return [];
   return ['front', 'left', 'right', 'back'].filter(view => !images.some(image =>
     image.tags?.includes(`view:${view}`) && image.tags?.includes('origin:manual')));
 }
@@ -232,6 +244,19 @@ export function characterModelPreviewComponents(asset) {
       previewOrigin: saved?.previewOrigin || "manual",
       previewState: !previewUri ? "missing" : previewRevision !== current.id ? "stale" : "current" };
   });
+  // A suit part can use another material group (for example a cape). Its preview
+  // signature must include the same active texture pool used by the renderer.
+  // Keep the owned file inventory unchanged for versioning and updates.
+  if (asset.assetType === 'suit') {
+    let active = [...manifest];
+    for (const part of components) {
+      if (part.currentRevision === part.revisions[0].id) continue;
+      const replaced = new Set(part.revisions[0].files.map(file => file.storedPath));
+      active = [...active.filter(file => !replaced.has(file.storedPath)), ...part.files];
+    }
+    const textures = [...new Map(active.filter(file => file.role === 'texture').map(file => [file.storedPath, file])).values()];
+    for (const part of components) part.previewFiles = [...part.files.filter(file => file.role !== 'texture'), ...textures];
+  }
   // Presentation only: stable slot IDs, ownership and stored files are unchanged.
   if (asset.assetType === "suit") components.sort((a, b) =>
     (suitPartOrder.get(heroSuitPart(a.name + '.fbx').toLowerCase()) ?? suitPartOrder.size)
@@ -291,7 +316,8 @@ export function componentAssetRecord(parent, part) {
     modelFiles: part.files.filter(isPrimaryModel).map(file => join(parent.path, file.storedPath)),
     textureFiles: part.files.filter(file => file.role === "texture").map(file => join(parent.path, file.storedPath)),
     preview, previewImage: preview, detailImage: preview, previewImages,
-    meta: { ...parent.meta, componentView: { parentId: parent.id, slot: part.slot, role: part.role, sharedAcrossForms: part.sharedAcrossForms, currentRevision: part.currentRevision, previewGalleryRevision: part.previewGalleryRevision, previewState: part.previewState, meshKinds: part.meshKinds, meshSlots },
+    meta: { ...parent.meta, componentView: { parentId: parent.id, slot: part.slot, role: part.role, sharedAcrossForms: part.sharedAcrossForms, currentRevision: part.currentRevision, previewGalleryRevision: part.previewGalleryRevision, previewState: part.previewState, meshKinds: part.meshKinds, meshSlots,
+      missingTextures: Boolean(part.meshKinds.staticMesh && !(part.previewFiles || part.files).some(file => file.role === 'texture')) },
       previews: { images, relativeSize: "1x1" },
       characterManifest: { ...parent.meta?.characterManifest, contentUpdatedAt: part.updatedAt, lastUpdateSummary: "", files: part.files, fileCount: part.files.length } } };
 }

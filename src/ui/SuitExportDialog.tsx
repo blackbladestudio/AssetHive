@@ -207,6 +207,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
       </section>}
       {result && <div className="suit-export-rows">{rows.filter(row => showUnchanged || row.action !== 'unchanged').map(row => <div className={`suit-export-row ${row.status}`} key={row.key}>
         <strong>{row.name}</strong><span>{done ? ({ success: t('已完成', 'Done'), unchanged: t('未重导', 'Unchanged'), failed: t('失败', 'Failed'), blocked: t('待处理', 'Blocked'), skipped: t('已跳过', 'Skipped') }[row.status] || row.status) : actionLabel[row.action] || row.action}</span>
+        {row.lodReport?.levels && <small>{t('UE 实际 LOD：', 'Actual UE LODs: ')}{row.lodReport.levels.map(level => `LOD${level.index}: ${level.triangles.toLocaleString()}`).join(' · ')} {t('三角面', 'triangles')}</small>}
         <details className="suit-export-item-path"><summary>{t('查看引擎内位置', 'Show location in Unreal Engine')}</summary><code>{row.path || row.targetPath}</code></details>{row.message && (row.action !== 'restore' || ['failed', 'blocked'].includes(row.status)) && <small>{row.message}</small>}
         {!done && row.status === 'conflict' && <select aria-label={`${row.name} ${t('处理方式', 'Action')}`} value={decisions[row.key] || 'skip'} onChange={event => setDecisions(current => ({ ...current, [row.key]: event.target.value }))} disabled={busy}>
           <option value="skip">{t('跳过本次', 'Skip this time')}</option>

@@ -33,7 +33,7 @@ async function saveCharacterImportPreviews({ meta, assetType, destinationDir, pr
     }));
     const slot = state.slots[part.slot] || {};
     state.slots[part.slot] = { ...slot, meshPreviews: { ...slot.meshPreviews, [preview.meshKind]: {
-      previewUri: images[0].uri, previewImages: images, previewOrigin: 'rendered', previewRevision: characterMeshPreviewRevision(part.files, preview.meshKind)
+      previewUri: images[0].uri, previewImages: images, previewOrigin: 'rendered', previewRevision: characterMeshPreviewRevision(part.previewFiles || part.files, preview.meshKind)
     } } };
   }
   meta.characterComponents = state;

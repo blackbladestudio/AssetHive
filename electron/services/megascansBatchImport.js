@@ -8,7 +8,7 @@ const { encodedKey, receiptPath: resolveReceiptPath } = require('../../scripts/l
 
 const TYPE_FOLDERS = { '3d': '3D Assets', '3dplant': 'Foliage', surface: 'Surfaces', decal: 'Decals', atlas: 'Atlases', imperfection: 'Imperfections', displacement: 'Displacements', hdri: 'HDRI' };
 
-function buildPayload(metadata, destinationPath) {
+function buildPayload(metadata, destinationPath, normalMapFormat = 'dx') {
   if (!TYPE_FOLDERS[metadata.assetType]) throw new Error(`AssetHive 暂不支持此类型：${metadata.assetType}`);
   const modelSlots = {}, modelVariantKeys = {}, modelLodFiles = {};
   for (const [index, file] of (metadata.modelFiles || []).entries()) {
@@ -33,7 +33,7 @@ function buildPayload(metadata, destinationPath) {
     textureEntries: (metadata.textureSlots || []).filter(entry => metadata.assetType === 'hdri'
       ? /\.(hdr|exr)$/i.test(entry.filePath || '') : path.extname(entry.filePath || '').toLowerCase() !== '.exr'),
     previewImagePath: metadata.previewImagePath,
-    normalMapFormat: 'dx', normalMapFormats: { 1: 'dx' },
+    normalMapFormat, normalMapFormats: { 1: normalMapFormat },
     destinationPath
     // Explicit slots above avoid a second broad source-folder scan, which can
     // otherwise mix preview/billboard images or duplicate model variants.
@@ -132,7 +132,9 @@ async function runImportJob(job, { readMetadata, importAsset }) {
     await transparentPreview(preview, path.join(staging, 'preview-cutout.png'), { method });
     metadata.previewImagePath = path.join(staging, 'preview-cutout.png');
   }
-  const result = await importAsset(buildPayload(metadata, staging));
+  const isQuixelDownload = job.downloadSource === 'fab' || job.downloadSource === 'bridge';
+  const normalMapFormat = isQuixelDownload ? 'opengl' : 'dx';
+  const result = await importAsset(buildPayload(metadata, staging, normalMapFormat));
   if (!result?.ok) throw new Error(result?.message || 'AssetHive 未返回入库结果');
   const stagedRoot = result.assetPath;
   if (!inside(staging, stagedRoot)) throw new Error('AssetHive 入库输出不在临时目录');

@@ -141,6 +141,19 @@ async function buildSuitExport(asset, options = {}, analyze = analyzeFbxInWorker
       if (original?.kind === entry.kind && original.path?.startsWith(intake.enginePath + '/')) {
         entry.targetPath = original.path;
         entry.name = original.path.slice(original.path.lastIndexOf('/') + 1);
+        // Recovered monster meshes already have a rig (and may deliberately
+        // have no physics asset). Do not propose new helpers during linking.
+        const skeletonChoice = options.skeletonOverrides?.[entry.key] || options.skeletonSelection;
+        if (entry.kind === 'skeletalMesh' && original.skeletonPath?.startsWith('/Game/')
+          && (!skeletonChoice || skeletonChoice.mode === 'auto')) {
+          entry.skeletonPath = original.skeletonPath.split('.')[0];
+          entry.config = { ...entry.config, ownSkeleton: false, skeletonOverride: 'existing',
+            skeletonOverridePath: entry.skeletonPath, createPhysicsAsset: false,
+            physicsAssetPath: String(original.physicsAssetPath || '').split('.')[0] };
+          entry.fingerprint = hash({ sourceHash: entry.sourceHash, config: entry.config,
+            skeletonPath: entry.skeletonPath, materials: entry.materials, externalMaterials: entry.externalMaterials,
+            textures: entry.textures, heroSharedRoles: entry.heroSharedRoles });
+        }
       }
     }
   }
@@ -165,7 +178,8 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
   const sourceName = asset.meta?.name || asset.name;
   const name = safeName(modernItem ? gameplayIdentity(itemCategory, fields.displayNameEn || fields.name || sourceName).assetName : monster ? fields.name || sourceName.replace(/^(SM|SK)_/i, '').replace(/_\d{2}$/, '') : sourceName);
   const assetId = String(asset.id);
-  const monsterCategory = npc ? safeName(asset.meta?.category || fields.category || asset.category || '') : monster && MONSTER_CATEGORIES[token(asset.meta?.category || asset.category).replace(/^\d+/, '')];
+  const npcCategory = npc && require('../../shared/npcCategories.mjs').normalizeNpcCategory(asset.meta?.category || fields.category || asset.category || '');
+  const monsterCategory = npc ? safeName(({ Human: 'H', Nonhuman: 'NH' })[npcCategory] || npcCategory) : monster && MONSTER_CATEGORIES[token(asset.meta?.category || asset.category).replace(/^\d+/, '')];
   if (monster && !monsterCategory) throw new Error('请先确认怪物类别');
   // UE directories use the category label and AssetHive name. The AssetHive
   // identity, serial/form metadata and managed filenames remain unchanged.
@@ -173,7 +187,17 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
   // New classification paths are library metadata; UE subfolder mapping is not configured yet.
   // Preserve existing legacy destinations so an update does not move an imported asset.
   const itemRoot = !item || itemCategory.includes('/') ? '/Game/Characters/GameplayItem' : `/Game/Characters/GameplayItem/${safeName(itemCategory)}`;
+  const variant = monster ? String(fields.monsterVariant || '').trim() : '';
+  const outputName = variant ? safeName(variant.toLowerCase().startsWith(name.toLowerCase() + '_') ? variant : `${name}_${variant}`) : name;
   const targetRoot = item ? `${itemRoot}/${name}` : monster ? `/Game/Characters/${npc ? 'NPC' : 'Monster'}/${monsterCategory}/${monsterFolder}` : weapon ? weaponTargetRoot(name) : `${ROOT}/${fields.gender}_${fields.bodyCode}/Mesh/${name}`;
+  // Variants are optional children of Mesh. Forms remain filename suffixes,
+  // never extra directories. Independent weapon/item layouts are unchanged.
+  const monsterMeshRoot = `${targetRoot}/Mesh${variant ? '/' + outputName : ''}`;
+  const outputSuffix = value => {
+    if (!variant) return value;
+    const suffix = outputName.slice(name.length + 1);
+    return value.toLowerCase() === suffix.toLowerCase() ? '' : value.replace(new RegExp('^' + suffix + '_', 'i'), '');
+  };
   const parts = ownSkeleton ? characterModelPreviewComponents(asset) : listCharacterComponents(asset);
   // Every suit send compares the entire owner, regardless of which card opened it.
   const selectedSlot = '';
@@ -248,14 +272,16 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
       const sourceSubject = (weapon ? weaponSideInternal(fileStem, name) : fileStem).replace(/^(?:SM|SK)_/i, '');
       const subject = (weapon || item) && sourceSubject.toLowerCase() === name.toLowerCase() ? '' : sourceSubject.replace(new RegExp('^' + name + '_', 'i'), '');
       const weaponSubject = monster ? monsterWeaponSubject(file, name) : '';
-      const outputSubject = weaponSubject || subject;
-      const resourceRoot = weaponSubject ? `${targetRoot}/Weapon` : targetRoot;
+      const outputSubject = weaponSubject || outputSuffix(subject);
+      const resourceRoot = monster ? `${monsterMeshRoot}${weaponSubject ? '/Weapon' : ''}` : weaponSubject ? `${targetRoot}/Weapon` : targetRoot;
       const componentFolder = weapon && selectedParts.length > 1 && outputSubject ? '/' + safeName(outputSubject) : '';
-      const skeletalDirectory = `${resourceRoot}/Mesh/SkeletalMesh${componentFolder}`;
-      const meshName = safeName(`${kind === 'skeletalMesh' ? 'SK' : 'SM'}_${weaponSubject ? 'WP_' : ''}${name}${outputSubject ? '_' + outputSubject : ''}`);
+      const meshDirectory = monster && !weaponSubject ? resourceRoot : `${resourceRoot}/Mesh`;
+      const skeletalDirectory = `${meshDirectory}/SkeletalMesh${componentFolder}`;
+      const meshName = safeName(`${kind === 'skeletalMesh' ? 'SK' : 'SM'}_${weaponSubject && !monster ? 'WP_' : ''}${outputName}${outputSubject ? '_' + outputSubject : ''}`);
       const meshKey = `${assetId}:${kind}:${token(subject) || 'main'}`;
       const materials = {};
       const externalMaterials = {};
+      const linkMaterialPaths = {};
       const sharedMaterialSlots = [];
       const unresolvedMaterials = [];
       for (const original of analysis.materialNames || []) {
@@ -267,6 +293,7 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
         if (!options.materialMappings?.[mappingKey] && !importChoice && asset.meta?.characterUEIntake?.preserveMaterialBindings
           && /^\/(?:Game|Engine)\//.test(recovered || '')) {
           if (recovered.startsWith('/Game/')) externalMaterials[original] = recovered;
+          else linkMaterialPaths[original] = recovered;
           // Engine placeholders are not owned materials and need no binding.
           continue;
         }
@@ -294,16 +321,27 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
           materialRequests.push({ key: mappingKey, meshName, slot: original, groups: [...groups.values()].map(g => ({ key: g.key, name: g.name })) });
           continue;
         }
+        // Recovered SM FBXs can retain artist slot names while UE records the
+        // renamed MI slots. Resolve the same unique material group within this
+        // exact mesh; never borrow bindings from another mesh or shared folder.
+        const intake = asset.meta?.characterUEIntake;
+        if (family === 'suit' && !chosen && intake?.preserveMaterialBindings) {
+          const paths = [...new Set(Object.entries(intake.materialBindings || {}).filter(([key, value]) =>
+            key.startsWith(meshKey + '|') && String(value).startsWith(intake.enginePath + '/')
+            && matchSuitMaterialSlot(key.slice(meshKey.length + 1), [...groups.values()], heroSuitPart(file.normalizedName)).key === group.key
+          ).map(([, value]) => value))];
+          if (paths.length === 1) { externalMaterials[original] = paths[0]; continue; }
+        }
         usedGroups.add(group.key);
         materials[original] = `${assetId}:material:${group.key}`;
       }
       if (!weapon && !item && !(analysis.materialNames || []).length) unresolvedMaterials.push('模型未提供材质槽');
       entries.push({ key: meshKey, kind, name: meshName, partSlot: part.slot,
-        targetPath: `${kind === 'skeletalMesh' ? skeletalDirectory : resourceRoot + '/Mesh/StaticMesh'}/${meshName}`,
-        ...source, materials, externalMaterials, sharedMaterialSlots, unresolvedMaterials, bones: analysis.bones || [],
-        ...(kind === 'skeletalMesh' ? { skeletonPath: ownSkeleton ? `${skeletalDirectory}/SKEL_${name}${outputSubject ? '_' + outputSubject : ''}` : String(options.skeletonPath || DEFAULT_SKELETON) } : {}),
+        targetPath: `${kind === 'skeletalMesh' ? skeletalDirectory : meshDirectory + '/StaticMesh'}/${meshName}`,
+        ...source, materials, externalMaterials, linkMaterialPaths, sharedMaterialSlots, unresolvedMaterials, bones: analysis.bones || [],
+        ...(kind === 'skeletalMesh' ? { skeletonPath: ownSkeleton ? `${skeletalDirectory}/SKEL_${outputName}${outputSubject ? '_' + outputSubject : ''}` : String(options.skeletonPath || DEFAULT_SKELETON) } : {}),
         config: { version: VERSION, family, ...(item ? { itemMaterialVersion: 1 } : {}), ...(ownSkeleton && kind === 'skeletalMesh' ? { ownSkeleton: true,
-          physicsAssetPath: `${skeletalDirectory}/SK_${name}${outputSubject ? '_' + outputSubject : ''}_Physics` } : {}),
+          physicsAssetPath: `${skeletalDirectory}/SK_${outputName}${outputSubject ? '_' + outputSubject : ''}_Physics` } : {}),
           importAnimations: false, createPhysicsAsset: ownSkeleton && kind === 'skeletalMesh', updateReferencePose: false } });
     }
   }
@@ -311,10 +349,11 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
   for (const groupKey of usedGroups) {
     const group = groups.get(groupKey);
     const suitHair = family === 'suit' && /(?:^|_)(?:hair|fur)(?:_|$)/i.test(group.name.replace(/([a-z])([A-Z])/g, '$1_$2'));
-    const resourceRoot = group.monsterWeapon ? `${targetRoot}/Weapon` : targetRoot;
+    const resourceRoot = monster ? `${monsterMeshRoot}${group.monsterWeapon ? '/Weapon' : ''}` : group.monsterWeapon ? `${targetRoot}/Weapon` : targetRoot;
+    const groupOutputName = group.monsterWeapon ? group.name : outputSuffix(group.name);
     const textureKeys = {};
     for (const { file, channel } of group.files) {
-      const textureName = safeName(`T_${group.monsterWeapon ? 'WP_' : ''}${name}${group.name ? '_' + group.name : ''}_${channel}`);
+      const textureName = safeName(`T_${group.monsterWeapon && !monster ? 'WP_' : ''}${outputName}${groupOutputName ? '_' + groupOutputName : ''}_${channel}`);
       const key = `${assetId}:texture:${groupKey}:${channel}`;
       // Auxiliary textures remain available in UE; only documented parameters
       // of the existing parent material receive automatic bindings.
@@ -340,7 +379,7 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
           family, virtualTexture: item || !(weapon || group.monsterWeapon), maxSize: item ? 2048 : 0, lodBias: 0, preserveAlpha: true,
           ...(item ? { itemMaterialVersion: 1 } : {}) } });
     }
-    const materialName = `MI_${group.monsterWeapon ? 'WP_' : ''}${name}${group.name ? '_' + group.name : ''}`;
+    const materialName = `MI_${group.monsterWeapon && !monster ? 'WP_' : ''}${outputName}${groupOutputName ? '_' + groupOutputName : ''}`;
     const materialKey = `${assetId}:material:${groupKey}`;
     // These texture groups already feed an existing UE material. Updating a
     // texture updates that same object; do not invent a second material instance.
@@ -395,6 +434,7 @@ async function deletedSuitOwners(root, assets) {
 }
 
 async function sendSuitJob(assets, options, onProgress, client) {
+  if (options.suitOptions?.linkOnly) return require('./characterLinkOnly').sendCharacterLinkJob(assets, options, onProgress, client);
   const editor = await client.getEditorInfo();
   if (!editor?.capabilities?.includes('characterSuitV1')) throw new Error('请编译并加载支持套装导入的 AssetHive 插件');
   if (options.unrealProjectPath && normalize(options.unrealProjectPath) !== normalize(editor.projectPath)) throw new Error('连接的 UE 工程与所选目标不一致');
@@ -430,6 +470,10 @@ async function sendSuitJob(assets, options, onProgress, client) {
     }
   }
   const mergedSuits = [...uniqueSuits.values()];
+  if (mergedSuits.some(suit => suit.entries.some(entry => entry.config?.lodPolicy === 'lod1-reduction-v2'))
+    && !editor.capabilities.includes('characterLodsV2')) {
+    throw new Error('请更新 AssetHive UE 插件并重启编辑器：当前插件不支持 SM/SK LOD 导入验证与 LOD1 自动减面。');
+  }
   for (const suit of mergedSuits) suit.entries.sort((a, b) => ['texture', 'material', 'staticMesh', 'skeletalMesh'].indexOf(a.kind) - ['texture', 'material', 'staticMesh', 'skeletalMesh'].indexOf(b.kind));
   const phase = options.suitPhase === 'apply' ? 'apply' : 'inspect';
   if (phase === 'apply' && options.suitManifestHash !== hash(mergedSuits)) throw new Error('资源在检查后已变化，请重新检查');
@@ -444,6 +488,8 @@ async function sendSuitJob(assets, options, onProgress, client) {
   if (result?.error) throw new Error(result.error);
   if (!result || !Array.isArray(result.entries)) throw new Error('插件没有返回套装逐项结果');
   const manifestEntries = new Map(mergedSuits.flatMap(suit => suit.entries).map(entry => [entry.key, entry]));
+  if (phase === 'apply') result.entries = result.entries.map(row =>
+    require('./characterLodReceipt').verifyCharacterLodReceipt(manifestEntries.get(row.key), row));
   result.entries = result.entries.map(row => ({ ...row,
     ...(row.kind === 'skeletalMesh' ? { skeletonSelection: effectiveOptions.get(row.assetId)?.skeletonOverrides?.[row.key]
       || effectiveOptions.get(row.assetId)?.skeletonSelection || { mode: 'auto' },
@@ -465,6 +511,7 @@ async function sendSuitJob(assets, options, onProgress, client) {
         for (const row of rows) {
           const success = ['success', 'unchanged'].includes(row.status) && row.action !== 'retained';
           next[row.key] = { ...next[row.key], ...row,
+            ...(row.lodReport ? { lodCheckedAt: new Date().toISOString() } : {}),
             ...(phase === 'apply' && success ? { lastSuccessPath: row.path, lastSuccessAt: new Date().toISOString(), missingInUE: false, livePath: row.path } : {}),
             ...(row.status === 'missing' ? { missingInUE: true, livePath: '' } : {}) };
         }
@@ -511,23 +558,27 @@ function isSuitAsset(asset) {
 function isCharacterUEAsset(asset) { return isSuitAsset(asset) || ['weapon', 'monster', 'npc', 'item'].includes(asset?.assetType); }
 
 async function refreshSuitStatus(asset, options, client) {
-  if (!isCharacterUEAsset(asset) || !asset.meta?.characterUnrealExports) return false;
+  if (!isCharacterUEAsset(asset)) return false;
   const editor = await client.getEditorInfo();
-  if (!editor?.capabilities?.includes('characterSuitV1')) return false;
-  if (options.unrealProjectPath && normalize(options.unrealProjectPath) !== normalize(editor.projectPath)) return false;
+  if (!await require('./characterPluginCapabilities').hasCharacterCapability(client, editor, 'characterStatusV2')) throw new Error('请更新目标 UE 的 AssetHive 插件，以刷新实际资源状态');
+  if (options.unrealProjectPath && normalize(options.unrealProjectPath) !== normalize(editor.projectPath)) throw new Error('连接的 UE 工程与所选目标不一致，未更新路径记录');
   const projectKey = hash(normalize(editor.projectPath));
-  if (!asset.meta.characterUnrealExports[projectKey]) return false;
-  const reply = await client.importAssets({ characterSuit: { version: VERSION, phase: 'status', suits: [{ assetId: asset.id }] } }, { projectPath: editor.projectPath });
-  if (reply.suitResult?.error || !Array.isArray(reply.suitResult?.entries)) return false;
+  const savedReceipt = asset.meta?.characterUnrealExports?.[projectKey];
+  const plan = savedReceipt && Object.keys(savedReceipt.entries || {}).length ? null : await buildSuitExport(asset, { includeStaticMeshes: true });
+  const current = savedReceipt?.entries && Object.keys(savedReceipt.entries).length ? savedReceipt.entries : Object.fromEntries((plan?.entries || []).map(entry => [entry.key,
+    { key: entry.key, kind: entry.kind, name: entry.name, partSlot: entry.partSlot, targetPath: entry.targetPath }]));
+  const expected = Object.entries(current).filter(([, row]) => row.action !== 'retained').map(([key, row]) => ({ key, path: row.livePath || row.path || row.lastSuccessPath || row.targetPath, kind: row.kind }));
+  const reply = await client.importAssets({ characterSuit: { version: VERSION, phase: 'status', suits: [{ assetId: asset.id, entries: expected }] } }, { projectPath: editor.projectPath });
+  if (reply.suitResult?.error || !Array.isArray(reply.suitResult?.entries)) throw new Error(reply.suitResult?.error || 'UE 未返回资源状态');
   const updates = reply.suitResult.entries.filter(row => row.assetId === asset.id && typeof row.present === 'boolean');
-  const current = asset.meta.characterUnrealExports[projectKey].entries || {};
-  if (!updates.some(row => current[row.key] && (current[row.key].missingInUE !== !row.present || current[row.key].livePath !== row.path))) return false;
+  if (expected.some(row => !updates.some(update => update.key === row.key))) throw new Error('UE 状态回执不完整，未改动已有路径记录');
+  if (!updates.some(row => current[row.key] && (current[row.key].missingInUE !== !row.present || current[row.key].livePath !== row.path || Boolean(current[row.key].associationPending) !== Boolean(row.associationPending)))) return false;
   await updateAssetMetadataFile(asset.metaPath, meta => {
-    const receipt = meta.characterUnrealExports?.[projectKey];
-    if (!receipt) return meta;
+    const receipt = (meta.characterUnrealExports ||= {})[projectKey] ||= { projectPath: editor.projectPath, targetRoot: plan?.targetRoot || '', entries: current };
     recordUEPresenceChanges(meta, receipt, updates, editor.projectPath);
     for (const row of updates) if (receipt.entries[row.key]) {
-      receipt.entries[row.key] = { ...receipt.entries[row.key], missingInUE: !row.present, livePath: row.path };
+      receipt.entries[row.key] = { ...receipt.entries[row.key], missingInUE: !row.present, livePath: row.path, associationPending: Boolean(row.associationPending),
+        ...(row.present && !row.associationPending ? { lastSuccessPath: row.path } : {}) };
     }
     receipt.checkedAt = new Date().toISOString();
     return meta;

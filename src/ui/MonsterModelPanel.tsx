@@ -1,15 +1,18 @@
 import { useState, type HTMLAttributes } from 'react';
 import type { AssetRecord } from '../types';
-import { characterModelPreviewComponents, characterMeshAssetRecord, characterRigProgress } from '../../shared/characterComponents.mjs';
+import { characterMeshAssetRecord, characterRigProgress } from '../../shared/characterComponents.mjs';
+import { monsterVariantModelEntries } from '../../shared/monsterVariants.mjs';
 
 type MeshKind = 'staticMesh' | 'skeletalMesh';
 type Props = {
   asset: AssetRecord;
+  variantId?: string;
+  relatedAssets?: AssetRecord[];
   selected: { ownerId: string; slot: string; kind: MeshKind } | null;
   disabled: boolean;
   t: (zh: string, en: string) => string;
   previewUrl: (path: string) => string;
-  onSelect: (slot: string, kind: MeshKind, view: 'front' | 'left' | 'right' | 'back') => void;
+  onSelect: (slot: string, kind: MeshKind, view: 'front' | 'left' | 'right' | 'back', ownerId: string) => void;
   onUpdate: (asset: AssetRecord) => void;
   onPreview: (asset: AssetRecord) => void;
   updateDropProps: (asset: AssetRecord) => HTMLAttributes<HTMLButtonElement>;
@@ -49,25 +52,25 @@ function ModelPreview({ card, kind, active, hasModel, t, previewUrl, onSelect, o
   </div>;
 }
 
-export function MonsterModelPanel({ asset, selected, disabled, t, previewUrl, onSelect, onUpdate, onPreview, updateDropProps, previewDropProps, onZoom }: Props) {
-  const models = characterModelPreviewComponents(asset);
+export function MonsterModelPanel({ asset, variantId, relatedAssets, selected, disabled, t, previewUrl, onSelect, onUpdate, onPreview, updateDropProps, previewDropProps, onZoom }: Props) {
+  const models = monsterVariantModelEntries(asset, variantId, relatedAssets);
   if (!models.length) return null;
   return <section className="monster-model-panel" aria-label={t('本体与配套武器', 'Body and owned weapons')}>
     <div className="monster-model-panel-heading">
       <span>{t('本体与配套武器', 'Body and owned weapons')}</span>
     </div>
-    {models.map(part => {
-      const chosenKind = selected?.ownerId === asset.id && selected.slot === part.slot ? selected.kind : part.meshKinds.staticMesh ? 'staticMesh' : 'skeletalMesh';
-      const current = characterMeshAssetRecord(asset, part, chosenKind);
-      return <div key={part.slot} id={`monster-model-${part.id}`} tabIndex={-1} className="monster-model-group">
+    {models.map(({ asset: owner, part }) => {
+      const chosenKind = selected?.ownerId === owner.id && selected.slot === part.slot ? selected.kind : part.meshKinds.staticMesh ? 'staticMesh' : 'skeletalMesh';
+      const current = characterMeshAssetRecord(owner, part, chosenKind);
+      return <div key={part.id} id={`monster-model-${part.id}`} tabIndex={-1} className="monster-model-group">
         <div className="monster-model-group-heading"><strong>{part.role === 'weapon' ? t('配套武器', 'Owned weapon') : t('本体', 'Body')}</strong>
           <span title={part.name}>{part.label}</span>
         </div>
         <div className="weapon-model-pair">{(['staticMesh', 'skeletalMesh'] as const).map(kind => {
-          const card = characterMeshAssetRecord(asset, part, kind);
-          const active = selected?.ownerId === asset.id && selected.slot === part.slot && selected.kind === kind;
-          return <ModelPreview key={`${asset.id}:${part.slot}:${kind}`} card={card} kind={kind} active={active} hasModel={part.meshKinds[kind]}
-            t={t} previewUrl={previewUrl} onSelect={view => onSelect(part.slot, kind, view)} onZoom={onZoom} />;
+          const card = characterMeshAssetRecord(owner, part, kind);
+          const active = selected?.ownerId === owner.id && selected.slot === part.slot && selected.kind === kind;
+          return <ModelPreview key={`${owner.id}:${part.slot}:${kind}`} card={card} kind={kind} active={active} hasModel={part.meshKinds[kind]}
+            t={t} previewUrl={previewUrl} onSelect={view => onSelect(part.slot, kind, view, owner.id)} onZoom={onZoom} />;
         })}</div>
         <div className="monster-model-actions">
           <button type="button" {...updateDropProps(current)} disabled={disabled} onClick={() => onUpdate(current)}>{chosenKind === 'staticMesh' ? t('更新静态模型', 'Update static mesh') : t('更新骨骼模型', 'Update skeletal mesh')}</button>

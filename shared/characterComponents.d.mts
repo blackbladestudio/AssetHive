@@ -6,7 +6,7 @@ export function characterRigProgress(asset: AssetRecord): { total: number; uploa
 export function characterModelGroups(asset: AssetRecord): Array<Pick<CharacterComponent, 'slot' | 'name' | 'role' | 'files' | 'meshKinds'> & { label?: string; sharedAcrossForms?: boolean }>;
 export const characterModelUpdateGroups: typeof characterModelGroups;
 export type ComponentRevision = { id: string; name: string; files: ComponentFile[]; createdAt: string; previewUri?: string; previewRevision?: string };
-export type CharacterComponent = { id: string; parentId: string; slot: string; name: string; label: string; role: string; sharedAcrossForms: boolean; currentRevision: string; updatedAt: string; files: ComponentFile[]; revisions: ComponentRevision[]; previewUri: string; previewRevision: string; previewState: string; previewOrigin: string; meshPreviews: Record<string, CharacterMeshPreview>; meshKinds: { staticMesh: boolean; skeletalMesh: boolean } };
+export type CharacterComponent = { id: string; parentId: string; slot: string; name: string; label: string; role: string; sharedAcrossForms: boolean; currentRevision: string; updatedAt: string; files: ComponentFile[]; previewFiles?: ComponentFile[]; revisions: ComponentRevision[]; previewUri: string; previewRevision: string; previewState: string; previewOrigin: string; meshPreviews: Record<string, CharacterMeshPreview>; meshKinds: { staticMesh: boolean; skeletalMesh: boolean } };
 export function needsCharacterComponentPreview(part: CharacterComponent): boolean;
 export function characterSuitPendingPreviewViews(asset: AssetRecord): string[];
 export function characterMeshPreviewRevision(files: ComponentFile[], kind: string): string;

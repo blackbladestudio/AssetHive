@@ -93,7 +93,12 @@ async function analyzeFbx(filePath) {
       // These are the same FBX node, not a bone parenting itself.
       let boneParent = child.parent;
       while (boneParent?.isBone && child.ID !== undefined && boneParent.ID === child.ID) boneParent = boneParent.parent;
-      bones.set(originalName, { name: originalName, parent: boneParent?.isBone ? boneParent.userData?.originalName || boneParent.name : '' });
+      const rootParents = [];
+      for (let wrapper = boneParent; wrapper && !wrapper.isBone && wrapper.ID !== undefined; wrapper = wrapper.parent) {
+        rootParents.push(wrapper.userData?.originalName || wrapper.name);
+      }
+      bones.set(originalName, { name: originalName, parent: boneParent?.isBone ? boneParent.userData?.originalName || boneParent.name : '',
+        ...(rootParents.length ? { rootParents } : {}) });
     }
     if (child.isSkinnedMesh) {
       skinnedMeshCount += 1;

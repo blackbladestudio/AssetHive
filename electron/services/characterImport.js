@@ -67,8 +67,10 @@ function getCharacterDefaultCategory(assetType) {
   return CHARACTER_DEFAULT_CATEGORIES[String(assetType || "").trim().toLowerCase()] || "Other";
 }
 
+const { normalizeNpcCategory, inferNpcCategory } = require('../../shared/npcCategories.mjs');
 function buildCharacterRelativeRoot(assetType, category) {
   const normalizedType = String(assetType || "").trim().toLowerCase();
+  if (normalizedType === 'npc') category = normalizeNpcCategory(category);
   if (!isCharacterAssetType(normalizedType)) return [];
   if (normalizedType === 'item' && gameplay.categories.includes(gameplay.normalizeCategory(category))) return [...CHARACTER_FAMILY_FOLDERS.item, ...gameplay.normalizeCategory(category).split('/')];
   const safeCategory = normalizeCharacterToken(category) || getCharacterDefaultCategory(normalizedType);
@@ -76,6 +78,7 @@ function buildCharacterRelativeRoot(assetType, category) {
 }
 
 function inferCharacterAssetType(values = []) {
+  if (inferNpcCategory(values)) return 'npc';
   if (values.some(gameplayCategoryFromName)) return 'item';
   if (gameplay.inferCategory(values)) return 'item';
   const text = values.map((value) => String(value || "")).join(" ");
@@ -247,6 +250,7 @@ function normalizeCharacterFields(assetType, input = {}) {
       relatedAssetId: String(input.relatedAssetId || '').trim() } : {}),
     ...(['monster', 'npc'].includes(family) ? {
       ...(family === 'monster' ? { relatedAssetId: String(input.relatedAssetId || "").trim() } : {}),
+      monsterVariant: normalizeCharacterToken(input.monsterVariant),
       formIds: Array.isArray(input.formIds) ? input.formIds.map(String) : []
     } : {}),
     serial: normalizeCharacterToken(input.serial),

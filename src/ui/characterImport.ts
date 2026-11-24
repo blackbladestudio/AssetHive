@@ -6,6 +6,7 @@ import { CHARACTER_MODEL_EXTENSIONS, isAllowedCharacterPackageFile, characterRol
 import type { AssetRecord } from "../types";
 import { tree as gameplayTree, entries as gameplayEntries, categories as gameplayCategories, inferCategory as inferGameplayCategory, normalizeCategory as normalizeGameplayCategory, type GameplayCategoryNode } from '../../shared/gameplayCategories.mjs';
 import familyRules from "../../shared/characterFamilyRules.json";
+import { normalizeNpcCategory, inferNpcCategory } from '../../shared/npcCategories.mjs';
 import { gameplayIdentity, gameplayCategoryFromName, gameplayFileStem } from '../../shared/gameplayNaming.mjs';
 import filePatterns from "../../shared/characterFilePatterns.json" with { type: "json" };
 import { auditMonsterPackage, classifyMonsterSource, normalizeMonsterSourceStem, buildMonsterAssetName } from "../../shared/monsterPackageAudit.mjs";
@@ -30,7 +31,7 @@ export function isCharacterAssetType(assetType: string) {
 export const characterCategoryOptions: Record<string, string[]> = {
   suit: ["Male_01", "Female_01"],
   monster: familyRules.monster.importCategories,
-  npc: [],
+  npc: familyRules.npc.categories,
   weapon: familyRules.weapon.categories,
   item: [...gameplayCategories, ...familyRules.item.categories]
 };
@@ -55,6 +56,7 @@ export function getCharacterLibraryCategory(asset: Pick<AssetRecord, "assetType"
     .find((value) => typeof value === "string" && value.trim());
   const raw = typeof category === "string" ? category.trim() : "";
   if (family === 'item') return normalizeGameplayCategory(raw);
+  if (family === 'npc') return normalizeNpcCategory(raw);
   if (family === 'weapon') return weaponCategory(raw) || raw;
   return characterCategoryOptions[family]?.find((value) => value.toLowerCase() === raw.toLowerCase()) || raw;
 }
@@ -65,7 +67,7 @@ export function getCharacterNavigationSelection(nodeId: string | null) {
   try {
     const category = match[1] === 'item' ? normalizeGameplayCategory(match[2] ? decodeURIComponent(match[2]) : '') : match[2] ? decodeURIComponent(match[2]) : '';
     const assembly = match[1] === 'weapon' ? /^(single|combined)(?:\/(.*))?$/.exec(category) : null;
-    return { family: match[1], category: assembly ? assembly[2] || '' : category,
+    return { family: match[1], category: match[1] === 'npc' ? normalizeNpcCategory(category) : assembly ? assembly[2] || '' : category,
       ...(assembly ? { assembly: assembly[1] as 'single' | 'combined' } : {}) };
   } catch {
     return null;
@@ -86,6 +88,7 @@ export function characterImportDefaults(nodeId: string, family: string) {
 }
 
 export function getCharacterCategoryDisplayLabel(family: string, category: string, language = "zh"): string {
+  if (family === 'npc') category = normalizeNpcCategory(category);
   if (family === 'weapon' && /^(single|combined)\//.test(category)) return category.split('/').map(value => getCharacterCategoryDisplayLabel(family, value, language)).join(' · ');
   if (family === 'item') {
     const entry = gameplayEntries.find(item => item.value === normalizeGameplayCategory(category));
@@ -98,7 +101,7 @@ export function getCharacterCategoryDisplayLabel(family: string, category: strin
       "1_boss": ["01大首领", "01 Boss"], "2_miniboss": ["02小首领", "02 MiniBoss"], "3_elite": ["03精英怪", "03 Elite"],
       "4_normalmonster": ["04普通怪", "04 NormalMonster"], "5_minion": ["05杂兵怪", "05 Minion"]
     },
-    npc: { merchant: ["商人", "Merchant"], guard: ["守卫", "Guard"], scholar: ["学者", "Scholar"], other: ["其他", "Other"] },
+    npc: { human: ['人类', 'Human'], nonhuman: ['非人类', 'Nonhuman'], merchant: ["商人", "Merchant"], guard: ["守卫", "Guard"], scholar: ["学者", "Scholar"], other: ["其他", "Other"] },
     weapon: { single: ['单武器', 'Single weapon'], combined: ['组合武器', 'Combined weapons'], dagger: ['匕首', 'Dagger'], dualhands: ['同类双持', 'DualHands'], dualaxe: ['双斧', 'DualAxe'], arrow: ['箭', 'Arrow'], greatsword: ['巨剑', 'GreatSword'], bow: ["弓箭", "Bow"], greataxe: ["巨斧", "GreatAxe"], jade: ["玉器", "Jade"], longsword: ["长剑", "LongSword"], pairedswords: ["参差剑", "PairedSwords"], shieldaxe: ["盾斧", "ShieldAxe"], spear: ["长枪", "Spear"], sword: ["短剑", "Sword"] }
   };
   const label = labels[family]?.[category.toLowerCase()];
@@ -184,6 +187,7 @@ function inferSuitName(values: string[]) {
 }
 
 export function inferCharacterAssetType(values: string[]) {
+  if (inferNpcCategory(values)) return 'npc';
   if (values.some(gameplayCategoryFromName)) return 'item';
   if (inferGameplayCategory(values)) return "item";
   const text = values.join(" ");
@@ -235,7 +239,7 @@ export function inferFamilyPackageIdentity(assetType: string, sourcePath: string
     const allParts = [...pathParts, ...filePathParts].filter(Boolean);
     const rootIndex = allParts.findIndex(part => part.toLowerCase() === 'npc');
     const packageFolder = allParts.find(part => /^[A-Za-z][A-Za-z0-9]*_[A-Za-z][A-Za-z0-9_]*_[\u3400-\u9fff]+(?:_\d{2})?$/.test(part));
-    const category = packageFolder ? packageFolder.split('_')[0] : rootIndex >= 0 ? allParts[rootIndex + 1] || '' : '';
+    const category = inferNpcCategory([sourcePath, ...files]) || normalizeNpcCategory(packageFolder ? packageFolder.split('_')[0] : rootIndex >= 0 ? allParts[rootIndex + 1] || '' : '');
     const identities = files.map(file => (file.replace(/\\/g, '/').split('/').pop() || '').replace(/\.[^.]+$/, '').match(MONSTER_FILE_IDENTITY))
       .filter((match): match is RegExpMatchArray => Boolean(match));
     const bodyIdentities = identities.filter(match => !/(?:^|_)(?:WP|Weapon)(?:_|$)/i.test(match[1]));
@@ -502,7 +506,8 @@ export function buildMonsterGroups(assets: AssetRecord[]) {
   for (const group of groups.values()) group.sort((a, b) => {
     const fieldsA = a.meta?.character as Partial<CharacterImportFields> | undefined;
     const fieldsB = b.meta?.character as Partial<CharacterImportFields> | undefined;
-    return (fieldsA?.formIds?.[0] || "").localeCompare(fieldsB?.formIds?.[0] || "", undefined, { numeric: true })
+    return (fieldsA?.monsterVariant || '').localeCompare(fieldsB?.monsterVariant || '', undefined, { numeric: true })
+      || (fieldsA?.formIds?.[0] || "").localeCompare(fieldsB?.formIds?.[0] || "", undefined, { numeric: true })
       || a.id.localeCompare(b.id);
   });
   return groups;
@@ -548,6 +553,7 @@ export function getMonsterUnassignedResourceTokens(files: string[]) {
 
 export function getCharacterDestinationRelativePath(assetType: string, category: string) {
   const root = characterDefaultRelativeDir[assetType] || "Character";
+  if (assetType === 'npc') category = normalizeNpcCategory(category);
   if (assetType === 'item') category = normalizeGameplayCategory(category);
   if (assetType === 'item' && gameplayCategories.includes(category)) return `${root}\\${category.replaceAll('/', '\\')}`;
   const safeCategory = String(category || "Other").trim().replace(/[<>:"/\\|?*]+/g, "_");

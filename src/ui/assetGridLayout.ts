@@ -1,5 +1,6 @@
 import type { AssetRecord } from "../types";
 import { heroPartKind, heroSuitPart } from "../../shared/heroPackageRules.mjs";
+import { monsterVariantGroups } from "../../shared/monsterVariants.mjs";
 const independentHeroPart = (asset: AssetRecord) => Boolean(heroPartKind(asset.meta?.character as { variant?: string }));
 
 export function getCardSpan(asset: AssetRecord): 1 | 2 | 3 {
@@ -21,9 +22,21 @@ export type AssetGridItemLayout = {
   width: number;
   height: number;
   span: number;
+  variantId?: string;
+  renderKey?: string;
 };
 
+export function buildMonsterVariantGridLayout(list: AssetRecord[], viewport: number, _collapsed: ReadonlySet<string>, sizingWidth?: number) {
+  // Each form/variant is an independent card. No entity panels or collapsible columns.
+  const occurrences = list.flatMap<{ asset: AssetRecord; variantId?: string; renderKey: string }>(asset => asset.assetType === 'monster' && !asset.meta?.componentView
+    ? monsterVariantGroups([asset]).flatMap(variant => variant.assets.map(owner => ({ asset: owner, variantId: variant.id, renderKey: owner.id + ':variant:' + variant.id })))
+    : [{ asset, variantId: undefined, renderKey: asset.id }]);
+  const layout = buildAssetGridLayout(occurrences.map(item => item.asset), viewport, false, undefined, false, true, undefined, sizingWidth);
+  return { ...layout, items: layout.items.map((item, index) => ({ ...item, variantId: occurrences[index].variantId, renderKey: occurrences[index].renderKey })) };
+}
+
 export type GridDirection = "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight";
+export type AssetGridSectionHeader = { family: string; y: number; x?: number; width?: number; label?: string; groupKey?: string; level?: number; empty?: boolean };
 
 // A shared four-part reference keeps owner sizing independent of display filters.
 const CHARACTER_CARD_SIZE = .5;
@@ -61,7 +74,7 @@ function buildCharacterRelationshipLayout(list: AssetRecord[], viewport: number,
   }
   const items: AssetGridItemLayout[] = [];
   const outfitGroups: Array<{ id: string; x: number; y: number; width: number; height: number }> = [];
-  const sectionHeaders: Array<{ family: string; y: number }> = [];
+  const sectionHeaders: Array<AssetGridSectionHeader> = [];
   let y = padding;
   let previousFamily = "";
   for (const [id, assets] of groups) {
@@ -200,7 +213,7 @@ export function buildAssetGridLayout(list: AssetRecord[], viewportWidth: number,
     }
     let maxBottom = -Infinity;
     gridBottomBounds.set(items, items.map(item => (maxBottom = Math.max(maxBottom, item.y + item.height))));
-    return { items, totalHeight: y - gap + padding, padding, gap, cardHeight, columns, outfitGroups: [], sectionHeaders: [] as Array<{ family: string; y: number }> };
+    return { items, totalHeight: y - gap + padding, padding, gap, cardHeight, columns, outfitGroups: [], sectionHeaders: [] as Array<AssetGridSectionHeader> };
   }
   const ownerHeight = thumbnailHeight ?? characterOwnerHeight(sizingWidth ?? viewport, padding) * CHARACTER_CARD_SIZE;
   const ownerWidth = ownerHeight * .75;
@@ -266,7 +279,7 @@ export function buildAssetGridLayout(list: AssetRecord[], viewportWidth: number,
     gridBottomBounds.set(items, items.map(item => (maxBottom = Math.max(maxBottom, item.y + item.height))));
   }
   const outfitGroups = groupOutfits ? buildOutfitGroupBackgrounds(items, viewport, padding, gap) : [];
-  return { items, totalHeight, padding, gap, cardHeight, columns, outfitGroups, sectionHeaders: [] as Array<{ family: string; y: number }> };
+  return { items, totalHeight, padding, gap, cardHeight, columns, outfitGroups, sectionHeaders: [] as Array<AssetGridSectionHeader> };
 }
 
 // Rows start at `padding` and repeat every `cardHeight + gap`. The scroll overlay

@@ -332,11 +332,13 @@ async function updateCharacterMeshPreviews(options) {
   return withRecycleLock(root, () => withFileTransaction({ root, owner: 'character-components', key: parent.metaPath }, async () => {
     const part = listCharacterComponents(parent).find(item => item.slot === options.slot);
     const check = current => {
-      if (!current || !needsCharacterMeshPreview(current, kind)
-        || characterMeshPreviewRevision(current.files, kind) !== options.expectedRevision
+      if (current && characterMeshPreviewRevision(current.previewFiles || current.files, kind) === options.expectedRevision
+        && !needsCharacterMeshPreview(current, kind)) return false;
+      if (!current || characterMeshPreviewRevision(current.previewFiles || current.files, kind) !== options.expectedRevision
         || current.meshPreviews[kind].previewUri !== options.expectedPreviewUri) throw new Error('模型或预览已变化，请重新生成');
+      return true;
     };
-    check(part);
+    if (!check(part)) return { ok: true, parentId: parent.id, message: '模型预览已是最新' };
     const views = ['front', 'left', 'right', 'back'];
     if (options.images?.length !== 4 || views.some(view => options.images.filter(image => image.view === view && image.sourcePath).length !== 1)) throw new Error('需要完整的四张模型预览');
     await safePath(root, path.join(parent.path, 'Preview'), { missing: true });
@@ -344,7 +346,7 @@ async function updateCharacterMeshPreviews(options) {
     for (const view of views) images.push({ uri: await copyPreview(parent, options.images.find(image => image.view === view).sourcePath, `${kind}_${view}_${crypto.randomUUID()}`),
       tags: ['preview', `view:${view}`, 'origin:auto', ...(view === 'front' ? ['cover'] : [])] });
     await updateAssetMetadataFile(parent.metaPath, meta => {
-      check(listCharacterComponents({ ...parent, meta }).find(item => item.slot === options.slot));
+      if (!check(listCharacterComponents({ ...parent, meta }).find(item => item.slot === options.slot))) return meta;
       const state = meta.characterComponents || { schemaVersion: 1, slots: {} };
       const slot = state.slots?.[options.slot] || {};
       const previous = listCharacterComponents({ ...parent, meta }).find(item => item.slot === options.slot)?.meshPreviews[kind];
@@ -466,7 +468,7 @@ async function updateCharacterPreviewGallery(options) {
       if (meshKind) {
         state.slots = { ...state.slots, [options.slot]: { ...slot, meshPreviews: { ...latestPart.meshPreviews, [meshKind]: {
           ...latestMesh, previewImages: nextImages, previewUri: nextImages[coverIndex].uri,
-          previewRevision: characterMeshPreviewRevision(latestPart.files, meshKind), previewGalleryRevision: crypto.randomUUID(), previewOrigin: 'manual'
+          previewRevision: characterMeshPreviewRevision(latestPart.previewFiles || latestPart.files, meshKind), previewGalleryRevision: crypto.randomUUID(), previewOrigin: 'manual'
         } } } };
       } else if (options.slot) {
         const currentRevision = slot.activeRevision || state.baseRevision || "initial";
@@ -533,7 +535,10 @@ async function updateCharacterAutomaticPreviews(options) {
       state.previewRevision = state.contentRevision || "initial";
       state.previewGalleryRevision = crypto.randomUUID();
       delete state.autoPreviewPendingViews;
-      if (parent.assetType === 'suit') state.suitPreviewNeedsUpdate = false;
+      if (parent.assetType === 'suit') {
+        state.suitPreviewNeedsUpdate = false;
+        state.suitMaterialPreviewRevision = characterMeshPreviewRevision(activeCharacterFiles({ ...parent, meta }), 'staticMesh');
+      }
       meta.characterComponents = state;
       const at = new Date().toISOString();
       appendCharacterUpdateHistory(meta, { at, label: "自动预览图更新", changes: pending.map(view => ({ name: view, status: "changed", after: copied.get(view) })),

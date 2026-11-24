@@ -1731,11 +1731,12 @@ function buildLightMeta(meta) {
     if (meta.characterComponents && typeof meta.characterComponents === "object") light.characterComponents = meta.characterComponents;
     if (Array.isArray(meta.characterPackageHistory)) light.characterPackageHistory = meta.characterPackageHistory.map(({ id, createdAt }) => ({ id, createdAt }));
     light.character = Object.fromEntries(
-      ["family", "gender", "bodyCode", "suitClass", "suitName", "name", "displayNameZh", "displayNameEn", "ueNameSyncPending", "entityKey", "relatedAssetId", "serial", "variant", "maturity", "confirmed"]
+      ["family", "gender", "bodyCode", "suitClass", "suitName", "name", "displayNameZh", "displayNameEn", "ueNameSyncPending", "entityKey", "relatedAssetId", "serial", "variant", "monsterVariant", "monsterVariantOnly", "maturity", "confirmed"]
         .filter((key) => typeof meta.character[key] === "string" || typeof meta.character[key] === "boolean")
         .map((key) => [key, meta.character[key]])
     );
     if (Array.isArray(meta.character.formIds)) light.character.formIds = meta.character.formIds.filter((id) => typeof id === "string");
+    if (Array.isArray(meta.monsterVariants)) light.monsterVariants = meta.monsterVariants.map(({ id, name, enginePath, resourceCount, assetIds, modelSlotsByAsset }) => ({ id, name, enginePath, resourceCount, assetIds, modelSlotsByAsset }));
   }
   if (meta.characterManifest && typeof meta.characterManifest === "object" && !Array.isArray(meta.characterManifest)) {
     const manifest = meta.characterManifest;
@@ -1981,7 +1982,7 @@ function createAssetRecord(assetDir, metaPath, meta, files, forcedSource, includ
   const dimensions = extractedDimensions || getFallbackDimensions(assetType);
   const lightMeta = buildLightMeta(meta);
   if (includeCharacterDetails && ['suit', 'monster', 'npc', 'weapon', 'item'].includes(assetType)) {
-    for (const key of ['enginePath', 'characterUnrealExports', 'characterUpdateHistory', 'previews', 'previewImage', 'detailImage']) {
+    for (const key of ['enginePath', 'characterUEIntake', 'characterUnrealExports', 'characterUpdateHistory', 'previews', 'previewImage', 'detailImage']) {
       if (meta[key] !== undefined) lightMeta[key] = meta[key];
     }
   }

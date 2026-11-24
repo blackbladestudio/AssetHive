@@ -1,4 +1,4 @@
-const { saveUpdateResponse, verifyCachedUpdatePackage } = require("./services/updatePackage");
+const { downloadUpdatePackage, verifyCachedUpdatePackage } = require("./services/updatePackage");
 const { windowsPackageType, pickWindowsUpdateAsset, findLocalUpdatePackage, detectWindowsInstallation } = require("./services/windowsUpdate");
 const { createAppUpdateController } = require("./services/appUpdateController");
 const { createStartupWindow } = require("./services/startupWindow");
@@ -634,33 +634,19 @@ async function launchDownloadedUpdatePackage(packagePath) {
 }
 
 async function downloadReleaseAsset(url, targetFilePath, onProgress, metadata) {
-  const candidateUrls = buildGithubDownloadCandidates(url);
-  const requestHeaders = {
-    "User-Agent": "AssetHive-App",
-    "Accept": "application/octet-stream"
-  };
-  const orderedCandidateUrls = await sortDownloadCandidatesBySpeed(candidateUrls, requestHeaders);
-  let response = null;
-  let lastError = "";
-  for (const candidateUrl of orderedCandidateUrls) {
-    try {
-      response = await fetchWithTimeout(candidateUrl, { headers: requestHeaders });
-      if (!response.ok) {
-        lastError = `Download failed: ${response.status} ${response.statusText}`;
-        continue;
-      }
-      break;
-    } catch (error) {
-      lastError = error?.message || String(error);
+  const startedAt = Date.now();
+  let lastProgressAt = 0;
+  const route = await downloadUpdatePackage(buildGithubDownloadCandidates(url), targetFilePath, metadata, {
+    headers: { "User-Agent": "AssetHive-App", "Accept": "application/octet-stream" },
+    timeoutMs: DOWNLOAD_REQUEST_TIMEOUT_MS,
+    onProgress: progress => {
+      const now = Date.now();
+      if (now - lastProgressAt < 200 && progress.loaded < progress.total) return;
+      lastProgressAt = now;
+      onProgress(progress);
     }
-  }
-  if (!response || !response.ok) {
-    throw new Error(lastError || "Download failed");
-  }
-  if (!response.body) {
-    throw new Error("Download failed: empty response body");
-  }
-  await saveUpdateResponse(response, targetFilePath, metadata, onProgress);
+  });
+  writeLog("INFO", "app update downloaded", { ...route, bytes: metadata.size, elapsedMs: Date.now() - startedAt });
 }
 
 async function sortDownloadCandidatesBySpeed(candidateUrls, headers = {}) {
@@ -2015,6 +2001,24 @@ async function hasEngineAssetHivePlugin(editorPath) {
   return false;
 }
 
+let initialUnrealWorkspaceCheck;
+async function ensureCurrentUnrealWorkspace(projectPath, options = settings) {
+  if (options.unrealProjectPath && normalizeComparePath(options.unrealProjectPath) !== normalizeComparePath(projectPath)) throw new Error('连接的 UE 工程与所选目标不一致');
+  initialUnrealWorkspaceCheck ||= require('./services/unrealWorkspaceCheck').createUnrealWorkspaceCheck(path.join(getPersistentCacheRoot(), 'UnrealWorkspaceChecks'));
+  const root = options.customLibraryPath;
+  const generation = librarySelectionGeneration;
+  const selectedProject = settings.unrealProjectPath;
+  const assets = index.filter(asset => asset.source === 'custom' && ['suit', 'monster', 'npc', 'weapon', 'item'].includes(asset.assetType)
+    && !asset.meta?.componentView && !String(asset.id).includes('::part::'));
+  return initialUnrealWorkspaceCheck({ projectPath, libraryPath: root, assets,
+    isCurrent: () => generation === librarySelectionGeneration && settings.customLibraryPath === root && settings.unrealProjectPath === selectedProject,
+    refresh: async record => {
+      const asset = await refreshAssetById(record.id);
+      if (!asset) throw new Error('角色资产清单已变化，首次工作区核验将重试');
+      await refreshSuitStatus(asset, { ...options, unrealProjectPath: projectPath }, tcpClient);
+    } });
+}
+
 async function getUnrealConnectionStatus(targetProjectPath, targetEditorPath) {
   const target = await resolveProjectFilePath(targetProjectPath);
   const selection = { projectPath: target || targetProjectPath, editorPath: targetEditorPath };
@@ -2031,6 +2035,7 @@ async function getUnrealConnectionStatus(targetProjectPath, targetEditorPath) {
     unavailable: "未发现目标插件服务（127.0.0.1:13430–13439），请确认目标项目已打开且 AssetHive 插件已启用"
   };
   return { connected: Boolean(info), targetName: displayPath ? path.basename(displayPath, path.extname(displayPath)) : "",
+    projectPath: info?.projectPath || target || targetProjectPath || '',
     reason: diagnostic.state, message: info ? "" : reasons[diagnostic.state] || reasons.unavailable, port: diagnostic.port };
 }
 
@@ -8944,12 +8949,7 @@ app.whenReady().then(async () => {
     }
   });
 
-  async function downloadAppUpdateRelease() {
-    const sendDownloadProgress = (payload) => {
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send("app:updateDownloadProgress", payload);
-      }
-    };
+  async function downloadAppUpdateRelease(sendDownloadProgress) {
     try {
       sendDownloadProgress({ phase: "prepare", progress: 0 });
       const currentVersion = normalizeVersionTag(app.getVersion());
@@ -9033,6 +9033,11 @@ app.whenReady().then(async () => {
     onState: (state) => {
       for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed()) win.webContents.send("app:updateState", state);
+      }
+    },
+    onProgress: (progress) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send("app:updateDownloadProgress", progress);
       }
     },
     onError: error => writeLog("WARN", "app background update failed", { message: error.message })
@@ -9279,6 +9284,16 @@ app.whenReady().then(async () => {
   ipcMain.handle("unreal:getConnectionStatus", async () => {
     try {
       const status = await getUnrealConnectionStatus(settings.unrealProjectPath, settings.unrealEditorPath);
+      if (status.connected && status.projectPath && scanIndexAuthoritative && !scanInProgress && !activeExportCalls && !recycleInProgress) {
+        activeExportCalls++;
+        try {
+          const result = await ensureCurrentUnrealWorkspace(status.projectPath);
+          if (result.checked) writeLog('INFO', 'first Unreal workspace presence check completed', { projectPath: status.projectPath, count: result.count });
+        } catch (error) {
+          status.message = '新工作区资源状态尚未核验完成：' + error.message;
+          writeLog('WARN', 'first Unreal workspace presence check incomplete', { projectPath: status.projectPath, message: error.message });
+        } finally { activeExportCalls--; }
+      }
       const diagnostic = { ...status, projectPath: settings.unrealProjectPath, editorPath: settings.unrealEditorPath };
       const signature = JSON.stringify(diagnostic);
       if (signature !== connectionStatusLogSignature) {
@@ -9362,6 +9377,15 @@ app.whenReady().then(async () => {
       event.sender.send("assets:exportProgress", progress);
     };
     const hasSuits = target === "unreal" && selectedAssets.some(isCharacterUEAsset);
+    if (hasSuits) {
+      if (!scanIndexAuthoritative) {
+        await waitForScanIdle(60000);
+        if (!scanIndexAuthoritative) throw new Error('正在读取资源库，请等待首次工作区核验完成');
+      }
+      const editor = await tcpClient.getEditorInfo();
+      if (!editor?.projectPath) throw new Error('请先连接目标 UE 工程');
+      await ensureCurrentUnrealWorkspace(editor.projectPath, mergedOptions);
+    }
     if (hasSuits && !selectedAssets.every(isCharacterUEAsset)) return { ok: false, message: "请将套装、武器与其他类型分批发送" };
     const hasAnimations = target === "unreal" && selectedAssets.some(isAnimationUEAsset);
     if (hasAnimations && !selectedAssets.every(isAnimationUEAsset)) return { ok: false, message: "请将动画与其他类型分批发送" };

@@ -1200,18 +1200,6 @@ select {
   cursor: not-allowed
 }
 
-.about-update-btn-inline.is-locked {
-  background: #222a23;
-  border-color: #2e3c30;
-  color: #c0c8c0
-}
-
-.about-update-btn-inline.is-locked .locked-check {
-  color: #6dc77b;
-  margin-right: 6px;
-  font-weight: 700
-}
-
 .check-spinner {
   display: inline-block;
   width: 14px;
@@ -2434,6 +2422,13 @@ select {
 
 .fixed-character-cards .character-outfit-group-background { border: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.018); }
 .character-grid-section-heading { position: absolute; left: 24px; right: 24px; height: 30px; display: flex; align-items: center; color: var(--text-0); font-size: 18px; font-weight: 700; pointer-events: none; }
+.monster-variant-heading { pointer-events: auto; cursor: pointer; border: 0; border-radius: 4px; background: var(--bg-2); gap: 8px; font-size: 14px; text-align: left; }
+.monster-related-resources { margin: 12px 0; font-size: 12px; }
+.monster-related-resources summary { cursor: pointer; padding: 8px 0; }
+.monster-related-resources[open] { max-height: 280px; overflow: auto; }
+.monster-related-resources button { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: 0; color: var(--text-1); padding: 6px 2px; text-align: left; cursor: pointer; }
+.monster-related-resources button span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.monster-related-resources small { color: var(--text-2); }
 .stage-container.fixed-character-cards { --details-panel-width: clamp(280px, 27vw, 432px); }
 .fixed-character-cards .asset-stage { min-width: 0; }
 .fixed-character-cards .right-panel { flex-shrink: 0; }
@@ -5162,6 +5157,23 @@ select {
 .monster-form-switcher button:hover { color: #fff; border-color: #6b889a; }
 .monster-form-switcher button:focus-visible { outline: 2px solid #2196f3; outline-offset: 2px; }
 .monster-card-caption { position: relative; }
+.monster-card-inventory { position: absolute; z-index: 2; bottom: calc(64px * var(--character-card-scale, 1)); left: calc(10px * var(--character-card-scale, 1)); right: calc(10px * var(--character-card-scale, 1)); display: flex; flex-direction: column; gap: 3px; pointer-events: auto; }
+.monster-card-inventory > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 6px; border-radius: 3px; background: #15191de8; color: #d0d4d8; font-size: clamp(9px, calc(11px * var(--character-card-scale, 1)), 12px); line-height: 1.4; }
+.monster-card-inventory .monster-card-variant { color: #e2cf9a; }
+.fixed-character-cards .card.monster-variant-card { border-radius: 8px; background: #22262a; transition: border-color .12s ease, box-shadow .12s ease; }
+.fixed-character-cards .card.monster-variant-card:hover { transform: none !important; }
+.fixed-character-cards .card.monster-variant-card .thumb { padding: 8px 8px 80px; }
+.monster-variant-card .character-card-family { display: none; }
+.monster-variant-card .monster-card-inventory { bottom: 34px; left: 0; right: 0; height: 42px; padding: 5px 10px; box-sizing: border-box; background: #1b1e21; border-top: 1px solid #ffffff0a; }
+.monster-variant-card .monster-card-inventory .monster-card-variant { display: none; }
+.monster-variant-card .monster-card-inventory > span { padding: 0; background: none; font-size: 11px; line-height: 16px; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.fixed-character-cards .monster-variant-card .character-card-summary { height: 34px; background: #1b1e21; padding: 0 10px; }
+.monster-variant-card .character-card-name { font-size: 11px; font-weight: 500; }
+.monster-variant-card .character-card-category { display: none; }
+.monster-variant-card:has(.character-card-family) .card-fav-btn { top: 10px; bottom: auto; }
+.monster-variant-heading.is-entity { background: transparent; border-bottom: 1px solid #ffffff14; border-radius: 0; font-size: 16px; }
+.monster-variant-heading.is-variant { background: transparent; color: #bbc4ce; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; z-index: 1; }
+.monster-variant-heading:hover { color: #fff; background: #ffffff05; }
 .monster-card-form { position: absolute; right: 0; bottom: calc(100% + 4px); padding: 3px 6px; border-radius: 3px; background: #15191dd9; color: #d0d4d8; font-size: 10px; line-height: 1.4; pointer-events: none; }
 .related-form-card { position: relative; }
 .related-form-caption { position: absolute; bottom: 0; left: 0; right: 0; padding: 4px; background: #111d; color: #d0d4d8; font-size: 10px; line-height: 1.4; }
@@ -7765,3 +7777,15 @@ textarea,
 .suit-export-adoption button { margin: 0 8px 8px 0; }
 .suit-export-adoption small { display: block; color: var(--text-2); }
 .character-history-source > button { justify-self: start; }
+.character-component-texture-state {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 3;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #49351ded;
+  color: #ffd18a;
+  font-size: 11px;
+  pointer-events: none;
+}

@@ -8,8 +8,10 @@ import { reviewSuitMaterialSlots } from "../../shared/suitMaterialMatching.mjs";
 import { heroSuitPart, heroPartKind, auditHeroPackage, heroModelStem, heroPackageModelFiles, heroPackageNeedsScopeReview, inferHeroPackageFileScopes, splitHeroPackageByScope, partitionHeroSuitFiles } from "../../shared/heroPackageRules.mjs";
 import { partitionCharacterPackageFiles, isAllowedCharacterTextureFile } from "../../shared/characterFilePolicy.mjs";
 import type { AppSettings, AssetRecord, TextureAnalysis } from "../types";
+import type { AppUpdateDownloadProgress, AppUpdateSnapshot } from "../vite-env";
 import { monsterBodyMetrics, characterDisplayName, componentParentId, characterComponentLabel, listCharacterComponents, characterModelPreviewComponents, characterMeshAssetRecord, componentAssetRecord, expandCharacterCards, activeCharacterFiles, characterRigProgress, characterRigReviewSignature, characterModelGroups, characterModelUpdateGroups } from "../../shared/characterComponents.mjs";
 import { WEAPON_TYPES, weaponCategory, splitWeaponPackage } from "../../shared/weaponRules.mjs";
+import { characterOwnedWeapons, monsterVariantId, monsterVariantLabel, monsterVariantGroups, monsterVariantModelGroups, monsterCardOccurrence } from "../../shared/monsterVariants.mjs";
 import { parseAnimationLabels } from "../../shared/animationUnrealExport.mjs";
 import animationImportRules from '../../shared/animation-import-rules.json';
 import { animationPlanningLabels, syncAnimationPlanning } from './animationRules';
@@ -18,7 +20,7 @@ import { getAnimationNavigationSelection, animationNavigationNodes, matchesAnima
 import { finishCharacterImportTasks } from "../../shared/characterImportTasks.mjs";
 import { DEFAULT_CHARACTER_FILTERS, defaultCharacterFilters, characterStatus, characterFilterContext, characterFilterDefinitions, changeCharacterFilter, filterCharacterCards, deduplicateCharacterCategoryTags, matchesCharacterCategoryTag, type CharacterFilters } from "../../shared/characterFilters.mjs";
 import { resolveZion3DCategoryFolder } from "./unrealExportPaths";
-import { buildAssetGridLayout, MAX_CARD_SCALE, MIN_CARD_SCALE, getCardWidthClass, getGridPlaceholderTop, getVisibleAssetGridItems, getAssetGridItemsInRange, getDirectionalGridItem, type GridDirection, type AssetGridItemLayout } from "./assetGridLayout";
+import { buildAssetGridLayout, buildMonsterVariantGridLayout, MAX_CARD_SCALE, MIN_CARD_SCALE, getCardWidthClass, getGridPlaceholderTop, getVisibleAssetGridItems, getAssetGridItemsInRange, getDirectionalGridItem, type GridDirection, type AssetGridItemLayout } from "./assetGridLayout";
 import { AssetThumbnail } from "./AssetThumbnail";
 import { ImportPreviewThumbnail } from "./ImportPreviewThumbnail";
 import { DetailPreview } from "./DetailPreview";
@@ -34,6 +36,7 @@ import { CharacterRigPanel } from './CharacterRigPanel';
 import { MonsterModelPanel } from './MonsterModelPanel';
 import { CharacterUpdateAssignments, CharacterUpdateChanges } from './CharacterUpdateReview';
 import { CharacterLodReview } from './CharacterLodReview';
+import { CharacterUeLods } from './CharacterUeLods';
 import { characterLodReview, characterLodReviewToken } from '../../shared/characterLodReview.mjs';
 import { characterLodUpdateTargets } from '../../shared/characterLodUpdateTargets.mjs';
 import { characterGalleryRevision } from '../../shared/characterPreviewRevision.mjs';
@@ -81,6 +84,7 @@ import {
 } from "./characterImport";
 import { CHARACTER_PREVIEW_VIEWS, generateCharacterImportPreviews, hasCompleteCharacterPreview } from "./characterPreview";
 import { useCharacterComponentPreviews } from "./useCharacterComponentPreviews";
+import { CharacterLinkDialog } from './CharacterLinkDialog';
 import { useAssetSearch } from "./hooks/useAssetSearch";
 import { ModelProcessor } from "./ModelProcessor";
 import { SizeComparison } from "./SizeComparison";
@@ -2742,6 +2746,7 @@ const AssetCard = memo(({
   animationCoverQueue,
   isSelected,
   selectedMeshKind,
+  previewWorkState,
   isFavorite,
   onSelect,
   onToggleSuitParts,
@@ -2757,6 +2762,8 @@ const AssetCard = memo(({
   exportLoading = false,
   exportProgress = 0,
   monsterFormCounter = "01/01",
+  variantId,
+  variantAssets,
   savingProgress = -1,
   uiLanguage,
   animationProjectPath = '',
@@ -2767,6 +2774,7 @@ const AssetCard = memo(({
   animationCoverQueue?: AnimationCoverQueue;
   isSelected: boolean;
   selectedMeshKind?: "staticMesh" | "skeletalMesh";
+  previewWorkState?: 'queued' | 'running' | 'failed';
   isFavorite: boolean;
   onSelect: (assetId: string, meshKind?: "staticMesh" | "skeletalMesh") => void;
   onToggleSuitParts: (assetId: string) => void;
@@ -2780,6 +2788,8 @@ const AssetCard = memo(({
   exportLoading?: boolean;
   exportProgress?: number;
   monsterFormCounter?: string;
+  variantId?: string;
+  variantAssets?: AssetRecord[];
   savingProgress?: number;
   uiLanguage: "zh" | "en";
   animationProjectPath?: string;
@@ -2811,9 +2821,11 @@ const AssetCard = memo(({
   const savePercent = Math.round(Math.max(0, Math.min(100, savingProgress)));
   const saveComplete = savePercent >= 100;
   const characterInfo = getCharacterAssetInfo(asset);
-  const componentView = asset.meta?.componentView as { parentId: string; visibleMeshKind?: "staticMesh" | "skeletalMesh"; meshSlots?: Record<"staticMesh" | "skeletalMesh", { hasModel?: boolean; previewPath?: string }> } | undefined;
+  const componentView = asset.meta?.componentView as { parentId: string; missingTextures?: boolean; visibleMeshKind?: "staticMesh" | "skeletalMesh"; meshSlots?: Record<"staticMesh" | "skeletalMesh", { hasModel?: boolean; previewPath?: string; previewState?: string }> } | undefined;
   const componentMeshSlots = componentView?.meshSlots;
   const cardAssetName = characterDisplayName(asset);
+  const cardWeapons = characterOwnedWeapons(asset, variantId, variantAssets);
+  const cardVariant = variantId ? monsterVariantGroups([asset]).find(variant => variant.id === variantId)?.name || variantId : monsterVariantLabel(asset);
   const cardAnimationLabels = String(asset.assetType || "").trim().toLowerCase() === "animation" ? asset.animationLabels || [] : [];
   const cardAnimationGameTag = String(asset.assetType || "").trim().toLowerCase() === "animation" ? asset.animationGameTag : undefined;
   const characterChineseName = String(characterInfo?.fields.displayNameZh || "").trim();
@@ -2832,18 +2844,20 @@ const AssetCard = memo(({
   return (
     <article
       ref={cardRef}
-      id={`asset-card-${asset.id}`}
+      id={`asset-card-${monsterCardOccurrence(asset.id, variantId)}`}
+      data-asset-id={asset.id}
+      data-variant-id={variantId}
       data-character-component={componentView || asset.id.includes("::part::") ? "true" : undefined}
       title={cardAssetName}
       onDoubleClick={characterInfo?.family === 'suit' && !componentView && !heroPartKind(characterInfo.fields) ? event => {
         if (savingProgress >= 0 || event.ctrlKey || event.metaKey || event.shiftKey || (event.target as HTMLElement).closest('button, input, a')) return;
         event.preventDefault(); event.stopPropagation(); onToggleSuitParts(asset.id);
       } : undefined}
-      className={`card ${isSelected ? "active" : ""} ${getCardWidthClass(asset)} ${savingProgress >= 0 ? "saving" : ""} ${String(asset.assetType || "").trim().toLowerCase() === "hdri" ? "hdri" : ""} ${characterInfo ? "character-card" : ""}`}
+      className={`card ${isSelected ? "active" : ""} ${getCardWidthClass(asset)} ${savingProgress >= 0 ? "saving" : ""} ${String(asset.assetType || "").trim().toLowerCase() === "hdri" ? "hdri" : ""} ${characterInfo ? "character-card" : ""} ${variantId !== undefined ? 'monster-variant-card' : ''}`}
       style={{ ...(characterInfo ? { translate: `${x}px ${y}px`, transform: "perspective(1000px) rotateX(var(--card-tilt-x, 0deg)) rotateY(var(--card-tilt-y, 0deg))" } : { transform: `translate3d(${x}px, ${y}px, 0)` }), width, height, "--character-card-scale": width / 240 } as CSSProperties & { translate?: string; "--character-card-scale": number }}
       onPointerMove={characterInfo ? (event) => {
         const card = event.currentTarget;
-        if (card.dataset.characterComponent === "true" || event.pointerType === "touch" || savingProgress >= 0 || card.closest(".overview-packed-grid") || !card.closest(".fixed-character-cards") || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        if (variantId !== undefined || card.dataset.characterComponent === "true" || event.pointerType === "touch" || savingProgress >= 0 || card.closest(".overview-packed-grid") || !card.closest(".fixed-character-cards") || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
         const rect = card.getBoundingClientRect();
         const px = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
         const py = Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height)));
@@ -2930,9 +2944,10 @@ const AssetCard = memo(({
             onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); if (savingProgress < 0) onSelect(asset.id, kind); } }}>
             <div className="character-component-mesh-slot">
               <span className="character-component-mesh-tag">{slotLabel}</span>
+              {kind === 'staticMesh' && slot?.hasModel && (componentView?.missingTextures || slot.previewState === 'stale') && <span className="character-component-texture-state">{componentView?.missingTextures ? (uiLanguage === 'en' ? 'Missing textures' : '缺少贴图') : previewWorkState === 'failed' ? (uiLanguage === 'en' ? 'Preview failed' : '预览失败·可重试') : previewWorkState === 'running' ? (uiLanguage === 'en' ? 'Generating preview' : '正在生成预览') : (uiLanguage === 'en' ? 'Preview queued' : '等待生成预览')}</span>}
               {kind === 'staticMesh' && characterRigProgress(asset).needsAttention && <span className="character-model-rig-dot" title={uiLanguage === 'en' ? 'Model changed: review rigging' : '模型已更新，请查看绑定提醒'} />}
               {slotPath ? <img className="loaded character-component-mesh-preview" src={getPreviewUrl(slotPath)} alt={`${slotAssetName} ${slotTitle}`} draggable={false} />
-                : <div className="character-component-slot-empty">{slot?.hasModel ? (uiLanguage === "en" ? "Preview pending" : "预览待生成") : kind === "skeletalMesh" ? "waiting for skeletal mesh" : "waiting for static mesh"}</div>}
+                : <div className="character-component-slot-empty">{slot?.hasModel ? (uiLanguage === "en" ? "Preview pending" : "预览待生成") : kind === "skeletalMesh" ? (uiLanguage === "en" ? "Skeletal model not uploaded" : "尚未上传骨骼模型") : (uiLanguage === "en" ? "Static model not uploaded" : "尚未上传静态模型")}</div>}
             </div>
             <div className="character-component-mesh-name" title={slotAssetName}>{slotAssetName}</div>
           </div>;
@@ -2955,11 +2970,17 @@ const AssetCard = memo(({
         {asset.assetType === 'animation' && <AnimationSendBadge asset={asset} language={uiLanguage} projectPath={animationProjectPath} />}
       </div>
       {characterInfo && !componentView && characterRigProgress(asset).needsAttention && <span className="character-model-rig-dot character-owner-rig-dot" title={uiLanguage === 'en' ? 'Rigging needs attention' : '请查看绑定提醒'} />}
+      {!componentView && (cardWeapons.length > 0 || cardVariant) && <div className="monster-card-inventory">
+        {cardVariant && <span className="monster-card-variant" title={cardVariant}>{uiLanguage === 'en' ? 'Variant: ' : '变体：'}{cardVariant}</span>}
+        {cardWeapons.length > 0 && <span title={cardWeapons.map(item => item.name).join('、')}>
+          {uiLanguage === 'en' ? `Weapons (${cardWeapons.length}): ` : `配套武器 ${cardWeapons.length} 件：`}{cardWeapons.map(item => item.name).join('、')}
+        </span>}
+      </div>}
       {characterInfo && !componentView && <span className="character-card-family" style={{ '--character-name-length': Math.max(1, Array.from(characterChineseName).length) } as CSSProperties}>{!heroPart && <span className="character-card-chinese-name">{characterChineseName}</span>}<span className={`character-card-status status-${characterStatus(characterInfo.maturity).value}`} lang={uiLanguage === "en" ? "en" : "zh"}>{characterStatus(characterInfo.maturity)[uiLanguage === "en" ? "en" : "zh"]}</span></span>}
       {characterInfo && !componentMeshSlots ? (
         <div className="character-card-summary">
           <div className={`character-card-caption${characterInfo.family === "monster" && !componentView ? " monster-card-caption" : ""}`}>
-            {characterInfo.family === "monster" && !componentView && <span className="monster-card-form" title={uiLanguage === "en" ? "Current form / total forms" : "当前形态 / 总形态数"}>{monsterFormCounter}</span>}
+            {characterInfo.family === "monster" && !componentView && !characterInfo.fields.monsterVariantOnly && <span className="monster-card-form" title={uiLanguage === "en" ? "Current form / total forms" : "当前形态 / 总形态数"}>{monsterFormCounter}</span>}
             <div className="character-card-name" title={cardAssetName}>{cardAssetName}</div>
             {characterInfo.family === "monster" && !componentView && characterInfo.category && <span className="character-card-category">{getCharacterCategoryDisplayLabel("monster", characterInfo.category, uiLanguage)}</span>}
             {outfitClassLabel && !componentView && <span className="character-card-category">{outfitClassLabel}</span>}
@@ -3759,24 +3780,14 @@ export function App() {
   // tree line lights instead of all ancestor lines lighting up together.
   const [hoveredTreeItemId, setHoveredTreeItemId] = useState<string | null>(null);
   const [updatePageOpen, setUpdatePageOpen] = useState(false);
-  const [, setCurrentVersionDate] = useState("");
-  const [, setShowNoUpdateHint] = useState(false);
-  const [updateCheckLocked, setUpdateCheckLocked] = useState(false);
+  const appUpdateStateRevision = useRef(0);
+  const appUpdateProgressRevision = useRef(0);
   const [imagePreview, setImagePreview] = useState<{ src: string; name: string; gallery?: string[] } | null>(null);
   const stepImagePreview = (direction: number) => setImagePreview(current => {
     if (!current?.gallery?.length) return current;
     const index = current.gallery.indexOf(current.src);
     return { ...current, src: current.gallery[(index + direction + current.gallery.length) % current.gallery.length] };
   });
-
-  useEffect(() => {
-    // Re-enable the Check For Updates button each time the settings menu is
-    // (re)opened. Lock persists until close/reopen or app restart.
-    if (settingsOpen) {
-      setUpdateCheckLocked(false);
-      setShowNoUpdateHint(false);
-    }
-  }, [settingsOpen]);
 
   const statusClearTimerRef = useRef<number | null>(null);
 
@@ -4162,6 +4173,8 @@ export function App() {
   const isAllOverviewView = (activeMenu === "home" && !hasActiveSearch) || isCharacterOverviewView;
 
   const compactAssetGrid = Boolean(selectedAssetId);
+  const [collapsedMonsterGroups, setCollapsedMonsterGroups] = useState<Set<string>>(new Set());
+  const hasMonsterVariantGrid = Boolean(characterContext && orderedAssets.some(asset => asset.assetType === 'monster' && !asset.meta?.componentView));
   const isAnimationGrid = activeMenu === "animation" || Boolean(getAnimationNavigationSelection(activeMenu))
     || (orderedAssets.length > 0 && orderedAssets.every(asset => asset.assetType === "animation"));
   const [assetCardScale, setAssetCardScale] = useState(readAssetCardScale);
@@ -4200,9 +4213,10 @@ export function App() {
   }, [inCharacterContext]);
   const packedAssetGrid = useMemo(
     () => {
+      if (hasMonsterVariantGrid) return buildMonsterVariantGridLayout(orderedAssets, assetStageMetrics.viewportWidth, collapsedMonsterGroups, characterSizingWidth);
       return buildAssetGridLayout(orderedAssets, assetStageMetrics.viewportWidth, compactAssetGrid, undefined, Boolean(characterContext && characterFilters.display === "all"), Boolean(characterContext), undefined, characterSizingWidth, activeMenu === "character" && characterFilters.display === "all", isAnimationGrid ? assetCardScale : 1);
     },
-    [orderedAssets, assetStageMetrics.viewportWidth, compactAssetGrid, characterContext, characterFilters.display, characterSizingWidth, activeMenu, assetCardScale, isAnimationGrid]
+    [orderedAssets, assetStageMetrics.viewportWidth, compactAssetGrid, characterContext, characterFilters.display, characterSizingWidth, activeMenu, assetCardScale, isAnimationGrid, hasMonsterVariantGrid, collapsedMonsterGroups]
   );
   useLayoutEffect(() => {
     const node = assetStageRef.current;
@@ -4933,11 +4947,20 @@ export function App() {
   };
   const monsterGroups = useMemo(() => buildMonsterGroups(allAssets), [allAssets]);
   const monsterFormCounters = useMemo(() => new Map([...monsterGroups.values()].flatMap(group =>
-    group.map((form, index) => [form.id, `${String(index + 1).padStart(2, '0')}/${String(group.length).padStart(2, '0')}`] as const))), [monsterGroups]);
+    monsterVariantGroups(group).flatMap(variant => variant.assets.filter(asset => monsterVariantId(asset) === variant.id).map((form, index, forms) =>
+      [form.id, `${String(index + 1).padStart(2, '0')}/${String(forms.length).padStart(2, '0')}`] as const)))), [monsterGroups]);
+  const [monsterVariantSelection, setMonsterVariantSelection] = useState({ assetId: '', variantId: '' });
+  const [monsterSelectedOccurrences, setMonsterSelectedOccurrences] = useState<Record<string, string>>({});
+  const selectedMonsterVariant = selectedAsset && monsterVariantSelection.assetId === selectedAsset.id
+    ? monsterVariantSelection.variantId : monsterVariantId(selectedAsset);
+  const selectedMonsterVariants = useMemo(() => selectedAsset?.assetType === 'monster'
+    ? monsterVariantGroups(monsterGroups.get(getMonsterEntityKey(selectedAsset)) || [selectedAsset]) : [], [monsterGroups, selectedAsset]);
+  const selectedModelGroups = selectedAsset && selectedAsset.assetType === 'monster' && !selectedPartView
+    ? monsterVariantModelGroups(selectedAsset, selectedMonsterVariant) : selectedAsset ? characterModelGroups(selectedAsset) : [];
   const ownedMonsterWeapons = useMemo(() => selectedAsset && !selectedPartView && ['monster', 'npc'].includes(selectedAsset.assetType)
-    ? characterModelPreviewComponents(selectedAsset).filter(part => part.role === 'weapon') : [], [selectedAsset, selectedPartView]);
+    ? monsterVariantModelGroups(selectedAsset, selectedMonsterVariant).filter(part => part.role === 'weapon') : [], [selectedAsset, selectedPartView, selectedMonsterVariant]);
   const relatedMonsterForms = useMemo(() => selectedAsset?.assetType === 'monster'
-    ? monsterGroups.get(getMonsterEntityKey(selectedAsset)) || [selectedAsset] : [], [monsterGroups, selectedAsset]);
+    ? (monsterGroups.get(getMonsterEntityKey(selectedAsset)) || [selectedAsset]).filter(asset => monsterVariantId(asset) === selectedMonsterVariant) : [], [monsterGroups, selectedAsset, selectedMonsterVariant]);
   const monsterLinkCandidates = useMemo(() => getMonsterLinkCandidates(allAssets,
     importForm.characterFields.name || "", importForm.subCategory),
   [allAssets, importForm.characterFields.name, importForm.subCategory]);
@@ -4953,11 +4976,12 @@ export function App() {
     });
   }, [selectedImportIndexes, activeImportIndex, importForm, importDrafts]);
   const relatedMonsterWeapons = useMemo(() => {
+    if (selectedMonsterVariants.some(variant => variant.id === selectedMonsterVariant && variant.modelSlotsByAsset)) return [];
     const key = selectedAsset ? getMonsterEntityKey(selectedAsset) : "";
     return (monsterGroups.get(key) || []).filter(asset => asset.id !== selectedAsset?.id).flatMap((asset) =>
       (getCharacterAssetInfo(asset)?.modelParts || []).filter((part) => part.componentRole === "weapon" && part.sharedAcrossForms)
         .map((part) => ({ assetId: asset.id, name: part.normalizedName, storedPath: part.storedPath })));
-  }, [monsterGroups, selectedAsset]);
+  }, [monsterGroups, selectedAsset, selectedMonsterVariant, selectedMonsterVariants]);
   const selectedAssetMaxTextureResolution = selectedAssetTextureResolution?.actualPixels ?? 0;
   const currentExportResolution = normalizeExportResolutionValue(String(settings.exportResolution || "4k"));
   const currentBlenderDecimationRatio = normalizeBlenderDecimationRatio(settings.blenderDecimationRatio);
@@ -5827,7 +5851,7 @@ export function App() {
       revealedCharacterCardRef.current = "";
       return;
     }
-    const item = assetGridLayout.items.find(item => item.asset.id === selectedAssetId);
+    const item = assetGridLayout.items.find(item => item.asset.id === selectedAssetId && (item.variantId === undefined || item.variantId === selectedMonsterVariant));
     const stage = assetStageRef.current;
     if (!item || !stage) return;
     // Scanning/preview renders must not restart an unchanged smooth-scroll target.
@@ -5836,14 +5860,14 @@ export function App() {
     revealedCharacterCardRef.current = revealKey;
     if (item.y < stage.scrollTop || item.y + item.height > stage.scrollTop + stage.clientHeight) stage.scrollTo({ top: Math.max(0, item.y - 24), behavior: "smooth" });
     const frame = requestAnimationFrame(() => {
-      const card = document.getElementById(`asset-card-${selectedAssetId}`);
+      const card = document.getElementById(`asset-card-${monsterCardOccurrence(selectedAssetId, item.variantId)}`);
       const row = card?.closest<HTMLElement>(".character-showcase-row");
       if (row && (item.x < row.scrollLeft || item.x + item.width > row.scrollLeft + row.clientWidth)) {
         row.scrollTo({ left: Math.max(0, item.x - 12), behavior: "smooth" });
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [selectedAssetId, selectedAsset?.assetType, assetGridLayout.items]);
+  }, [selectedAssetId, selectedAsset?.assetType, assetGridLayout.items, selectedMonsterVariant]);
 
   const keyboardCardRef = useRef<HTMLElement | null>(null);
   function handleAssetStageKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
@@ -5857,11 +5881,11 @@ export function App() {
     const items = isAllOverviewView
       ? Array.from(stage.querySelectorAll<HTMLElement>(".asset-card")).map((element) => {
         const rect = element.getBoundingClientRect();
-        return { id: element.id.slice("asset-card-".length), element, x: rect.left - stageRect.left, y: rect.top - stageRect.top + stage.scrollTop, width: rect.width, height: rect.height };
+        return { id: element.dataset.assetId || element.id.slice("asset-card-".length), variantId: element.dataset.variantId, element, x: rect.left - stageRect.left, y: rect.top - stageRect.top + stage.scrollTop, width: rect.width, height: rect.height };
       })
       : packedAssetGrid.items.map((item) => ({ ...item, id: item.asset.id, element: null as HTMLElement | null }));
     // Remember the specific occurrence when an asset also appears in Recently used.
-    const current = items.find((item) => item.id === selectedAssetId && item.element === keyboardCardRef.current)
+    const current = items.find((item) => item.id === selectedAssetId && (item.variantId === undefined ? item.element === keyboardCardRef.current : item.variantId === selectedMonsterVariant))
       || items.find((item) => item.id === selectedAssetId);
     if (!current) {
       if (direction === "ArrowUp" || direction === "ArrowDown") {
@@ -5874,6 +5898,7 @@ export function App() {
     const next = getDirectionalGridItem(items, current, direction);
     if (!next) return;
     keyboardCardRef.current = next.element;
+    if (next.variantId !== undefined) setMonsterVariantSelection({ assetId: next.id, variantId: next.variantId });
     handleSelectAsset(next.id);
     if (next.y < stage.scrollTop) stage.scrollTop = next.y;
     else if (next.y + next.height > stage.scrollTop + stage.clientHeight) {
@@ -5941,7 +5966,22 @@ export function App() {
   }
 
   const [suitExportAssetIds, setSuitExportAssetIds] = useState<string[] | null>(null);
+  const [linkAssetIds, setLinkAssetIds] = useState<string[] | null>(null);
+  const [connectedUeProjectPath, setConnectedUeProjectPath] = useState('');
   const [suitExportHidden, setSuitExportHidden] = useState(false);
+  const [refreshingUePath, setRefreshingUePath] = useState(false);
+  async function refreshSelectedUePath() {
+    if (!selectedAsset || refreshingUePath) return;
+    const selectedId = selectedAsset.id;
+    setRefreshingUePath(true);
+    try {
+      const reply = await bridge.getSuitUnrealStatus(componentParentId(selectedId));
+      if (!reply.ok) throw new Error(reply.message || t('UE 正忙或未连接，请稍后重试', 'UE is busy or disconnected. Try again.'));
+      await refreshAssetFromDisk(selectedId);
+      showStatus(t('已从当前目标 UE 刷新资源状态', 'Resource status refreshed from the target UE project'), 4000);
+    } catch (error) { showStatus(String(error), 10000); }
+    finally { setRefreshingUePath(false); }
+  }
   const [animationExportAssetIds, setAnimationExportAssetIds] = useState<string[] | null>(null);
   useEffect(() => {
     if (!bridgeAvailable || typeof bridge.getAnimationGameTagOptions !== "function") return;
@@ -6239,51 +6279,62 @@ export function App() {
     }
   }, [bridge, bridgeAvailable, settings, setHasImportableProject, setPluginInstalled, setPluginStatusMessage]);
 
-  useEffect(() => {
-    // 软件启动时静默检查更新
-    if (bridgeAvailable && typeof bridge.checkAppUpdate === "function") {
-      bridge.checkAppUpdate().then((result) => {
-        if (result?.ok) {
-          if (result.hasUpdate) {
-            setAppUpdateState({
-              checked: true,
-              hasUpdate: true,
-              updateReady: Boolean(result.updateReady),
-              localPackagePath: String(result.localPackagePath || ""),
-              currentVersion: String(result.currentVersion || ""),
-              latestVersion: String(result.latestVersion || ""),
-              releaseUrl: String(result.releaseUrl || ""),
-              releaseName: String(result.name || ""),
-              publishedAt: String(result.publishedAt || ""),
-              releaseNotes: String(result.releaseNotes || ""),
-              repo: String(result.repo || ""),
-              downloadUrl: String(result.downloadUrl || ""),
-              packageSize: Number(result.packageSize) || 0
-            });
-          } else {
-            setAppUpdateState({
-              checked: true,
-              hasUpdate: false,
-              updateReady: Boolean(result.updateReady),
-              localPackagePath: String(result.localPackagePath || ""),
-              currentVersion: String(result.currentVersion || ""),
-              latestVersion: String(result.latestVersion || ""),
-              releaseUrl: String(result.releaseUrl || ""),
-              releaseName: String(result.name || ""),
-              publishedAt: String(result.publishedAt || ""),
-              releaseNotes: String(result.releaseNotes || ""),
-              repo: String(result.repo || ""),
-              downloadUrl: String(result.downloadUrl || ""),
-              packageSize: Number(result.packageSize) || 0
-            });
-            if (result.publishedAt) setCurrentVersionDate(String(result.publishedAt));
-          }
-        }
-      }).catch(() => {
-        // 静默失败，不打扰用户
-      });
+  const applyAppUpdateProgress = useCallback((payload?: AppUpdateDownloadProgress | null) => {
+    const value = payload?.progress;
+    setAppUpdateDownloadProgress(typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : null);
+    const loaded = Number(payload?.loaded);
+    const total = Number(payload?.total);
+    setAppUpdateDownloadedBytes(Number.isFinite(loaded) && loaded > 0 ? loaded : 0);
+    setAppUpdateTotalBytes(Number.isFinite(total) && total > 0 ? total : 0);
+  }, [setAppUpdateDownloadProgress, setAppUpdateDownloadedBytes, setAppUpdateTotalBytes]);
+
+  const applyAppUpdateState = useCallback((state: AppUpdateSnapshot, progressRevision?: number) => {
+    setAppUpdateState(prev => ({
+      ...prev, checked: true,
+      hasUpdate: Boolean(state.hasUpdate), updateReady: Boolean(state.updateReady),
+      localPackagePath: state.localPackagePath || "",
+      currentVersion: state.currentVersion || prev.currentVersion,
+      latestVersion: state.latestVersion || prev.latestVersion,
+      releaseUrl: state.releaseUrl || "", releaseName: state.name || "",
+      publishedAt: state.publishedAt || "", releaseNotes: state.releaseNotes || "",
+      repo: state.repo || "", downloadUrl: state.downloadUrl || "",
+      packageSize: state.packageSize || 0
+    }));
+    const downloading = state.phase === "downloading";
+    setAppUpdateMode(downloading ? "downloading" : "idle");
+    setAppUpdateBusy(downloading);
+    setAppUpdateMessage(state.message || "");
+    if (downloading && progressRevision === appUpdateProgressRevision.current) {
+      applyAppUpdateProgress(state.downloadProgress);
     }
-  }, [bridge, bridgeAvailable, setAppUpdateState]);
+  }, [applyAppUpdateProgress, setAppUpdateState, setAppUpdateMode, setAppUpdateBusy, setAppUpdateMessage]);
+
+  useEffect(() => {
+    if (!bridgeAvailable) return;
+    let active = true;
+    const stateRevision = appUpdateStateRevision.current;
+    const progressRevision = appUpdateProgressRevision.current;
+    const unsubscribeState = bridge.onAppUpdateState?.(state => {
+      appUpdateStateRevision.current++;
+      applyAppUpdateState(state);
+      if (state.showPrompt) setUpdatePageOpen(true);
+    });
+    const unsubscribeProgress = bridge.onAppUpdateDownloadProgress?.(payload => {
+      appUpdateProgressRevision.current++;
+      applyAppUpdateProgress(payload);
+    });
+    // Subscribe before reading the snapshot so a newer event can supersede it.
+    void bridge.checkAppUpdate?.().then(result => {
+      if (active && result?.ok && stateRevision === appUpdateStateRevision.current) {
+        applyAppUpdateState(result, progressRevision);
+      }
+    }).catch(() => {});
+    return () => {
+      active = false;
+      unsubscribeState?.();
+      unsubscribeProgress?.();
+    };
+  }, [bridge, bridgeAvailable, applyAppUpdateState, applyAppUpdateProgress, setUpdatePageOpen]);
 
   async function checkAppUpdate() {
     if (!bridgeAvailable || typeof bridge.checkAppUpdate !== "function") {
@@ -6293,44 +6344,22 @@ export function App() {
     setAppUpdateMode("checking");
     setAppUpdateBusy(true);
     setAppUpdateMessage(t("正在检查更新...", "Checking for updates..."));
-    let downloading = false;
+    const stateRevision = appUpdateStateRevision.current;
+    const progressRevision = appUpdateProgressRevision.current;
     try {
       const result = await bridge.checkAppUpdate();
-      downloading = result?.phase === "downloading";
-      if (!result?.ok) {
-        setAppUpdateMessage(result?.message || t("检查更新失败", "Update check failed"));
+      if (stateRevision !== appUpdateStateRevision.current) return;
+      if (result?.ok) {
+        applyAppUpdateState(result, progressRevision);
         return;
       }
-      const hasUpdate = Boolean(result?.hasUpdate);
-      setAppUpdateState({
-        checked: true,
-        hasUpdate,
-        updateReady: Boolean(result?.updateReady),
-        localPackagePath: String(result?.localPackagePath || ""),
-        currentVersion: String(result?.currentVersion || ""),
-        latestVersion: String(result?.latestVersion || ""),
-        releaseUrl: String(result?.releaseUrl || ""),
-        releaseName: String(result?.name || ""),
-        publishedAt: String(result?.publishedAt || ""),
-        releaseNotes: String(result?.releaseNotes || ""),
-        repo: String(result?.repo || ""),
-        downloadUrl: String(result?.downloadUrl || ""),
-        packageSize: Number(result?.packageSize) || 0
-      });
-      // Do not set appUpdateMessage here for the "no update" case so it doesn't show at the bottom
-      if (hasUpdate) {
-        setAppUpdateMessage("");
-      } else {
-        setAppUpdateMessage("");
-        if (result?.publishedAt) setCurrentVersionDate(String(result.publishedAt));
-      }
-      return result;
+      setAppUpdateMessage(result?.message || t("检查更新失败", "Update check failed"));
     } catch (error) {
+      if (stateRevision !== appUpdateStateRevision.current) return;
       setAppUpdateMessage(t(`检查更新失败：${String(error)}`, `Update check failed: ${String(error)}`));
-    } finally {
-      setAppUpdateMode(downloading ? "downloading" : "idle");
-      setAppUpdateBusy(downloading);
     }
+    setAppUpdateMode("idle");
+    setAppUpdateBusy(false);
   }
 
   async function downloadAppUpdate() {
@@ -6405,46 +6434,6 @@ export function App() {
   }
 
   useEffect(() => {
-    if (!bridgeAvailable || !bridge.onAppUpdateState) return;
-    return bridge.onAppUpdateState((state) => {
-      setAppUpdateState(prev => ({
-        ...prev, checked: true,
-        hasUpdate: Boolean(state.hasUpdate), updateReady: Boolean(state.updateReady),
-        localPackagePath: state.localPackagePath || "",
-        currentVersion: state.currentVersion || prev.currentVersion,
-        latestVersion: state.latestVersion || prev.latestVersion,
-        releaseUrl: state.releaseUrl || "", releaseName: state.name || "",
-        publishedAt: state.publishedAt || "", releaseNotes: state.releaseNotes || "",
-        repo: state.repo || "", downloadUrl: state.downloadUrl || "",
-        packageSize: state.packageSize || 0
-      }));
-      setAppUpdateMode(state.phase === "downloading" ? "downloading" : "idle");
-      setAppUpdateBusy(state.phase === "downloading");
-      setAppUpdateMessage(state.message || "");
-      if (state.showPrompt) setUpdatePageOpen(true);
-    });
-  }, [bridge, bridgeAvailable, setAppUpdateState, setAppUpdateMode, setAppUpdateBusy, setAppUpdateMessage, setUpdatePageOpen]);
-
-  useEffect(() => {
-    if (!bridgeAvailable || typeof bridge.onAppUpdateDownloadProgress !== "function") {
-      return;
-    }
-    const unsubscribe = bridge.onAppUpdateDownloadProgress((payload) => {
-      const value = payload?.progress;
-      if (typeof value === "number" && Number.isFinite(value)) {
-        setAppUpdateDownloadProgress(Math.max(0, Math.min(100, value)));
-      } else {
-        setAppUpdateDownloadProgress(null);
-      }
-      const loaded = Number(payload?.loaded);
-      const total = Number(payload?.total);
-      setAppUpdateDownloadedBytes(Number.isFinite(loaded) && loaded > 0 ? loaded : 0);
-      setAppUpdateTotalBytes(Number.isFinite(total) && total > 0 ? total : 0);
-    });
-    return () => unsubscribe();
-  }, [bridge, bridgeAvailable, setAppUpdateDownloadProgress, setAppUpdateDownloadedBytes, setAppUpdateTotalBytes]);
-
-  useEffect(() => {
     void refreshPluginStatus();
     // 插件状态没有事件源：迁移插件位置、切换项目、插件目录瞬间不可见，都可能让某一次
     // 检查得到 false，而 canExportToUnreal 直接由它控制（false 即导入入口禁用）。
@@ -6474,6 +6463,7 @@ export function App() {
           return;
         }
         setUnrealConnected(Boolean(result?.connected));
+        setConnectedUeProjectPath(String(result?.projectPath || ''));
         setUnrealConnectedTargetName(String(result?.targetName || "").trim());
         setUnrealConnectionMessage(String(result?.message || "").trim());
       } catch {
@@ -7599,7 +7589,6 @@ export function App() {
     const modelSlots: Record<string, string> = {};
     const modelVariantKeys: Record<string, string> = {};
     const modelLodFiles: Record<string, ModelLodEntry[]> = {};
-    const textureEntryMap = new Map<string, TextureEntry>();
     const normalMapFormatsByArea: Record<number, "dx" | "opengl"> = {};
     const enabledModelTypes = new Set<string>();
     const metaObject = asset?.meta && typeof asset.meta === "object" ? (asset.meta as Record<string, unknown>) : null;
@@ -7725,6 +7714,7 @@ export function App() {
       entries.sort((left, right) => left.lod - right.lod);
     }
 
+    const textureCandidates: TextureEntry[] = [];
     const metaTextureComponents = [
       ...(Array.isArray(metaObject?.components)
         ? (metaObject.components as Array<Record<string, unknown>>).filter((item) => String(item?.type || "").toLowerCase() === "texture") : []),
@@ -7755,10 +7745,7 @@ export function App() {
         continue;
       }
       const materialRole = normalizeTextureMaterialRole(item?.materialRole, normalizedPath);
-      const entryKey = `${areaId}:${materialRole || ""}:${normalizedSlot.toLowerCase()}`;
-      if (!textureEntryMap.has(entryKey)) {
-        textureEntryMap.set(entryKey, makeTextureEntry(normalizedSlot, normalizedPath, areaId, materialRole));
-      }
+      textureCandidates.push(makeTextureEntry(normalizedSlot, normalizedPath, areaId, materialRole));
       if (String(normalizedSlot || "").toLowerCase() === "normal") {
         const source = String(item?.normalMapFormat || "").trim().toLowerCase();
         if (!normalMapFormatsByArea[areaId] || source === "opengl") {
@@ -7777,9 +7764,20 @@ export function App() {
       }
       const areaId = inferTextureAreaIdFromPath(filePath);
       const materialRole = normalizeTextureMaterialRole("", filePath);
-      const entryKey = `${areaId}:${materialRole || ""}:${textureType.toLowerCase()}`;
+      textureCandidates.push(makeTextureEntry(textureType, resolveAssetPath(filePath), areaId, materialRole));
+    }
+
+    const textureFileKey = (entry: TextureEntry) =>
+      `${entry.areaId}:${entry.textureType.toLowerCase()}:${normalizePathForCompare(entry.filePath)}`;
+    const textureFilesWithRole = new Set(textureCandidates.filter((entry) => entry.materialRole).map(textureFileKey));
+    const textureEntryMap = new Map<string, TextureEntry>();
+    for (const entry of textureCandidates) {
+      if (!entry.materialRole && textureFilesWithRole.has(textureFileKey(entry))) {
+        continue;
+      }
+      const entryKey = `${entry.areaId}:${entry.materialRole || ""}:${entry.textureType.toLowerCase()}`;
       if (!textureEntryMap.has(entryKey)) {
-        textureEntryMap.set(entryKey, makeTextureEntry(textureType, resolveAssetPath(String(filePath || "").trim()), areaId, materialRole));
+        textureEntryMap.set(entryKey, entry);
       }
     }
 
@@ -9272,7 +9270,7 @@ export function App() {
           options={[{ value: "", label: t("待确认", "Needs confirmation") },
             ...(importForm.assetType === 'weapon' ? WEAPON_TYPES : getSubCategoryOptions(importForm.assetType)).map(value => ({ value, label: getCharacterCategoryDisplayLabel(importForm.assetType, value, uiLanguage) }))]}
           onChange={value => applyImportBatchPatch(form => ({
-            ...updateCharacterFields({ ...form, subCategory: form.assetType === 'weapon' ? weaponCategory(value) : value }, { relatedAssetId: "", ...(form.assetType === 'weapon' ? { weaponType: value, identityConfirmed: false } : {}) }),
+            ...updateCharacterFields({ ...form, subCategory: form.assetType === 'weapon' ? weaponCategory(value) : value }, { relatedAssetId: "", identityConfirmed: false, confirmed: false, ...(form.assetType === 'weapon' ? { weaponType: value } : {}) }),
             destinationPath: getDefaultImportDestinationPath(form.assetType, form.animationAffiliation, form.assetType === 'weapon' ? weaponCategory(value) : value)
           }))} />
       </div>
@@ -9307,6 +9305,13 @@ export function App() {
                                     placeholder={t("待识别", "Not detected")}
                                     onChange={event => { const value = event.target.value.replace(/\D/g, '').slice(0, 2); applyImportBatchPatch(form => updateCharacterFields(form, { formIds: value ? [value] : [] })); }}
                                     title={t("可修改；以确认后的两位编号入库", "Editable; the confirmed two-digit number is used for import")} />
+                                </label>
+                                <label className="monster-field-group">
+                                  <span className="monster-field-label">{t('变体（可选）', 'Variant (optional)')}</span>
+                                  <input className="settings-input" value={getImportSelectionValue(form => form.characterFields.monsterVariant || '') ?? ''}
+                                    placeholder="NormalShield"
+                                    onChange={event => { const monsterVariant = event.target.value.replace(/[^A-Za-z0-9_]/g, ''); applyImportBatchPatch(form => updateCharacterFields(form, { monsterVariant })); }}
+                                    title={t('同一角色的变体；填写后在 Mesh 下创建变体目录，不替代形态编号', 'A character variant; creates a variant folder under Mesh, separate from its form number')} />
                                 </label>
                               </>
                             ) : (
@@ -10622,7 +10627,7 @@ export function App() {
     } else {
       // Scroll into view
       setTimeout(() => {
-        const layoutItem = assetGridLayout.items.find((item) => item.asset.id === targetId);
+        const layoutItem = assetGridLayout.items.find((item) => item.asset.id === targetId && (item.variantId === undefined || item.variantId === selectedMonsterVariant));
         const stage = assetStageRef.current;
         if (layoutItem && stage) {
           stage.scrollTo({
@@ -10630,7 +10635,7 @@ export function App() {
             behavior: "smooth"
           });
         }
-        const card = document.getElementById(`asset-card-${targetId}`);
+        const card = document.getElementById(`asset-card-${monsterCardOccurrence(targetId, layoutItem?.variantId)}`);
         if (card) {
           card.classList.add("flash-highlight");
           setTimeout(() => card.classList.remove("flash-highlight"), 1000);
@@ -13314,34 +13319,14 @@ export function App() {
                       </div>
                       <div className="about-update-area">
                         <button
-                          className={`about-update-btn-inline ${updateCheckLocked ? "is-locked" : ""}`}
+                          className="about-update-btn-inline"
                           onClick={() => {
-                            void (async () => {
-                              if (appUpdateBusy || updateCheckLocked) return;
-                              setShowNoUpdateHint(false);
-                              const result = await checkAppUpdate();
-                              if (result?.ok && result.hasUpdate) {
-                                setUpdatePageOpen(true);
-                              } else if (result?.ok) {
-                                setUpdateCheckLocked(true);
-                              }
-                            })();
+                            setUpdatePageOpen(true);
+                            if (!appUpdateBusy) void checkAppUpdate();
                           }}
-                          disabled={appUpdateBusy || updateCheckLocked}
+                          disabled={appUpdateBusy && appUpdateMode !== "downloading"}
                         >
-                          {appUpdateMode === "checking" ? (
-                            <>
-                              {t("检查中", "Checking")}
-                              <span className="check-spinner" />
-                            </>
-                          ) : updateCheckLocked && !appUpdateState.hasUpdate ? (
-                            <>
-                              <span className="locked-check">✓</span>
-                              {t("已经是最新版本", "Already up to date")}
-                            </>
-                          ) : (
-                            t("检查更新", "Check for Updates")
-                          )}
+                          {t("检查更新", "Check for Updates")}
                         </button>
                         <button className="about-cache-btn" onClick={clearCacheFiles} disabled={busy}>
                           {busy
@@ -13534,14 +13519,13 @@ export function App() {
                           void checkAppUpdate();
                         }
                       }}
-                      disabled={appUpdateBusy || importSaving || isExporting || busy || (appUpdateState.checked && !appUpdateState.hasUpdate)}
+                      disabled={appUpdateBusy || importSaving || isExporting || busy}
                     >
                       {appUpdateMode === "checking" ? t("检查中...", "Checking...") :
                         appUpdateMode === "installing" ? t("启动中...", "Launching...") :
                           appUpdateState.hasUpdate && appUpdateState.updateReady ? t("立即更新并重启", "Update and Restart") :
                             appUpdateState.hasUpdate && !appUpdateState.updateReady ? t("下载更新", "Download Update") :
-                              appUpdateState.checked && !appUpdateState.hasUpdate ? t("已是最新版本", "Up to Date") :
-                                t("检查更新", "Check for Updates")}
+                              t("检查更新", "Check for Updates")}
                     </button>
                   )}
                 </div>
@@ -13794,16 +13778,14 @@ export function App() {
                           {importSelectionAssetType === "npc" && (
                             <>
                               <span className="inline-text-label">{t("类别", "Category")}</span>
-                              <input
-                                className="settings-input"
+                              <DarkSelect
+                                ariaLabel={t('NPC 类别', 'NPC category')}
                                 value={getImportSelectionValue((form) => form.subCategory) ?? ""}
-                                placeholder={t("从资产目录自动识别，可修改", "Detected from package folder; editable")}
-                                onChange={(event) => {
-                                  const category = event.target.value;
+                                options={[{ value: '', label: t('请选择', 'Select') }, ...characterCategoryOptions.npc.map(value => ({ value, label: getCharacterCategoryDisplayLabel('npc', value, uiLanguage) }))]}
+                                onChange={(category) => {
                                   applyImportBatchPatch((form) => ({
-                                    ...updateCharacterFields({ ...form, subCategory: category }, {}),
+                                    ...updateCharacterFields({ ...form, subCategory: category }, { confirmed: false, identityConfirmed: false }),
                                     destinationPath: getDefaultImportDestinationPath(form.assetType, "", category),
-                                    characterFields: { ...form.characterFields, confirmed: false }
                                   }));
                                 }}
                               />
@@ -16100,7 +16082,14 @@ export function App() {
               </div>
             ) : (
               <section className="asset-grid asset-grid-virtual" style={{ height: `${assetGridLayout.totalHeight}px` }}>
-              {packedAssetGrid.sectionHeaders.map(section => (
+              {packedAssetGrid.sectionHeaders.map(section => 'groupKey' in section && section.groupKey ? (
+                <button key={section.groupKey} className={`character-grid-section-heading monster-variant-heading ${section.level ? 'is-variant' : 'is-entity'}`} style={{ top: section.y, left: section.x, width: section.width, right: section.width ? 'auto' : undefined, paddingLeft: 10 }}
+                  aria-expanded={!collapsedMonsterGroups.has(section.groupKey)} onClick={() => setCollapsedMonsterGroups(previous => {
+                    const next = new Set(previous); if (next.has(section.groupKey!)) next.delete(section.groupKey!); else next.add(section.groupKey!); return next;
+                  })}>
+                  {collapsedMonsterGroups.has(section.groupKey) ? '▸' : '▾'} {section.label}{section.empty ? t(' · 未配置资源', ' · No resources') : ''}
+                </button>
+              ) : (
                 <div key={`${section.family}:${section.y}`} className="character-grid-section-heading" style={{ top: section.y }}>
                   {section.family === "suit" ? t("套装", "Outfits") : section.family === "monster" ? t("怪物", "Monsters") : section.family === "npc" ? "NPC" : section.family === "weapon" ? t("武器", "Weapons") : section.family === "item" ? t("玩法物件", "Gameplay Items") : section.family}
                 </div>
@@ -16123,7 +16112,7 @@ export function App() {
                   }}>{t("在全部资产中搜索", "Search all assets")}</button>}
                 </div>
               )}
-              {assetGridLayout.items.length > 0 && !(characterContext && characterFilters.display === "all") && <div
+              {assetGridLayout.items.length > 0 && !hasMonsterVariantGrid && !(characterContext && characterFilters.display === "all") && <div
                 ref={gridScrollPlaceholderRef}
                 className="asset-grid-scroll-placeholder"
                 aria-hidden="true"
@@ -16137,24 +16126,39 @@ export function App() {
               >
                 {Array.from({ length: gridScrollPlaceholderCount }, (_, index) => <span key={index} />)}
               </div>}
-              {assetGridLayout.visibleItems.map(({ asset, x, y, width, height }) => (
+              {assetGridLayout.visibleItems.map(({ asset, x, y, width, height, variantId, renderKey }) => (
                 <AssetCard
-                  key={asset.id}
+                  key={renderKey || asset.id}
                   animationProjectPath={settings.unrealProjectPath}
                   asset={asset}
+                  variantId={variantId}
+                  previewWorkState={partPreviews.errors[componentParentId(asset.id)] ? 'failed' : partPreviews.activeOwnerId === componentParentId(asset.id) ? 'running' : 'queued'}
+                  variantAssets={monsterGroups.get(getMonsterEntityKey(asset))}
                           monsterFormCounter={monsterFormCounters.get(asset.id)}
                   x={x} y={y} width={width} height={height}
                   previewLoader={previewLoader}
                   animationCoverQueue={animationCoverQueue}
-                  isSelected={selectedAssetId === asset.id || selectedIdSet.has(asset.id)}
+                  isSelected={(selectedAssetId === asset.id || selectedIdSet.has(asset.id)) && (variantId === undefined || variantId === (selectedAssetId === asset.id ? selectedMonsterVariant : monsterSelectedOccurrences[asset.id] ?? monsterVariantId(asset)))}
                   selectedMeshKind={selectedComponentMesh?.assetId === asset.id ? selectedComponentMesh.kind : undefined}
                   isFavorite={favoriteIds.has(asset.id)}
-                  onSelect={handleSelectAsset}
+                  onSelect={(assetId, meshKind) => {
+                    if (variantId !== undefined) {
+                      setMonsterVariantSelection({ assetId, variantId });
+                      setMonsterSelectedOccurrences(previous => ({ ...previous, [assetId]: variantId }));
+                    }
+                    handleSelectAsset(assetId, meshKind);
+                  }}
                   onToggleSuitParts={handleToggleSuitParts}
                   onAddSuitPart={handleAddSuitPart}
-                  onToggle={toggleSelect}
+                  onToggle={assetId => {
+                    if (variantId !== undefined) setMonsterSelectedOccurrences(previous => ({ ...previous, [assetId]: variantId }));
+                    toggleSelect(assetId);
+                  }}
                   onToggleFavorite={toggleFavorite}
-                  onContextMenu={handleContextMenu}
+                  onContextMenu={(event, assetId) => {
+                    if (variantId !== undefined) setMonsterVariantSelection({ assetId, variantId });
+                    handleContextMenu(event, assetId);
+                  }}
                   onQuickExport={handleQuickExport}
                   exportTarget={settings.exportTarget}
                   exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
@@ -16331,17 +16335,19 @@ export function App() {
                       <span style={{ userSelect: "text", color: "var(--text-2)", textTransform: "none" }}>{selectedAsset.id}</span>
                     </div>
                     {selectedCharacterInfo && (() => {
-                      const locations = suitExportLocations(selectedAsset.meta, settings.unrealProjectPath || '');
+                      const locations = suitExportLocations(selectedAsset.meta, settings.unrealProjectPath || connectedUeProjectPath || '');
                       if (locations) return <div>{locations.length ? locations.map(location => <div className="character-engine-location" key={location.label}>
                         <span className="character-info-label">{location.label} {t("引擎内路径：", "Engine path: ")}</span>
                         <span className="character-engine-path">{location.path.slice(0, -8)}<span className="character-engine-tail">{location.path.slice(-8) || t("未导入", "Not imported")}<button type="button" className="character-engine-copy" disabled={!location.path} title={t("复制引擎内路径", "Copy engine path")} aria-label={t("复制引擎内路径", "Copy engine path")} onClick={() => { void copyCharacterEnginePath(location.path); }}><Icon name="copy" /></button></span></span>
-                        {location.missing ? t(" · UE 中缺失", " · Missing in UE") : location.pending ? t(" · 有待处理项", " · Pending items") : ''}
-                      </div>) : <div className="character-engine-location"><span className="character-info-label">{t("引擎内路径：", "Engine path: ")}</span>{t("未导入", "Not imported")}</div>}</div>;
+                        <button type="button" className="character-engine-copy" disabled={refreshingUePath || Boolean(suitExportAssetIds)} title={t('从目标 UE 刷新状态', 'Refresh status from target UE')} aria-label={t('刷新引擎内路径', 'Refresh engine path')} onClick={() => { void refreshSelectedUePath(); }}>{refreshingUePath ? '…' : '↻'}</button>
+                        {!unrealConnected ? t(' · 历史记录，当前未连接', ' · Historical record; offline') : location.missing ? t(" · UE 中缺失", " · Missing in UE") : location.pending ? t(" · 有待处理项", " · Pending items") : ''}
+                      </div>) : <div className="character-engine-location"><span className="character-info-label">{t("引擎内路径：", "Engine path: ")}</span>{t("未导入", "Not imported")}<button type="button" className="character-engine-copy" disabled={refreshingUePath || Boolean(suitExportAssetIds)} title={t('从目标 UE 刷新状态', 'Refresh status from target UE')} aria-label={t('刷新引擎内路径', 'Refresh engine path')} onClick={() => { void refreshSelectedUePath(); }}>{refreshingUePath ? '…' : '↻'}</button></div>}</div>;
                       const exportInfo = selectedAsset.meta.exportInfo as Record<string, unknown> | undefined;
                       const unrealInfo = selectedAsset.meta.unreal as Record<string, unknown> | undefined;
                       const enginePath = [selectedAsset.meta.enginePath, selectedAsset.meta.unrealPath, selectedAsset.meta.uePath, selectedAsset.meta.unrealAssetPath, selectedAsset.meta.engineAssetPath, exportInfo?.unrealPath, exportInfo?.assetPath, unrealInfo?.assetPath]
                         .map(value => String(value || "").trim()).find(Boolean) || "";
                       return <div className="character-engine-location">
+                        <button type="button" className="character-engine-copy" disabled={refreshingUePath || Boolean(suitExportAssetIds)} title={t('从目标 UE 刷新状态', 'Refresh status from target UE')} aria-label={t('刷新引擎内路径', 'Refresh engine path')} onClick={() => { void refreshSelectedUePath(); }}>{refreshingUePath ? '…' : '↻'}</button>
                         <span className="character-info-label">{t("引擎内路径：", "Engine path: ")}</span>
                         <span className={enginePath ? "character-engine-path" : "character-engine-path character-engine-not-imported"}>{enginePath.slice(0, -8)}<span className="character-engine-tail">{enginePath.slice(-8) || t("未导入", "Not imported")}<button type="button" className="character-engine-copy" disabled={!enginePath} title={t("复制引擎内路径", "Copy engine path")} aria-label={t("复制引擎内路径", "Copy engine path")} onClick={() => { void copyCharacterEnginePath(enginePath); }}><Icon name="copy" /></button></span></span>
                       </div>;
@@ -16352,6 +16358,9 @@ export function App() {
                     </div>}
                     {selectedCharacterInfo && !heroPartKind(selectedCharacterInfo.fields) && !selectedPartView && <div className="character-display-name-row"><span className="character-info-label">{selectedCharacterInfo.family === 'item' && gameplayUsesResourceId(selectedCharacterInfo.category) ? t('资源 ID：', 'Resource ID: ') : selectedCharacterInfo.family === 'suit' ? t("套装英文名：", "Suit English name: ") : t("英文名：", "English name: ")}</span><strong>{selectedCharacterInfo.fields.displayNameEn || t("未填写", "Not set")}</strong></div>}
                     {selectedCharacterInfo?.fields.ueNameSyncPending && hasCharacterEnginePath(selectedAsset.meta) && !selectedPartView && <div className="character-name-sync-hint" role="status">{t("当前已改名，请点击「发送到 UE」同步 UE 文件名称。", "Names changed. Send to UE to sync UE filenames.")}</div>}
+                    {selectedCharacterInfo && !selectedPartView && <div className="character-preview-actions">
+                      <button className="browse-btn" disabled={busy || isExporting} onClick={() => setLinkAssetIds([selectedAsset.id])}>{t('管理 UE 资源', 'Manage UE assets')}</button>
+                    </div>}
                     {selectedCharacterInfo && <div className="character-last-update-row">
                       <div className="settings-field-hint"><span className="character-info-label">{t("最后更新时间：", "Last updated: ")}</span>{(() => {
                         const manifest = selectedAsset.meta.characterManifest as { contentUpdatedAt?: string; confirmedAt?: string; lastUpdateSummary?: string } | undefined;
@@ -16692,17 +16701,41 @@ export function App() {
                           {selectedPartView && partPreviews.activeId === selectedAsset.id && (!partPreviews.activeMeshKind || partPreviews.activeMeshKind === (selectedPartView.visibleMeshKind || 'staticMesh')) && <span className="character-preview-state">{t("正在拍摄部件预览…", "Rendering part previews…")}</span>}
                           {!selectedPartView && partPreviews.activeOwnerId === selectedAsset.id && <span className="character-preview-state">{t("正在重新拍摄四视图…", "Recapturing four views…")}</span>}
                         </div>
-                        {selectedPartView && partPreviews.errors[selectedAsset.id] && <div className="character-preview-error" role="status"><p>{t("正面照生成失败：", "Front preview failed: ")}{partPreviews.errors[selectedAsset.id]}</p><button className="browse-btn" disabled={busy || Boolean(partPreviews.activeId)} onClick={() => partPreviews.retry(selectedAsset.id)}>{t("重试正面照", "Retry Front Preview")}</button></div>}
+                        {selectedPartView && partPreviews.errors[componentParentId(selectedAsset.id)] && <div className="character-preview-error" role="status"><p>{t("部件预览生成失败：", "Part preview failed: ")}{partPreviews.errors[componentParentId(selectedAsset.id)]}</p><button className="browse-btn" disabled={busy || Boolean(partPreviews.activeOwnerId)} onClick={() => partPreviews.retry(selectedAsset.id)}>{t("重试部件预览", "Retry part preview")}</button></div>}
                         {!selectedPartView && partPreviews.errors[selectedAsset.id] && <div className="character-preview-error" role="status"><p>{t("四视图生成失败：", "Four-view render failed: ")}{partPreviews.errors[selectedAsset.id]}</p><button className="browse-btn" disabled={busy || Boolean(partPreviews.activeOwnerId)} onClick={() => partPreviews.retry(selectedAsset.id)}>{t("重试四视图", "Retry Four Views")}</button></div>}
                       </>}
-                      {!selectedPartView && relatedMonsterForms.length > 0 && <section className="monster-form-switcher" aria-label={t('切换形态', 'Switch form')}>
+                      {!selectedPartView && selectedMonsterVariants.some(variant => variant.id) && <section className="monster-form-switcher" aria-label={t('怪物变体', 'Monster variants')}>
+                        <h4>{t('变体', 'Variants')}<span>{selectedMonsterVariants.length}</span></h4>
+                        <div>{selectedMonsterVariants.map(variant => <button type="button" key={variant.id}
+                          aria-current={variant.id === selectedMonsterVariant} disabled={!variant.assets.length}
+                          title={[variant.enginePath, variant.resourceCount != null ? t(`${variant.resourceCount} 个配套 UE 资源`, `${variant.resourceCount} related UE resources`) : ''].filter(Boolean).join('\n')}
+                          onClick={() => {
+                            const target = variant.assets.find(asset => asset.id === selectedAsset.id) || variant.assets[0];
+                            if (!target) return;
+                            setMonsterVariantSelection({ assetId: target.id, variantId: variant.id });
+                            if (target.id !== selectedAsset.id) handleSelectCharacterRelation(target.id);
+                          }}>{variant.name || t('基础', 'Base')}{!variant.assets.length ? t(' · 未配置模型', ' · No model') : ''}</button>)}</div>
+                        <p className="settings-field-hint">{t('同一怪物的配套子类；模型可共享，变体与形态分别管理。', 'Subtypes of one monster. Models may be shared; variants and forms are separate.')}</p>
+                      </section>}
+                      {!selectedPartView && relatedMonsterForms.length > 0 && !selectedCharacterInfo.fields.monsterVariantOnly && <section className="monster-form-switcher" aria-label={t('切换形态', 'Switch form')}>
                         <h4>{t('形态', 'Forms')}<span>{monsterFormCounters.get(selectedAsset.id) || '01/01'}</span></h4>
                         <div>{relatedMonsterForms.map(form => <button type="button" key={form.id} aria-current={form.id === selectedAsset.id}
                           title={characterDisplayName(form)} onClick={() => { if (form.id !== selectedAsset.id) handleSelectCharacterRelation(form.id); }}>{monsterFormLabel(form, uiLanguage)}</button>)}</div>
                       </section>}
+                      {selectedAsset.assetType === 'monster' && !selectedPartView && (() => {
+                        const intake = selectedAsset.meta?.characterUEIntake as { relatedResources?: Array<{ name: string; kind: string; path: string; status: string; referenceOnly?: boolean }>; blueprintIssues?: Array<{ path: string; message: string }> } | undefined;
+                        const root = selectedMonsterVariants.find(variant => variant.id === selectedMonsterVariant)?.enginePath;
+                        const resources = (intake?.relatedResources || []).filter(resource => !root || resource.path.startsWith(root + '/') || resource.status === 'blocked');
+                        return resources.length ? <details className="monster-related-resources"><summary>{t('配套 UE 资源', 'Related UE resources')} · {resources.length}</summary>
+                          {intake?.blueprintIssues?.map(issue => <p className="warn" key={issue.path}>{issue.path.split('/').pop()}：{t('原有蓝图父类缺失，编译未通过', 'Existing blueprint has no parent class and fails compilation')}</p>)}
+                          {resources.map(resource => <button type="button" key={resource.path} title={resource.path} onClick={() => { void copyCharacterEnginePath(resource.path); }}>
+                            <span>{resource.name}</span><small>{resource.kind}{resource.referenceOnly ? t(' · 参考', ' · Reference') : ''}{resource.status === 'blocked' ? t(' · 原路径', ' · Original path') : ''}</small><Icon name="copy" />
+                          </button>)}
+                        </details> : null;
+                      })()}
                       {selectedCharacterInfo.family === 'weapon' && !selectedPartView && <h3 className="weapon-rig-heading">{t('绑定与模型', 'Rigging and models')}</h3>}
                       {['monster', 'npc'].includes(selectedCharacterInfo.family) && !selectedPartView && <h3 className="weapon-rig-heading">{t('模型与绑定', 'Models and rigging')}</h3>}
-                      {characterModelGroups(selectedAsset).length > 0 && (() => {
+                      {selectedModelGroups.length > 0 && (() => {
                         return <CharacterRigPanel key={selectedAsset.id} assetId={selectedAsset.id} isPart={Boolean(selectedPartView)} suitWorkflow={selectedCharacterInfo.family === 'suit' && !heroPartKind(selectedCharacterInfo.fields || {})} {...characterRigProgress(selectedAsset)} disabled={busy || isExporting || pluginInstalling}
                           onReview={async needsRigging => {
                             if (!bridge.updateCharacter) throw new Error('桌面端连接不可用');
@@ -16713,9 +16746,9 @@ export function App() {
                           }}
                           t={t} uploadDropProps={characterFileDropProps(paths => dropCharacterUpdateFiles(selectedAsset, paths))} onUpload={() => { openCharacterUpdate(selectedAsset); setCharacterUpdateMode('whole'); }} />;
                       })()}
-                      {['monster', 'npc'].includes(selectedCharacterInfo.family) && !selectedPartView && <MonsterModelPanel asset={selectedAsset} selected={monsterModelSelection}
+                      {['monster', 'npc'].includes(selectedCharacterInfo.family) && !selectedPartView && <MonsterModelPanel asset={selectedAsset} variantId={selectedMonsterVariant} relatedAssets={monsterGroups.get(getMonsterEntityKey(selectedAsset))} selected={monsterModelSelection}
                         disabled={busy || importSaving || isExporting} t={t} previewUrl={path => getPreviewUrl(path) || ''}
-                        onSelect={(slot, kind, view) => setMonsterModelSelection({ ownerId: selectedAsset.id, slot, kind, view })}
+                        onSelect={(slot, kind, view, ownerId) => setMonsterModelSelection({ ownerId, slot, kind, view })}
                         onUpdate={openCharacterUpdate}
                         updateDropProps={asset => characterFileDropProps(paths => dropCharacterUpdateFiles(asset, paths))}
                         previewDropProps={asset => characterFileDropProps(paths => changeCharacterPreview(asset, paths))}
@@ -16751,7 +16784,7 @@ export function App() {
                             <span><b>{t("资产类型", "Asset Type")}</b>{getAssetTypeLabel(selectedCharacterInfo.family)}</span>
                             <span><b>{t("类别", "Category")}</b>{getCharacterCategoryDisplayLabel(selectedCharacterInfo.family, selectedCharacterInfo.category, uiLanguage)}</span>
                             {selectedCharacterInfo.family === "monster"
-                              ? <span><b>{t("阶段 / 形态", "Phase / Form")}</b>{selectedCharacterInfo.fields.formIds?.map((id) => id === "base" ? t("基础", "Base") : id).join(" / ") || t("未标记", "Unspecified")}</span>
+                              ? <span><b>{selectedCharacterInfo.fields.monsterVariantOnly ? t('模型编号', 'Model index') : t("阶段 / 形态", "Phase / Form")}</b>{selectedCharacterInfo.fields.formIds?.map((id) => id === "base" ? t("基础", "Base") : id).join(" / ") || t("未标记", "Unspecified")}</span>
                               : <span><b>{t("编号", "Serial")}</b>{selectedCharacterInfo.fields.serial || t("未填写", "Not set")}</span>}
                           </>
                         )}
@@ -16814,6 +16847,7 @@ export function App() {
                           ))}
                         </div>
                       </details>
+                      <CharacterUeLods receipts={selectedAsset.meta?.characterUnrealExports} t={t} />
                       <CharacterLodReview compact t={t} onReveal={storedPath => { void revealCharacterModel(selectedAsset, storedPath); }} files={activeCharacterFiles(selectedAsset)
                     .filter(file => ['model', 'staticMesh', 'skeletalMesh'].includes(file.role))
                     .map(file => ({ name: file.normalizedName || file.storedPath, sourcePath: file.storedPath, kind: file.role === 'skeletalMesh' ? 'skeletalMesh' : 'staticMesh' }))} />
@@ -16851,7 +16885,7 @@ export function App() {
                     <h3>{t("相关资产", "Related Assets")}</h3>
                     <div className="related-grid">
                       {relatedAssets.map((asset) => (
-                        <RelatedAssetCard key={asset.id} asset={asset} caption={selectedAsset.assetType === "monster" && asset.assetType === "monster" ? monsterFormLabel(asset, uiLanguage) : undefined} onSelect={selectedCharacterInfo ? handleSelectCharacterRelation : setSelectedAssetId} />
+                        <RelatedAssetCard key={asset.id} asset={asset} caption={selectedAsset.assetType === "monster" && asset.assetType === "monster" ? monsterVariantLabel(asset) || monsterFormLabel(asset, uiLanguage) : undefined} onSelect={selectedCharacterInfo ? handleSelectCharacterRelation : setSelectedAssetId} />
                       ))}
                       {ownedMonsterWeapons.map(part => {
                         const kind = part.meshKinds.staticMesh ? 'staticMesh' : 'skeletalMesh';
@@ -17257,6 +17291,7 @@ export function App() {
             </div>
           </div>
         )}
+        {linkAssetIds && <CharacterLinkDialog assetIds={linkAssetIds} settings={settings} t={t} onClose={() => setLinkAssetIds(null)} onApplied={async () => { if (selectedAsset) await refreshAssetFromDisk(selectedAsset.id); }} />}
         {animationExportAssetIds && <AnimationExportDialog
           assets={animationExportAssetIds.map(id => allAssets.find(asset => asset.id === id)).filter((asset): asset is AssetRecord => Boolean(asset))}
           settings={settings} t={t}

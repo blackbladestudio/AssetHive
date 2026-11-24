@@ -1,5 +1,6 @@
 import { heroMaterialRole, heroTextureGroup, heroMaterialGroupForSlot } from './heroMaterialRules.mjs';
 import { weaponFileIdentity, weaponPackageOutput } from './weaponRules.mjs';
+import { isSharedSuitMaterialSlot } from './suitMaterialMatching.mjs';
 
 const channelAliases = Object.freeze({
   d: ['d', 'diffuse', 'basecolor'],
@@ -62,16 +63,28 @@ export function characterPreviewMaterialPlan(materialName, textureKeys, heroPart
     if (matches.length === 1) stem = matches[0];
   }
 
-  if (!hasAnyChannel(stem)) {
+  if (!hasAnyChannel(stem) && !isSharedSuitMaterialSlot(materialName)) {
     // Renaming a managed suit does not rewrite the material slots embedded in
-    // its FBX. Match the longest unique suit group (for example Upbody_01).
-    const materialKey = stem.replace(/(?:sg|material)$/i, '').replace(/[^a-z0-9]/g, '');
-    const candidates = rows.filter(row => row.channel === 'd').flatMap(row => {
-      const match = /^[mf]\d+_(?:light|medium|heavy)\d+_[^_]+_(.+)$/.exec(row.base);
-      const group = match?.[1].replace(/[^a-z0-9]/g, '');
-      return group && materialKey.endsWith(group) ? [{ base: row.base, length: group.length }] : [];
-    }).sort((a, b) => b.length - a.length);
-    if (candidates.length && (!candidates[1] || candidates[0].length > candidates[1].length)) stem = candidates[0].base;
+    // its FBX. English names may themselves contain underscores; compare suffixes
+    // instead of assuming the first name token ends the asset name. Numeric-only
+    // suffixes cannot identify a material, and tied groups must not be guessed.
+    const clean = stem.replace(/(?:sg|material)$/i, '').replace(/(^|_)hari(?=_|$)/ig, '$1hair');
+    const bases = [...new Set(rows.map(row => row.base))];
+    const matchSlot = slot => {
+      const materialKey = slot.replace(/[^a-z0-9]/g, '');
+      const candidates = bases.flatMap(base => {
+        const match = /^[mf]\d+_(?:light|medium|heavy)\d+_(.+)$/.exec(base);
+        const tokens = match?.[1].split('_') || [];
+        for (let start = 1; start < tokens.length; start++) {
+          if (!/[a-z]/.test(tokens[start])) continue;
+          const group = tokens.slice(start).join('');
+          if (materialKey.endsWith(group)) return [{ base, length: group.length }];
+        }
+        return [];
+      }).sort((a, b) => b.length - a.length);
+      return candidates.length && (!candidates[1] || candidates[0].length > candidates[1].length) ? candidates[0].base : '';
+    };
+    stem = matchSlot(clean) || matchSlot(clean.replace(/_\d+$/, '')) || stem;
   }
 
   if (!hasAnyChannel(stem) && allowWeaponFallback) {

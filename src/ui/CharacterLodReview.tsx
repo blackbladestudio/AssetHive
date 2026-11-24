@@ -45,12 +45,14 @@ export function CharacterLodReview({ files, t, confirmed, onConfirm, onReveal, d
           <tbody>{group.files.map((file, index) => <tr key={`${file.index}:${index}`}><td>LOD{file.index}</td><td>{file.sourcePath?.split(/[\\/]/).pop() || file.name}</td><td>{file.name}</td></tr>)}</tbody>
         </table>
       </details>
-      {!!group.automatic.length && <small>{t('UE 自动减面（需设置）：', 'UE reduction (settings required): ')}{group.automatic.map(index => `LOD${index}`).join('、')}</small>}
+      {!!group.automatic.length && <small>{group.files.some(file => file.index === 1)
+        ? t('LOD1 导入后自动减面：', 'Generated after importing LOD1: ')
+        : t('补充 LOD1 后自动生成 LOD2–5；当前缺少：', 'Add LOD1 to generate LOD2–5; currently missing: ')}{group.automatic.map(index => `LOD${index}`).join('、')}</small>}
       {group.missingBase && <small role="alert" className="error">{t('缺少 LOD0 主模型', 'Missing LOD0 base model')}</small>}
       {group.duplicate && <small role="alert" className="error">{t('同一等级有多个文件，请整理后重试', 'Multiple files for the same level. Resolve before continuing.')}</small>}
     </div>)}</div>
     <details className="character-lod-rules"><summary>{t('LOD 规则说明', 'LOD rules')}</summary>
-      <p>{t('可以先只提供 LOD0，之后再补充。美术提供的等级使用美术文件；缺少的 LOD1–5 由 UE 按已有减面设置补齐，未配置时会提示。', 'You can start with LOD0 and add source LODs later. Supplied levels use artist files; missing LOD1–5 use existing UE reduction settings. Missing settings are reported.')}</p>
+      <p>{t('可先只提供 LOD0。SM、SK 的美术 LOD 导入后回读验证；LOD1 成功挂入后，缺少的 LOD2–5 按 LOD1 面数的 50%、25%、12.5%、6.25% 自动减面。已有手工等级保留，验证结果记录回 AssetHive。', 'Start with LOD0 if needed. Artist LODs for SM and SK are verified after import. Once LOD1 is present, missing LOD2–5 use 50%, 25%, 12.5% and 6.25% of its triangles. Existing artist LODs are preserved and results recorded in AssetHive.')}</p>
       <p>{t('不带后缀或 _LOD0 为主模型；各等级共用贴图，无需另建 LOD 文件夹。名称或文件变化后需重新确认。', 'No suffix or _LOD0 is the base. Levels share textures; no extra LOD folder is needed. Review again after names or files change.')}</p>
     </details>
     </>}

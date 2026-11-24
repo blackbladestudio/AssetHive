@@ -25,6 +25,7 @@ function getFamilyRule(family) {
   return rules[String(family || "").toLowerCase()] || null;
 }
 
+const { normalizeNpcCategory, inferNpcCategory } = require('../../shared/npcCategories.mjs');
 function parsePackageName(family, value) {
   if (family === 'item') {
     const name = String(value || '').replace(/^(GamePlay|Item)_/i, '').replace(/^(SM|SK)_/i, '');
@@ -44,7 +45,7 @@ function parsePackageName(family, value) {
   if (!rule || !match) return null;
   const category = rule.categoryMode === "fixed"
     ? rule.categories.find((item) => item.replace(/^\d+_/, "").toLowerCase() === match[1].toLowerCase())
-    : match[1];
+    : family === 'npc' ? normalizeNpcCategory(match[1]) : match[1];
   if (!category) return null;
   return { family, category, categoryName: match[1], serial: match[2], name: match[3], packageName: match[0], ...(family === 'npc' ? { legacyNpcIdentity: true, formIds: [] } : {}) };
 }
@@ -63,7 +64,7 @@ function parsePackagePath(family, sourcePath) {
     }
   }
   if (rootIndex >= 0) {
-    const category = parts[rootIndex + 1] || "";
+    const category = family === 'npc' ? normalizeNpcCategory(parts[rootIndex + 1]) : parts[rootIndex + 1] || "";
     const parsed = parsePackageName(family, parts[rootIndex + 2]);
     if (!parsed || parsed.category && parsed.category.toLowerCase() !== category.toLowerCase()) return null;
     return { ...parsed, category: parsed.category || category, categoryName: parsed.categoryName || category,
@@ -71,7 +72,7 @@ function parsePackagePath(family, sourcePath) {
   }
   for (let index = parts.length - 1; index >= 0; index -= 1) {
     const parsed = parsePackageName(family, parts[index]);
-    if (parsed) return { ...parsed, sourceRoot: parts.slice(0, index + 1).join("/") };
+    if (parsed) return { ...parsed, ...(family === 'npc' ? { category: inferNpcCategory([sourcePath]) || parsed.category } : {}), sourceRoot: parts.slice(0, index + 1).join("/") };
   }
   return null;
 }
@@ -188,6 +189,7 @@ function validateFamilyFileName(family, packageInfo, filePath, role) {
 }
 
 function buildFamilyPackagePlan(family, sourcePath, files = [], confirmed = {}) {
+  if (family === 'npc') confirmed = { ...confirmed, category: normalizeNpcCategory(confirmed.category || inferNpcCategory([sourcePath])) };
   files = files.filter(isAllowedCharacterPackageFile);
   const rule = getFamilyRule(family);
   if (!rule) return { ok: false, errors: ["未知角色资产类型"], files: [] };
@@ -234,6 +236,7 @@ function buildFamilyPackagePlan(family, sourcePath, files = [], confirmed = {}) 
   if (identity && monsterAudit?.sourceName) identity.sourceName = monsterAudit.sourceName;
   if (monsterAudit) errors.push(...monsterAudit.issues.map((issue) => issue.message));
   if (family === 'monster' && confirmed.formIds?.length && (confirmed.formIds.length !== 1 || !/^(?:base|\d{2})$/.test(confirmed.formIds[0]))) errors.push('请填写两位形态编号');
+  if (['monster', 'npc'].includes(family) && confirmed.monsterVariant && !/^[A-Za-z][A-Za-z0-9_]*$/.test(confirmed.monsterVariant)) errors.push('变体以字母开头，仅使用字母、数字和下划线');
   if (family === 'npc' && !identity?.legacyNpcIdentity && (identity?.formIds?.length !== 1 || !/^\d{2}$/.test(identity.formIds[0]))) errors.push('请填写 NPC 两位形态编号');
   if (family === "monster" && !rule.importCategories.includes(identity?.category)) {
     errors.push("请选择怪物类别：大首领、小首领、精英怪、普通怪或杂兵怪");
@@ -310,7 +313,7 @@ function buildFamilyPackagePlan(family, sourcePath, files = [], confirmed = {}) 
   }
   return {
     ok: errors.length === 0, family, category: identity?.category || "", assetName: identity?.packageName || "",
-    fields: identity ? { serial: identity.serial, name: identity.name, category: identity.category, ...(family === 'npc' ? { formIds } : {}) } : {},
+    fields: identity ? { serial: identity.serial, name: identity.name, category: identity.category, ...(family === 'npc' ? { formIds } : {}), ...(family === 'monster' || (family === 'npc' && confirmed.monsterVariant) ? { monsterVariant: String(confirmed.monsterVariant || '').trim() } : {}) } : {},
     relativeDirectory: identity ? `${rule.root}/${identity.category}/${identity.packageName}` : "",
     files: planned, errors,
     ...(monsterAudit ? { validationIssues: monsterAudit.issues } : {}),
@@ -363,6 +366,7 @@ function resolveMonsterAssociation(plan, relatedAssetId, records = []) {
   const entityKey = fields.entityKey || `monster:asset:${target.id}`;
   const duplicate = records.some((record) => record.assetType === "monster"
     && (record.meta?.character?.entityKey || `monster:asset:${record.id}`) === entityKey
+    && String(record.meta?.character?.monsterVariant || '').toLowerCase() === String(plan.fields.monsterVariant || '').toLowerCase()
     && record.meta?.character?.formIds?.some((id) => plan.forms.some((form) => form.id === id)));
   if (duplicate) return { ok: false, message: "该怪物已有相同形态，请查看已有记录；新增形态不会覆盖旧形态" };
   return { ok: true, entityKey };

@@ -2,7 +2,86 @@ const fs = require("node:fs/promises");
 const { createReadStream } = require("node:fs");
 const { createHash } = require("node:crypto");
 const { Buffer } = require("node:buffer");
+const { ReadableStream } = require("node:stream/web");
+const { setTimeout: delay } = require("node:timers/promises");
 const path = require("node:path");
+
+const DOWNLOAD_SAMPLE_BYTES = 2 * 1024 * 1024;
+const MIRROR_DELAY_MS = 1000;
+
+async function* replaySample(chunks, reader) {
+  try {
+    yield* chunks;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      yield value;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+async function sampleDownload(candidate, headers, expectedSize, timeoutMs, fetchResponse) {
+  const { url, controller } = candidate;
+  const startedAt = globalThis.performance.now();
+  const timeoutError = new Error("下载更新包超时");
+  const timer = globalThis.setTimeout(() => controller.abort(timeoutError), timeoutMs);
+  let reader;
+  try {
+    const response = await fetchResponse(url, { headers, signal: controller.signal });
+    if (response.status !== 200 || !response.body) throw new Error(`无法下载更新包（HTTP ${response.status}）`);
+    const contentLength = Number(response.headers.get("content-length"));
+    if (expectedSize > 0 && contentLength > 0 && contentLength !== expectedSize) {
+      throw new Error("下载源返回的更新包大小不匹配");
+    }
+    const sampleSize = Math.min(DOWNLOAD_SAMPLE_BYTES, expectedSize || contentLength || DOWNLOAD_SAMPLE_BYTES);
+    reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while (received < sampleSize) {
+      const { done, value } = await reader.read();
+      if (done) throw new Error("下载中断：更新包长度不完整");
+      chunks.push(value);
+      received += value.byteLength;
+    }
+    return {
+      candidate,
+      response: new globalThis.Response(ReadableStream.from(replaySample(chunks, reader)), { headers: response.headers }),
+      sampleMs: Math.round(globalThis.performance.now() - startedAt)
+    };
+  } catch (error) {
+    controller.abort();
+    reader?.releaseLock();
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timer);
+  }
+}
+
+async function downloadUpdatePackage(urls, targetFilePath, metadata, {
+  headers, onProgress, timeoutMs, fetchResponse = fetch
+}) {
+  const candidates = urls.map(url => ({ url, controller: new globalThis.AbortController() }));
+  try {
+    const downloads = candidates.map(async (candidate, index) => {
+      // A healthy direct connection can finish sampling before the mirrors start.
+      if (index > 0) await delay(MIRROR_DELAY_MS, undefined, { signal: candidate.controller.signal });
+      return sampleDownload(candidate, headers, Number(metadata.size) || 0, timeoutMs, fetchResponse);
+    });
+    const selected = await Promise.any(downloads).catch(error => {
+      throw error.errors?.[0] || new Error("未找到可下载更新包的线路");
+    });
+    for (const candidate of candidates) {
+      if (candidate !== selected.candidate) candidate.controller.abort();
+    }
+    await saveUpdateResponse(selected.response, targetFilePath, metadata, onProgress);
+    return { host: new globalThis.URL(selected.candidate.url).hostname, sampleMs: selected.sampleMs };
+  } finally {
+    for (const candidate of candidates) candidate.controller.abort();
+  }
+}
 
 async function hashFile(filePath) {
   const hash = createHash("sha256");
@@ -79,7 +158,7 @@ async function saveUpdateResponse(response, targetFilePath, metadata, onProgress
   }
 }
 
-module.exports = { saveUpdateResponse, verifyCachedUpdatePackage };
+module.exports = { downloadUpdatePackage, saveUpdateResponse, verifyCachedUpdatePackage };
 
 async function isValidWindowsExecutable(filePath) {
   const handle = await fs.open(filePath, "r").catch(() => null);

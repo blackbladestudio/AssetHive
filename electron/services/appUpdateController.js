@@ -1,5 +1,5 @@
 // All entry points share downloads and the installation lock.
-function createAppUpdateController({ checkRelease, downloadRelease, launch, isBusy, prompt, onState, onError, onInstallError, autoDownload = true }) {
+function createAppUpdateController({ checkRelease, downloadRelease, launch, isBusy, prompt, onState, onProgress, onError, onInstallError, autoDownload = true }) {
   let state = {};
   let checking = null;
   let downloading = null;
@@ -19,9 +19,12 @@ function createAppUpdateController({ checkRelease, downloadRelease, launch, isBu
     if (downloading) return downloading;
     if (installing) return Promise.resolve({ ok: false, message: "正在安装更新" });
     downloading = (async () => {
-      publish({ phase: "downloading" });
+      publish({ phase: "downloading", downloadProgress: null, message: "" });
       try {
-        const result = await downloadRelease();
+        const result = await downloadRelease(progress => {
+          state = { ...state, downloadProgress: progress };
+          onProgress?.(progress);
+        });
         if (result.ok) publish({
           ...result, phase: "idle", localPackagePath: result.filePath || "",
           updateReady: Boolean(result.updateReady)
@@ -50,7 +53,7 @@ function createAppUpdateController({ checkRelease, downloadRelease, launch, isBu
           void download().catch(error => onError?.(error));
         }
       }
-      return result.ok ? { ...result, phase: state.phase } : result;
+      return result.ok ? state : result;
     })().finally(() => { checking = null; });
     return checking;
   }

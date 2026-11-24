@@ -10,7 +10,7 @@
   },
   "npc": {
     "root": "NPC",
-    "categories": [],
+    "categories": ["Human", "Nonhuman"],
     "categoryMode": "fromAssetPrefix",
     "assetNameSubject": "name",
     "folders": ["Animation", "Material", "Texture", "Mesh/SkeletalMesh", "Mesh/StaticMesh", "ABP", "BP", "OtherFiles"],

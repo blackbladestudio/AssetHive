@@ -1,0 +1,10 @@
+import type { AssetRecord } from '../src/types';
+import type { CharacterComponent } from './characterComponents.mjs';
+export type MonsterVariant = { id: string; name: string; enginePath?: string; resourceCount?: number; assetIds?: string[]; modelSlotsByAsset?: Record<string, string[]> };
+export function monsterVariantId(asset: AssetRecord | null): string;
+export function monsterVariantLabel(asset: AssetRecord | null): string;
+export function monsterCardOccurrence(assetId: string, variantId?: string): string;
+export function monsterVariantGroups(assets: AssetRecord[]): Array<MonsterVariant & { assets: AssetRecord[] }>;
+export function monsterVariantModelGroups(asset: AssetRecord | null, variantId?: string): CharacterComponent[];
+export function monsterVariantModelEntries(asset: AssetRecord | null, variantId?: string, relatedAssets?: AssetRecord[]): Array<{ asset: AssetRecord; part: CharacterComponent }>;
+export function characterOwnedWeapons(asset: AssetRecord | null, variantId?: string, relatedAssets?: AssetRecord[]): Array<{ id: string; name: string; modelName: string; sharedAcrossForms: boolean }>;

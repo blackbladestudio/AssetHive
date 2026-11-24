@@ -9,7 +9,7 @@ const absolute = value => path.resolve(value).toLowerCase();
 
 async function attachCharacterLods(result, asset, options, analyze, managedFile) {
   for (const entry of result.entries.filter(item => ['staticMesh', 'skeletalMesh'].includes(item.kind))) {
-    entry.config = { ...entry.config, lodPolicy: 'existing-settings-v1' };
+    entry.config = { ...entry.config, lodPolicy: 'lod1-reduction-v2' };
     entry.fingerprint = crypto.createHash('sha256').update(JSON.stringify({ previous: entry.fingerprint, lodPolicy: entry.config.lodPolicy })).digest('hex');
   }
   const files = activeCharacterFiles(asset).filter(model);

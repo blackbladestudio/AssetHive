@@ -3,6 +3,32 @@
 import type { AssetRecord, AppSettings, ExportResultItem, ImportQueueSnapshot } from "./types";
 import type { ThreeDCoatConnection, ThreeDCoatImportInfo, ThreeDCoatImportPayload, ThreeDCoatQueuedImport, ThreeDCoatResult } from "./threeDCoat";
 
+export type AppUpdateDownloadProgress = {
+  phase?: string;
+  progress?: number | null;
+  source?: string;
+  loaded?: number;
+  total?: number;
+};
+
+export type AppUpdateSnapshot = {
+  phase?: "idle" | "downloading";
+  hasUpdate?: boolean;
+  updateReady?: boolean;
+  localPackagePath?: string;
+  currentVersion?: string;
+  latestVersion?: string;
+  releaseUrl?: string;
+  name?: string;
+  publishedAt?: string;
+  releaseNotes?: string;
+  repo?: string;
+  downloadUrl?: string;
+  packageSize?: number;
+  message?: string;
+  downloadProgress?: AppUpdateDownloadProgress | null;
+};
+
 export type DroppedAsset = {
   files: string[];
   preferredName?: string;
@@ -81,7 +107,7 @@ declare global {
       getAnimationUnrealFolders?: () => Promise<{ projectPath: string; folders: string[]; truncated: boolean }>;
       pickAnimationUnrealFolder?: (request: { projectPath: string; folder?: string }) => Promise<string | null>;
       getAnimationExportTargets?: (request: { projectPath: string; targets: { key: string; targetPath: string }[] }) => Promise<{ key: string; exists: boolean; targetPath: string }[]>;
-      getUnrealConnectionStatus: () => Promise<{ connected: boolean; targetName?: string; reason?: string; message?: string; port?: number }>;
+      getUnrealConnectionStatus: () => Promise<{ connected: boolean; projectPath?: string; targetName?: string; reason?: string; message?: string; port?: number }>;
       getSuitUnrealStatus: (assetId: string) => Promise<{ ok: boolean; changed?: boolean; message?: string }>;
       downloadCharacterRigFiles: (assetId: string) => Promise<{ ok: boolean; canceled?: boolean; path?: string; count?: number; message?: string }>;
       pickBlenderExecutable: () => Promise<string | null>;
@@ -385,23 +411,7 @@ declare global {
       resolveAnimationPreviewRig?: (payload: { rigRoot: string; animationPath: string; gameTagId?: string }) => Promise<string>;
       installPlugin?: (repo: string, targetPath: string) => Promise<{ ok: boolean; message?: string; path?: string; version?: string }>;
       installPluginFromGithub?: () => Promise<{ ok: boolean; message?: string; path?: string; version?: string }>;
-      checkAppUpdate?: () => Promise<{
-        ok: boolean;
-        phase?: "idle" | "downloading";
-        repo?: string;
-        currentVersion?: string;
-        latestVersion?: string;
-        hasUpdate?: boolean;
-        localPackagePath?: string;
-        updateReady?: boolean;
-        name?: string;
-        publishedAt?: string;
-        releaseNotes?: string;
-        releaseUrl?: string;
-        downloadUrl?: string;
-        packageSize?: number;
-        message?: string;
-      }>;
+      checkAppUpdate?: () => Promise<AppUpdateSnapshot & { ok: boolean }>;
       getAppVersion?: () => Promise<{
         ok: boolean;
         version?: string;
@@ -427,26 +437,10 @@ declare global {
         message?: string;
       }>;
       onAppUpdateState?: (
-        callback: (state: {
-          showPrompt?: boolean;
-          phase?: "idle" | "downloading";
-          hasUpdate?: boolean;
-          updateReady?: boolean;
-          localPackagePath?: string;
-          currentVersion?: string;
-          latestVersion?: string;
-          releaseUrl?: string;
-          name?: string;
-          publishedAt?: string;
-          releaseNotes?: string;
-          repo?: string;
-          downloadUrl?: string;
-          packageSize?: number;
-          message?: string;
-        }) => void
+        callback: (state: AppUpdateSnapshot & { showPrompt?: boolean }) => void
       ) => () => void;
       onAppUpdateDownloadProgress?: (
-        callback: (payload: { phase?: string; progress?: number | null; source?: string; loaded?: number; total?: number }) => void
+        callback: (payload: AppUpdateDownloadProgress) => void
       ) => () => void;
       exportToBlender: Window["arkhive"]["exportToUnreal"];
       exportToUnreal: (payload: {
