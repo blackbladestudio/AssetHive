@@ -1,5 +1,13 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+test('NPC import preserves explicit variants independently of form numbers', () => {
+  for (const family of ['npc', 'monster']) {
+    const fields = normalizeCharacterFields(family, { name: 'Villager', monsterVariant: 'Bell', formIds: ['01', '02'] });
+    assert.equal(fields.monsterVariant, 'Bell');
+    assert.deepEqual(fields.formIds, ['01', '02']);
+    assert.equal(normalizeCharacterFields(family, { formIds: ['02'] }).monsterVariant, '');
+  }
+});
 test('suit parts require explicit suffixes but allow missing parts, missing textures and SM/SK pairs', () => {
   const assert = require('node:assert/strict');
   const { heroSuitPart, auditHeroPackage } = require('../shared/heroPackageRules.mjs');

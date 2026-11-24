@@ -41,6 +41,26 @@ test('Hair preview keeps separate part textures and does not guess an ambiguous 
   assert.equal(characterPreviewMaterialPlan('M_Hair', textures, 'Hair').hasTextures, false);
 });
 
+test('Renamed suit previews match old FBX slots with underscored English names', async () => {
+  const { characterPreviewMaterialPlan: plan } = await import('../shared/characterPreviewMaterials.mjs');
+  const keys = ['arm', 'head', 'downbody', 'upbody_01', 'upbody_02', 'suoyi'].flatMap(group =>
+    ['d', 'n', 'orm'].map(channel => `t_f01_medium001_zhou_deathsquad_${group}_${channel}`));
+  for (const group of ['arm', 'head', 'downbody', 'upbody_01', 'upbody_02', 'suoyi']) {
+    for (const prefix of ['MI_Char_Suit_M001_F01_', 'MI_F01_Medium001_ZhouSishi_']) {
+      assert.equal(plan(prefix + group, keys).stem, `f01_medium001_zhou_deathsquad_${group}`);
+    }
+  }
+  assert.equal(plan('MI_F01_Medium001_ZhouSishi_upbody_02_2', keys).stem, 'f01_medium001_zhou_deathsquad_upbody_02');
+  assert.equal(plan('M_Female01_body', keys).hasTextures, false);
+  assert.equal(plan('M_Unmatched_01', keys).hasTextures, false);
+  assert.equal(plan('M_Upbody', keys).hasTextures, false);
+  assert.equal(plan('M_Old_Arm', [...keys, 't_f01_medium001_other_name_arm_d']).hasTextures, false);
+  const hair = ['t_m01_heavy007_zhou_manhunt_upbody_hair_d', 't_m01_heavy007_zhou_manhunt_upbody_hair_a'];
+  assert.equal(plan('M_SK_Char_Suit_H007_M01_hari', hair).stem, 'm01_heavy007_zhou_manhunt_upbody_hair');
+  assert.equal(plan('M_hari', [...hair, 't_m01_heavy007_zhou_manhunt_head_hair_d']).hasTextures, false);
+  assert.equal(plan('M_Hair', ['t_m01_heavy007_zhou_manhunt_upbody_hair_a']).hasTextures, true);
+});
+
 test('Face preview matches semantic hair materials and keeps data-only cards white', async () => {
   const { characterPreviewMaterialPlan, characterPreviewTextureKey } = await import('../shared/characterPreviewMaterials.mjs');
   const textures = [

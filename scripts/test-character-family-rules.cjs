@@ -12,6 +12,18 @@ const {
 const { buildScope } = require("./import-draft-harness.cjs");
 const { auditMonsterPackage } = require("../shared/monsterPackageAudit.mjs");
 
+test('NPC H/NH confirmation uses canonical categories without changing model identity', () => {
+  for (const [alias, category] of [['H', 'Human'], ['NH', 'Nonhuman']]) {
+    const source = `C:/NPC/${alias}/SK_Keeper_01/Mesh/SK_Keeper_01.fbx`;
+    assert.equal(parsePackagePath('npc', source).category, category);
+    const plan = buildFamilyPackagePlan('npc', source, [source], { assetName: 'SK_Keeper_01', category: alias, formIds: ['01'], monsterVariant: 'Bell' });
+    assert.equal(plan.ok, true, plan.errors.join(';'));
+    assert.equal(plan.category, category);
+    assert.equal(plan.fields.monsterVariant, 'Bell');
+    assert.equal(plan.files[0].normalizedName, 'SK_Keeper_01.fbx');
+  }
+});
+
 test('confirmed monster, NPC and weapon names and categories override source identities', () => {
   const source=['SK_Executioner_01.fbx','T_Executioner_01_Hat_D.tga'];
   const monster=buildFamilyPackagePlan('monster',source[0],source,{name:'NewMonster',assetName:'SK_NewMonster_09',category:'1_Boss',formIds:['09']});

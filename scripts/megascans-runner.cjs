@@ -273,7 +273,8 @@ async function main(argv = process.argv.slice(2)) {
     await progress.update({ stage: 'ready', total: eligible.length, acquiredTotal: ids.length, acquiredDuplicates: client.acquiredStats.duplicates,
       excluded: ordered.excluded, unavailable: ordered.unavailable, assetTypes: configuration.assetTypes, typeCounts: ordered.counts, completed, skipped: completed, pending: eligiblePending.length, downloadWorkers, downloadAssets, downloadConnections });
     // Failed/interrupted caches stay first unless saved as pending retry.
-    const transferOptions = { client, library, cacheRoot, resolution, maxCacheBytes, reserveBytes, downloadWorkers, mode: opts.mode, importer: job => importWorker.run(job),
+    const transferOptions = { client, library, cacheRoot, resolution, maxCacheBytes, reserveBytes, downloadWorkers, mode: opts.mode,
+      importer: job => importWorker.run({ ...job, downloadSource: 'bridge' }),
       ...(archiveBudget ? { beforeArchive: details => archiveBudget.reserve(details) } : {}) };
     const orderedCached = await cachedOrder(cached, transferOptions);
     const deferredRecord = await readDeferred(transferOptions);

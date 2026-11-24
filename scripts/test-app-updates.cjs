@@ -4,9 +4,13 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 const { Buffer } = require("node:buffer");
+const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
+const React = require("react");
+const { renderToStaticMarkup } = require("react-dom/server");
+const ts = require("typescript");
 const { createAppUpdateController } = require("../electron/services/appUpdateController");
-const { saveUpdateResponse, verifyCachedUpdatePackage } = require("../electron/services/updatePackage");
+const { downloadUpdatePackage, saveUpdateResponse, verifyCachedUpdatePackage } = require("../electron/services/updatePackage");
 const { windowsPackageType, pickWindowsUpdateAsset, findLocalUpdatePackage, detectWindowsInstallation } = require("../electron/services/windowsUpdate");
 
 const windowsAssets = [
@@ -100,12 +104,12 @@ test("manual/background release entry points select the matching installer and r
   for (const [type, asset] of [["exe", windowsAssets[2]], ["msi", windowsAssets[1]]]) {
     const f = await windowsMainUpdateFixture(type);
     assert.equal((await f.checkAppUpdateRelease()).downloadUrl, asset.browser_download_url);
-    assert.equal((await f.downloadAppUpdateRelease()).ok, true);
+    assert.equal((await f.downloadAppUpdateRelease(() => {})).ok, true);
     assert.equal(f.downloadedUrl, asset.browser_download_url);
   }
   const f = await windowsMainUpdateFixture("exe", windowsAssets.slice(0, 2));
   assert.equal((await f.checkAppUpdateRelease()).updateReady, false);
-  assert.equal((await f.downloadAppUpdateRelease()).ok, false);
+  assert.equal((await f.downloadAppUpdateRelease(() => {})).ok, false);
   assert.equal(f.downloadedUrl, undefined);
 });
 
@@ -295,7 +299,7 @@ test("stop prevents an outstanding prompt from installing", async () => {
   assert.equal(f.calls.launches, 0);
 });
 
-async function updateWindowFixture() {
+async function updateWindowFixture(options = {}, { mount = true } = {}) {
   const main = await fs.readFile(path.join(__dirname, "../electron/main.js"), "utf8");
   const preload = await fs.readFile(path.join(__dirname, "../electron/preload.js"), "utf8");
   const renderer = (await fs.readFile(path.join(__dirname, "../src/ui/App.tsx"), "utf8")).replace(/\r\n/g, "\n");
@@ -309,6 +313,9 @@ async function updateWindowFixture() {
     appUpdates: null, bridgeAvailable: true, appUpdateState: {}, open: false,
     visible: true, loading: false, active: false, launches: 0, prompts: 0,
     activeExportCalls: 0, quitAfterImport: false, quitting: false,
+    appUpdateMode: "idle", appUpdateBusy: false,
+    appUpdateStateRevision: { current: 0 }, appUpdateProgressRevision: { current: 0 },
+    appUpdateDownloadProgress: null, appUpdateDownloadedBytes: 0, appUpdateTotalBytes: 0,
     createAppUpdateController, app: { isPackaged: false },
     checkAppUpdateRelease: async () => release,
     downloadAppUpdateRelease: async () => { throw new Error("package already cached"); },
@@ -326,35 +333,159 @@ async function updateWindowFixture() {
         }
       }
     }] },
-    useEffect: callback => { state.cleanup = callback(); },
+    useCallback: callback => callback,
+    useEffect: callback => { cleanups.push(callback()); },
+    cleanup: () => cleanups.forEach(cleanup => cleanup()),
     setAppUpdateState: updater => { state.appUpdateState = updater(state.appUpdateState); },
-    setAppUpdateMode: value => { state.mode = value; },
-    setAppUpdateBusy: value => { state.updateBusy = value; },
+    setAppUpdateMode: value => { state.appUpdateMode = value; },
+    setAppUpdateBusy: value => { state.appUpdateBusy = value; },
     setAppUpdateMessage: value => { state.message = value; },
+    setAppUpdateDownloadProgress: value => { state.appUpdateDownloadProgress = value; },
+    setAppUpdateDownloadedBytes: value => { state.appUpdateDownloadedBytes = value; },
+    setAppUpdateTotalBytes: value => { state.appUpdateTotalBytes = value; },
     setUpdatePageOpen: value => { state.open = value; },
-    importSaving: false, isExporting: false, busy: false, t: zh => zh
+    importSaving: false, isExporting: false, busy: false, t: zh => zh,
+    ...options
   };
+  const cleanups = [];
   new Function("require", preload)(() => ({
     contextBridge: { exposeInMainWorld: (_name, bridge) => { state.bridge = bridge; } },
     ipcRenderer: {
       send: channel => assert.equal(channel, "app:startupMilestone"),
       on: (channel, callback) => events.on(channel, callback),
       removeListener: (channel, callback) => events.removeListener(channel, callback),
-      invoke: (channel, payload) => handlers.get(channel)({}, payload)
+      invoke: (channel, payload) => {
+        const reply = handlers.get(channel)({}, payload);
+        if (channel !== "app:checkUpdate") return reply;
+        const barrier = state.checkReplyBarrier;
+        state.checkReply = barrier ? reply.then(async result => {
+          await barrier;
+          return result;
+        }) : reply;
+        return state.checkReply;
+      }
     }
   }));
-  const effectStart = renderer.indexOf("  useEffect(() => {\n    if (!bridgeAvailable || !bridge.onAppUpdateState)");
-  assert.ok(effectStart >= 0);
-  const effect = renderer.slice(effectStart, renderer.indexOf("\n  useEffect(", effectStart + 1));
-  new Function("scope", "with (scope) { " + effect + " }")(state);
   const mainStart = main.indexOf("  appUpdates = createAppUpdateController({");
   assert.ok(mainStart >= 0);
   new Function("scope", "with (scope) { " + main.slice(mainStart, main.indexOf('  ipcMain.handle("plugins:installFromGithub"', mainStart)) + " }")(state);
+  const effectStart = renderer.indexOf("  const applyAppUpdateProgress = ");
   const installStart = renderer.indexOf("  async function installDownloadedUpdatePackage()");
-  assert.ok(installStart >= 0);
-  state.install = new Function("scope", "with (scope) { " + renderer.slice(installStart, effectStart) + "; return installDownloadedUpdatePackage; }")(state);
+  assert.ok(effectStart >= 0 && installStart > effectStart);
+  const updateSync = renderer.slice(effectStart, renderer.indexOf("  async function downloadAppUpdate()", effectStart));
+  const install = renderer.slice(installStart, renderer.indexOf("\n  useEffect(", installStart));
+  const updateJs = ts.transpileModule(updateSync + install, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const mountRenderer = new Function("scope", `with (scope) { ${updateJs}; return { checkAppUpdate, installDownloadedUpdatePackage }; }`);
+  state.mountRenderer = () => {
+    const actions = mountRenderer(state);
+    state.checkAppUpdate ??= actions.checkAppUpdate;
+    state.install = actions.installDownloadedUpdatePackage;
+    return state.checkReply;
+  };
+  const buttonStart = renderer.lastIndexOf("<button", renderer.indexOf('className="about-update-btn-inline"'));
+  const buttonEnd = renderer.indexOf("</button>", buttonStart) + "</button>".length;
+  assert.ok(buttonStart >= 0 && buttonEnd > buttonStart);
+  const footerStart = renderer.indexOf('<div className="update-footer">');
+  const footerEnd = renderer.indexOf("\n              </div>", footerStart);
+  assert.ok(footerStart >= 0 && footerEnd > footerStart);
+
+  function renderElement(source) {
+    const js = ts.transpileModule(`function render() { return (${source}); }`, {
+      compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 }
+    }).outputText;
+    return new Function("scope", "React", `with (scope) { ${js}; return render; }`)(state, React);
+  }
+  state.aboutUpdateButton = renderElement(renderer.slice(buttonStart, buttonEnd));
+  state.updateFooter = renderElement(renderer.slice(footerStart, footerEnd));
+  state.sendDownloadProgress = payload => events.emit("app:updateDownloadProgress", {}, payload);
+  if (mount) await state.mountRenderer();
   return state;
 }
+
+test("the About button recovers a background download and its progress when the renderer starts late", async () => {
+  const pending = deferred();
+  const mib = 1024 * 1024;
+  const f = await updateWindowFixture({
+    downloadAppUpdateRelease: reportProgress => {
+      reportProgress({ phase: "downloading", progress: 40, loaded: 100 * mib, total: 250 * mib });
+      return pending.promise;
+    },
+    checkAppUpdate: () => assert.fail("opening download progress must not check again")
+  }, { mount: false });
+  await f.appUpdates.check();
+  const download = f.appUpdates.download();
+
+  await f.mountRenderer();
+  const button = f.aboutUpdateButton();
+  assert.equal(button.props.children, "检查更新");
+  assert.equal(button.props.disabled, false);
+  button.props.onClick();
+  assert.equal(f.open, true);
+  assert.match(renderToStaticMarkup(f.updateFooter()), /100\.0 MB \/ 250\.0 MB.*aria-valuenow="40"/);
+
+  pending.resolve({ ok: false, message: "下载失败" });
+  await download;
+  f.cleanup();
+});
+
+test("a download completed before a startup reply stays completed in the renderer", async () => {
+  const pending = deferred();
+  const reply = deferred();
+  const f = await updateWindowFixture({
+    downloadAppUpdateRelease: () => pending.promise,
+    checkReplyBarrier: reply.promise
+  }, { mount: false });
+  await f.appUpdates.check();
+  const download = f.appUpdates.download();
+  const mounting = f.mountRenderer();
+
+  pending.resolve({ ok: true, hasUpdate: true, updateReady: true, filePath: "cached/setup.exe" });
+  await download;
+  reply.resolve();
+  await mounting;
+  assert.equal(f.appUpdateMode, "idle");
+  assert.equal(f.aboutUpdateButton().props.children, "检查更新");
+  assert.equal(f.appUpdateState.updateReady, true);
+  f.cleanup();
+});
+
+test("the About button shows current and live download progress without another update check", async () => {
+  const pending = deferred();
+  let manualChecks = 0;
+  const f = await updateWindowFixture({
+    downloadAppUpdateRelease: () => pending.promise,
+    checkAppUpdate: () => { manualChecks++; }
+  });
+  const download = f.appUpdates.download();
+  const mib = 1024 * 1024;
+  f.sendDownloadProgress({ progress: 40, loaded: 100 * mib, total: 250 * mib });
+  const progressButton = f.aboutUpdateButton();
+  assert.equal(progressButton.props.disabled, false);
+  assert.equal(progressButton.props.children, "检查更新");
+  progressButton.props.onClick();
+  assert.equal(f.open, true);
+  assert.equal(manualChecks, 0);
+  assert.match(renderToStaticMarkup(f.updateFooter()), /100\.0 MB \/ 250\.0 MB.*aria-valuenow="40"/);
+  f.sendDownloadProgress({ progress: 60, loaded: 150 * mib, total: 250 * mib });
+  assert.match(renderToStaticMarkup(f.updateFooter()), /150\.0 MB \/ 250\.0 MB.*aria-valuenow="60"/);
+
+  pending.resolve({ ok: false, message: "下载失败" });
+  await download;
+  assert.equal(f.message, "下载失败");
+  const checkButton = f.aboutUpdateButton();
+  assert.equal(checkButton.props.disabled, false);
+  assert.equal(checkButton.props.children, "检查更新");
+  checkButton.props.onClick();
+  assert.equal(manualChecks, 1);
+  f.appUpdateBusy = true;
+  for (const mode of ["checking", "installing"]) {
+    f.appUpdateMode = mode;
+    assert.equal(f.aboutUpdateButton().props.children, "检查更新");
+  }
+  f.cleanup();
+});
 
 test("automatic update opens the shared custom page once and installs through its existing action", async () => {
   const f = await updateWindowFixture();
@@ -393,6 +524,73 @@ test("custom update prompt waits for idle and a visible loaded window; state syn
   assert.equal(f.open, true);
   assert.equal(f.prompts, 1);
   f.cleanup();
+});
+
+test("a fast direct download reuses its sample without contacting mirrors", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "assethive-update-direct-"));
+  try {
+    const file = path.join(dir, "update.exe");
+    const content = Buffer.from("MZcomplete-update");
+    const direct = "https://github.example.test/update.exe";
+    const mirror = "https://mirror.example.test/update.exe";
+    const requests = [];
+    const result = await downloadUpdatePackage([direct, mirror], file, { version: "2.3.6", size: content.length }, {
+      timeoutMs: 5000,
+      fetchResponse: async url => {
+        requests.push(url);
+        return new globalThis.Response(content);
+      }
+    });
+    assert.equal(result.host, "github.example.test");
+    assert.deepEqual(requests, [direct]);
+    assert.deepEqual(await fs.readFile(file), content);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
+
+test("a mirror with the fastest file data wins over stalled headers and invalid responses", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "assethive-update-mirror-"));
+  try {
+    const file = path.join(dir, "update.exe");
+    const content = Buffer.concat([Buffer.from("MZ"), Buffer.alloc(3 * 1024 * 1024, 12)]);
+    const direct = "https://github.example.test/update.exe";
+    const invalid = "https://invalid.example.test/update.exe";
+    const mirror = "https://mirror.example.test/update.exe";
+    const headers = { "content-length": String(content.length) };
+    let directSignal;
+    const progress = [];
+    const digest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    const result = await downloadUpdatePackage([direct, invalid, mirror], file, { version: "2.3.6", size: content.length, digest }, {
+      timeoutMs: 5000,
+      onProgress: value => progress.push(value),
+      fetchResponse: async (url, { signal }) => {
+        if (url === direct) {
+          directSignal = signal;
+          return new globalThis.Response(new globalThis.ReadableStream({
+            start(controller) {
+              controller.enqueue(content.subarray(0, 128));
+              signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+            }
+          }), { headers });
+        }
+        if (url === invalid) return new globalThis.Response("error page", { headers: { "content-length": "10" } });
+        return new globalThis.Response(new globalThis.ReadableStream({
+          start(controller) {
+            controller.enqueue(content.subarray(0, 2 * 1024 * 1024));
+            controller.enqueue(content.subarray(2 * 1024 * 1024));
+            controller.close();
+          }
+        }), { headers });
+      }
+    });
+    assert.equal(result.host, "mirror.example.test");
+    assert.equal(directSignal.aborted, true);
+    assert.equal(progress.at(-1).loaded, content.length);
+    assert.equal((await verifyCachedUpdatePackage(file, "2.3.6")).ok, true);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
 });
 
 test("partial and modified downloads cannot be reused", async () => {

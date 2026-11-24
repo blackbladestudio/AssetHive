@@ -8,8 +8,11 @@ const ts = require("typescript");
 
 async function rendererExportState(bridge) {
   const source = await fs.readFile(path.join(__dirname, "../src/ui/App.tsx"), "utf8");
-  const callbackStart = source.indexOf("  const refreshPluginStatus = useCallback(");
-  const callback = source.slice(callbackStart, source.indexOf("  useEffect(() => {", callbackStart));
+  const parsed = ts.createSourceFile("App.tsx", source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const app = parsed.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === "App");
+  const callback = app?.body?.statements.find(statement => ts.isVariableStatement(statement)
+    && statement.declarationList.declarations.some(declaration => declaration.name.getText(parsed) === "refreshPluginStatus"));
+  assert.ok(callback);
   const eligibility = source.match(/const canExportToUnreal = (.+);/)[1];
   const script = ts.transpileModule(`
     const settings = { unrealEditorPath: "", unrealProjectPath: "" };
@@ -21,7 +24,7 @@ async function rendererExportState(bridge) {
     const setPluginInstalled = value => { pluginInstalled = value; };
     const setHasImportableProject = value => { hasImportableProject = value; };
     const setPluginStatusMessage = () => {};
-    ${callback}
+    ${callback.getText(parsed)}
     return async connected => {
       unrealConnected = connected;
       await refreshPluginStatus();

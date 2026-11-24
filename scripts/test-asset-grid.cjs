@@ -13,6 +13,24 @@ const { populatePreviewSize } = require("../electron/services/previewSize");
 const asset = (id, size, assetType = "3d") => ({ id: String(id), assetType, meta: { previews: { relativeSize: size } } });
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.00001, `${actual} != ${expected}`);
 
+test('monster variants remain independent cards without columns or collapsible headings', () => {
+  const shared = { ...asset('guard', '1x1', 'monster'), name: 'Guard', meta: { character: { name: 'Guard', entityKey: 'guard-family', monsterVariant: 'NormalShield' }, monsterVariants: [
+    { id: 'NormalShield', name: 'Normal Shield', assetIds: ['guard'] }, { id: 'BigShield', name: 'Big Shield', assetIds: ['guard'] }
+  ] } };
+  const layout = layoutModule.exports.buildMonsterVariantGridLayout([shared], 1000, new Set());
+  assert.deepEqual(layout.items.map(i => i.variantId), ['NormalShield', 'BigShield']);
+  assert.equal(new Set(layout.items.map(i => i.renderKey)).size, 2);
+  assert.equal(layout.items[0].asset, layout.items[1].asset);
+  assert.equal(layout.items[1].y, layout.items[0].y, 'variants share a compact row');
+  assert(layout.items[1].x >= layout.items[0].x + layout.items[0].width);
+  const collapsed = layoutModule.exports.buildMonsterVariantGridLayout([shared], 1000, new Set(['guard-family:variant:NormalShield']));
+  assert.deepEqual(collapsed.items.map(i => i.variantId), ['NormalShield', 'BigShield']);
+  assert.equal(layoutModule.exports.buildMonsterVariantGridLayout([shared], 1000, new Set(['guard-family'])).items.length, 2);
+  assert.deepEqual(layout.sectionHeaders, []);
+  assert.deepEqual(layout.outfitGroups, []);
+  assert.deepEqual(getVisibleAssetGridItems(layout.items, layout.totalHeight, 0, layout.cardHeight), layout.items);
+});
+
 test("character standalone cards keep the owner and two-slot component proportions across viewport and detail modes", () => {
   const cards = [asset("a", "3x1", "suit"), asset("a::part::head", "1x3", "suit"), asset("b", "1x1", "monster")];
   for (const width of [280, 600, 1100, 1700]) for (const compact of [false, true]) {

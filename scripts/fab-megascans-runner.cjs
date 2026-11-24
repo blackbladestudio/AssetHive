@@ -137,7 +137,9 @@ async function main(argv = process.argv.slice(2)) {
           await progress.update({ current: { ...progress.state.current, id } });
           const receipt = await transferOne({ id, client: { plan: async () => plan }, library, cacheRoot,
           resolution: 4096, maxCacheBytes: maxCacheGb * GIB, reserveBytes: minFreeGb * GIB, mode: 'import',
-          downloadWorkers, download: downloadFabFile, importer: job => worker.run({ ...job, removePreviewBackground: true }), beforeArchive: details => budget.reserve(details),
+          downloadWorkers, download: downloadFabFile,
+          importer: job => worker.run({ ...job, downloadSource: 'fab', removePreviewBackground: true }),
+          beforeArchive: details => budget.reserve(details),
           onProgress: details => progress.update({ ...(details.stage ? { stage: details.stage } : {}), current: { ...progress.state.current, ...details } }, { event: false }) });
           return { receipt };
         }, {

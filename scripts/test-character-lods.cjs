@@ -4,6 +4,25 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { buildSuitExport } = require('../electron/services/characterSuitExport');
+const { verifyCharacterLodReceipt } = require('../electron/services/characterLodReceipt');
+
+test('UE model success without verified artist LODs and reduction is recorded as failure', () => {
+ const entry = {config:{lodPolicy:'lod1-reduction-v2',lodSources:[{index:1}]}};
+ const row = {status:'success',action:'added'};
+ assert.equal(verifyCharacterLodReceipt(entry,row).status,'failed');
+ const report = {policy:'lod1-reduction-v2',count:6,levels:Array.from({length:6},(_,index)=>({index,triangles:index===0?2048:1024/2**(index-1),source:index<2?'imported':'generated'}))};
+ assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:report}).status,'success');
+ for (const index of [0,1,2,5]) {
+  const missing = JSON.parse(JSON.stringify(report)); missing.levels[index].triangles=0;
+  assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:missing}).status,'failed');
+ }
+ const wrongArtist=JSON.parse(JSON.stringify(report));wrongArtist.levels[1].source='generated';
+ assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:wrongArtist}).status,'failed');
+ const noReduction=JSON.parse(JSON.stringify(report));noReduction.levels[5].triangles=1024;
+ assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:noReduction}).status,'failed');
+ const manual=JSON.parse(JSON.stringify(report));manual.levels[5]={index:5,triangles:500,source:'existing'};
+ assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:manual}).status,'success');
+});
 const { buildFamilyPackagePlan } = require('../electron/services/characterFamilyRules');
 const { auditHeroPackage } = require('../shared/heroPackageRules.mjs');
 const fields = { gender: 'Female', bodyCode: '01', variant: 'Face', serial: '001' };
@@ -55,7 +74,7 @@ test('LOD review renders visible level files, missing generation settings hint a
   files:[{name:'SK_Sword001_Test.fbx'},{name:'SK_Sword001_Test_LOD1.fbx',status:'added'}],t:zh=>zh,confirmed:false,onConfirm:()=>{}
  }));
  assert.match(html,/character-identity-unconfirmed/);assert.match(html,/type="checkbox"/);
- assert.match(html,/SK_Sword001_Test_LOD1.fbx/);assert.match(html,/LOD2、LOD3、LOD4、LOD5/);assert.match(html,/未配置时会提示/);
+ assert.match(html,/SK_Sword001_Test_LOD1.fbx/);assert.match(html,/LOD2、LOD3、LOD4、LOD5/);assert.match(html,/LOD1 成功挂入后/);
  assert.match(html,/新增/);
  assert.match(html, /来源文件/); assert.match(html, /入库文件名/); assert.match(html, /<table/);
  const render = props => require('react-dom/server').renderToStaticMarkup(require('react').createElement(mod.exports.CharacterLodReview, {t:zh=>zh,onConfirm:()=>{}, ...props}));
@@ -121,7 +140,7 @@ test('all four suit parts keep independent full artist LOD chains in one suit ex
  const meshes=result.entries.filter(entry=>entry.kind==='skeletalMesh');
  assert.equal(meshes.length,4);assert.equal(new Set(meshes.map(entry=>entry.targetPath)).size,4);
  for(const mesh of meshes){
-  assert.equal(mesh.config.lodPolicy,'existing-settings-v1');
+  assert.equal(mesh.config.lodPolicy,'lod1-reduction-v2');
   assert.deepEqual(mesh.config.lodSources.map(source=>source.index),[1,2,3,4,5]);
   const part=mesh.sourcePath.match(/_(Head|Upbody|Downbody|Arm)\.fbx$/)[1];
   assert(mesh.config.lodSources.every(source=>source.sourcePath.includes(`_${part}_LOD`)));

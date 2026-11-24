@@ -13,6 +13,22 @@ new Function("require", "module", "exports", compiled)(createRequire(file), load
 const { getCharacterCategoryNodes, getCharacterCategoryDisplayLabel, matchesCharacterNavigation, getCharacterNavigationSelection } = loaded.exports;
 const asset = (assetType, category, extra = {}) => ({ assetType, meta: { category }, categories: [], ...extra });
 
+test('NPC aliases agree across navigation, source inference and destination folders', () => {
+  const backend = require('../electron/services/characterImport');
+  for (const [alias, category] of [['H', 'Human'], ['nh', 'Nonhuman'], ['Human', 'Human'], ['Nonhuman', 'Nonhuman']]) {
+    assert.equal(getCharacterNavigationSelection('character-npc:' + alias).category, category);
+    assert(matchesCharacterNavigation(asset('npc', alias), 'character-npc:' + category));
+    assert.equal(loaded.exports.inferCharacterAssetType(['C:/Art/' + alias + '/SK_Keeper_01.fbx']), 'npc');
+    assert.equal(loaded.exports.inferFamilyPackageIdentity('npc', 'C:/Art/' + alias, ['SK_Keeper_01.fbx']).category, category);
+    assert.equal(loaded.exports.getCharacterDestinationRelativePath('npc', alias), 'Character\\NPC\\' + category);
+    assert.deepEqual(backend.buildCharacterRelativeRoot('npc', alias), ['Character', 'NPC', category]);
+  }
+  const { inferNpcCategory } = require('../shared/npcCategories.mjs');
+  assert.equal(inferNpcCategory(['C:/Art/H007_Test/SM_Test.fbx']), '');
+  assert.equal(inferNpcCategory(['C:/NPC/Guard/SK_Keeper_01.fbx']), '');
+  assert(matchesCharacterNavigation(asset('npc', 'Guard'), 'character-npc'));
+});
+
 test('PDF source folders identify gameplay and item even with artist model names', () => {
   for (const [folder, category, name] of [
     ['GamePlay_WeaponCase_WoodenCase', 'Gameplay/Int_Loot/WeaponCase', 'WoodenCase'],
@@ -266,13 +282,13 @@ test("empty libraries still show fixed Monster and Suit categories, never packag
   assert.ok(getCharacterCategoryNodes("monster", []).every((node) => node.children.length === 0));
 });
 
-test("NPC uses stored categories and weapons group categories by equipment count", () => {
+test("NPC offers Human/Nonhuman and weapons group categories by equipment count", () => {
   const assets = [
     asset("npc", "Scholar"), asset("npc", "scholar"), asset("npc", "Guard"),
     asset("weapon", "Spear"), asset("weapon", "Axe"), asset("3d", "Bow"),
     asset("weapon", "", { tags: ["Sword"], categories: ["character", "weapon", "Hammer"] })
   ];
-  assert.deepEqual(getCharacterCategoryNodes("npc", assets).map((node) => node.label), ["守卫", "学者"]);
+  assert.deepEqual(getCharacterCategoryNodes("npc", assets).map((node) => node.label), ["人类", "非人类"]);
   const nodes = getCharacterCategoryNodes('weapon', assets);
   assert.deepEqual(nodes.map(node => node.label), ['弓箭', '匕首', '同类双持', '巨斧', '巨剑', '玉器', '长剑', '参差剑', '盾斧', '长枪', '短剑']);
   assert(nodes.every(node => node.children.length === 0));
@@ -284,7 +300,7 @@ test("NPC uses stored categories and weapons group categories by equipment count
   assert(!matchesCharacterNavigation(combined, 'character-weapon:single%2FSword'));
   assert.deepEqual(loaded.exports.characterImportDefaults('character-weapon:combined%2FSword', 'weapon'),
     { category: 'Sword', fields: { weaponAssembly: 'combined', weaponType: 'Sword' } });
-  assert.deepEqual(getCharacterCategoryNodes("npc", []), []);
+  assert.deepEqual(getCharacterCategoryNodes("npc", []).map(node => node.label), ["人类", "非人类"]);
 });
 
 test("category clicks filter on family and category, not arbitrary tags or name substrings", () => {

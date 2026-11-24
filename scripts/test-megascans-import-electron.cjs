@@ -29,13 +29,21 @@ test('Fab background-removal flag publishes transparent PNGs through the actual 
     await sharp(Buffer.from('<svg width="160" height="120"><rect width="160" height="120" fill="#202020"/><circle cx="80" cy="60" r="35" fill="#d94422"/></svg>')).jpeg().toFile(path.join(source, 'grid.jpg'));
     const original = await fs.readFile(path.join(source, 'grid.jpg'));
     await sharp({ create: { width: 8, height: 8, channels: 3, background: '#887766' } }).png().toFile(path.join(source, 'color.png'));
+    await sharp({ create: { width: 8, height: 8, channels: 3, background: '#80a0ff' } }).png().toFile(path.join(source, 'normal.png'));
     await fs.writeFile(path.join(source, 'Raw.fbx'), '; FBX 7.4.0 project file\nObjects: {}\nConnections: {}\n');
     await atomicJson(path.join(source, id + '.json'), { id, name: 'Fab cutout fixture', type, source: 'quixel', fab: { listingId: 'fixture' },
       tags: ['rock', '02', 'fab_cutout_fixture'], semanticTags: { name: 'Fab cutout fixture', name_formats: ['fab_cutout_fixture'], variant: '02', contains: ['stone'] },
-      maps: [{ type: 'albedo', uri: 'color.png' }], models: type === '3d' ? [{ type: 'original', lod: -1, uri: 'Raw.fbx' }] : [],
+      maps: [{ type: 'albedo', uri: 'color.png' }, { type: 'normal', uri: 'normal.png' }],
+      models: type === '3d' ? [{ type: 'original', lod: -1, uri: 'Raw.fbx' }] : [],
       previews: { images: [{ uri: 'grid.jpg', tags: ['grid', 'preview'] }] } });
-    const result = await worker.run({ id, source, library, cacheRoot, removePreviewBackground: true });
+    const result = await worker.run({ id, source, library, cacheRoot, downloadSource: 'fab', removePreviewBackground: true });
     const meta = await validateImported(result.assetPath, id);
+    const normal = meta.textureEntries.find(entry => entry.textureType === 'Normal');
+    assert.equal(meta.normalMapFormat, 'opengl');
+    assert.equal(meta.normalMapFormats[1], 'opengl');
+    assert.equal(normal.normalMapFormat, 'opengl');
+    assert.equal(meta.components.find(entry => entry.type === 'texture' && entry.slot === 'Normal').normalMapFormat, 'opengl');
+    assert.deepEqual(await fs.readFile(path.join(result.assetPath, normal.uri)), await fs.readFile(path.join(source, 'normal.png')));
     assert.ok(meta.tags.includes('rock')); assert.ok(meta.tags.includes('stone'));
     assert.ok(!meta.tags.some(tag => /^\d+$/.test(tag) || /fab[\s_]*cutout[\s_]*fixture/i.test(tag)), 'actual importer excludes names and variant numbers from tags');
     const image = sharp(path.join(result.assetPath, meta.previewImage));
@@ -94,12 +102,15 @@ test('actual importer stores Raw 8K normal at 4K and records the source dimensio
   const result = await worker.run({ id, source, library, cacheRoot });
   assert.equal(result.ok, true);
   const meta = await validateImported(result.assetPath, id), normal = meta.textureEntries.find(entry => entry.textureType === 'Normal');
+  assert.equal(meta.normalMapFormat, 'dx');
+  assert.equal(meta.normalMapFormats[1], 'dx');
+  assert.equal(normal.normalMapFormat, 'dx');
   assert.equal(normal.width, 4096); assert.equal(normal.height, 4096);
   assert.equal(normal.sourceWidth, 8192); assert.equal(normal.sourceHeight, 8192);
   assert.equal(normal.sourceResolution, '8K'); assert.equal(normal.compressed, true);
 });
 
-test('actual importer preserves Bridge semantic and structured source names', { timeout: 60000 }, async t => {
+test('actual importer preserves Bridge names and imports original OpenGL normal maps', { timeout: 60000 }, async t => {
   const parent = path.resolve(__dirname, '../.cache/megascans-electron-tests');
   await fs.mkdir(parent, { recursive: true });
   const root = await fs.mkdtemp(path.join(parent, 'names-'));
@@ -117,13 +128,22 @@ test('actual importer preserves Bridge semantic and structured source names', { 
     const source = path.join(library, '.megascans', 'originals', id);
     await fs.mkdir(source, { recursive: true });
     await sharp({ create: { width: 8, height: 8, channels: 3, background: '#887766' } }).png().toFile(path.join(source, 'color.png'));
+    const sourceNormal = path.join(source, 'normal.png');
+    await sharp({ create: { width: 8, height: 8, channels: 3, background: '#80a0ff' } }).png().toFile(sourceNormal);
     await fs.writeFile(path.join(source, `${id}.json`), JSON.stringify({
       id, source: 'quixel', type: 'surface', categories: ['surface', 'rock'],
-      maps: [{ type: 'albedo', uri: 'color.png', mimeType: 'image/png' }], ...fields
+      maps: [{ type: 'albedo', uri: 'color.png', mimeType: 'image/png' }, { type: 'normal', uri: 'normal.png', mimeType: 'image/png' }], ...fields
     }));
     assert.equal((await worker.run({ kind: 'inspect-source', id, source })).metadata.name, expected);
-    const result = await worker.run({ id, source, library, cacheRoot });
-    assert.equal((await validateImported(result.assetPath, id)).name, expected);
+    const result = await worker.run({ id, source, library, cacheRoot, downloadSource: 'bridge' });
+    const meta = await validateImported(result.assetPath, id);
+    const normal = meta.textureEntries.find(entry => entry.textureType === 'Normal');
+    assert.equal(meta.name, expected);
+    assert.equal(meta.normalMapFormat, 'opengl');
+    assert.equal(meta.normalMapFormats[1], 'opengl');
+    assert.equal(normal.normalMapFormat, 'opengl');
+    assert.equal(meta.components.find(entry => entry.type === 'texture' && entry.slot === 'Normal').normalMapFormat, 'opengl');
+    assert.deepEqual(await fs.readFile(path.join(result.assetPath, normal.uri)), await fs.readFile(sourceNormal));
   }
 });
 

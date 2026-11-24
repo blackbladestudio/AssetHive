@@ -50,7 +50,7 @@ async function editSlotBuilder() {
   const names = ["buildEditSlots", "normalizeLocalPath", "formatMeshSlotKey", "isMeshSlotKey", "normalizeImportModelVariantKey",
     "parseImportModelVariantKey", "getFileStemFromPath", "stripImportModelLodKey", "isModelLodPath", "getTextureAreaIdList",
     "parseTextureSlotToken", "normalizeOpacityTextureType", "normalizeTextureMaterialRole", "makeTextureEntry",
-    "inferTextureTypeFromPath", "inferTextureAreaIdFromPath"];
+    "inferTextureTypeFromPath", "inferTextureAreaIdFromPath", "normalizePathForCompare"];
   const constants = ["textureTypeOptions"];
   const pieces = [];
   (function visit(node) {
@@ -94,6 +94,36 @@ test("HDRI edit slots reuse the stored HDR/EXR without adding an empty row", asy
 test("HDRI without a stored texture does not recreate a cleaned empty edit slot", async () => {
   const entries = (await editSlotBuilder())({ assetType: "hdri", textureFiles: [] }).textureEntries;
   assert.equal(entries.length, 0);
+});
+
+test("edit slots merge roleless references to the same texture while preserving separate files, groups and roles", async () => {
+  const buildEditSlots = await editSlotBuilder();
+  const basecolor = "Grass_Basecolor.jpg";
+  const billboard = "Grass_Distant_Basecolor.jpg";
+  const additional = "Grass_Alternate_Basecolor.jpg";
+  const asset = {
+    path: "D:/Asset",
+    assetType: "3dplant",
+    textureFiles: [`d:/asset/${basecolor.toUpperCase()}`, `D:/Asset/${billboard}`, "D:/Asset/Grass_AO.jpg"],
+    meta: {
+      components: [basecolor, additional].map(uri => ({ type: "texture", slot: "Basecolor", uri, areaIndex: 1 })),
+      textureSlots: { Basecolor: basecolor },
+      textureEntries: [
+        { textureType: "Basecolor", uri: basecolor, areaIndex: 1, materialRole: "atlas" },
+        { textureType: "Basecolor", uri: billboard, areaIndex: 1, materialRole: "billboard" },
+        { textureType: "Basecolor", uri: basecolor, areaIndex: 2, materialRole: "atlas" }
+      ]
+    }
+  };
+
+  const rows = buildEditSlots(asset).textureEntries;
+  assert.deepEqual(rows.map(row => [row.areaId, row.textureType, row.materialRole, path.win32.basename(row.filePath)]), [
+    [1, "AO", undefined, "Grass_AO.jpg"],
+    [1, "Basecolor", undefined, additional],
+    [1, "Basecolor", "atlas", basecolor],
+    [1, "Basecolor", "billboard", billboard],
+    [2, "Basecolor", "atlas", basecolor]
+  ]);
 });
 
 test("the editor detects stored blank slots and keeps missing paths visible", async () => {

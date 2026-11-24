@@ -55,9 +55,9 @@ test('untextured characters keep previews out of scanner, details and UE export,
 test('complete legacy LOD previews remain current but changed base meshes or textures invalidate them', () => {
   const { needsCharacterMeshPreview, characterMeshPreviewRevision } = require('../shared/characterComponents.mjs');
   const files = [
-    { role:'staticMesh', normalizedName:'SM_M01_Heavy007_Test_Arm.fbx', sha256:'base' },
-    { role:'staticMesh', normalizedName:'SM_M01_Heavy007_Test_Arm_LOD1.fbx', sha256:'lod1' },
-    { role:'texture', normalizedName:'T_M01_Heavy007_Test_Arm_D.tga', sha256:'texture' }
+    { role:'staticMesh', normalizedName:'SM_Test_Arm.fbx', sha256:'base' },
+    { role:'staticMesh', normalizedName:'SM_Test_Arm_LOD1.fbx', sha256:'lod1' },
+    { role:'texture', normalizedName:'T_Test_Arm_D.tga', sha256:'texture' }
   ];
   const part = {files, meshKinds:{staticMesh:true}, meshPreviews:{staticMesh:{previewUri:'front.png',
     previewImages:['front','left','right','back'].map(view=>({uri:view+'.png',tags:['view:'+view]})),
@@ -67,6 +67,33 @@ test('complete legacy LOD previews remain current but changed base meshes or tex
   files[0].sha256='base'; files[2].sha256='updated'; assert.equal(needsCharacterMeshPreview(part, 'staticMesh'), true);
   part.meshPreviews.staticMesh.previewRevision=characterMeshPreviewRevision(files,'staticMesh');
   files[1].sha256='new-lod1'; assert.equal(needsCharacterMeshPreview(part, 'staticMesh'), false);
+});
+
+test('suit material previews refresh old white caches and track names without invalidating for SK or LOD1', () => {
+  const { needsCharacterMeshPreview, characterMeshPreviewRevision, characterSuitPendingPreviewViews } = require('../shared/characterComponents.mjs');
+  const files = [
+    {role:'staticMesh', normalizedName:'SM_F01_Medium001_Zhou_DeathSquad_Arm.fbx',sha256:'base'},
+    {role:'staticMesh', normalizedName:'SM_F01_Medium001_Zhou_DeathSquad_Arm_LOD1.fbx',sha256:'lod1'},
+    {role:'skeletalMesh', normalizedName:'SK_F01_Medium001_Zhou_DeathSquad_Arm.fbx',sha256:'rig'},
+    {role:'texture', normalizedName:'T_F01_Medium001_Zhou_DeathSquad_Arm_D.tga',sha256:'diffuse'}
+  ];
+  const part={files,meshKinds:{staticMesh:true},meshPreviews:{staticMesh:{previewUri:'front.png',
+    previewImages:['front','left','right','back'].map(view=>({uri:view+'.png',tags:['view:'+view]})),
+    previewRevision:JSON.stringify(files.filter(f=>f.role!=='skeletalMesh').map(f=>[f.role,f.sha256]).sort())}}};
+  assert.equal(needsCharacterMeshPreview(part,'staticMesh'),true);
+  const revision=characterMeshPreviewRevision(files,'staticMesh');
+  part.meshPreviews.staticMesh.previewRevision=revision;
+  assert.equal(needsCharacterMeshPreview(part,'staticMesh'),false);
+  const asset={assetType:'suit',meta:{characterManifest:{files},characterComponents:{suitPreviewNeedsUpdate:false},
+    previews:{images:[{uri:'manual.png',tags:['view:left','origin:manual']}]}}};
+  assert.deepEqual(characterSuitPendingPreviewViews(asset),['front','right','back']);
+  asset.meta.characterComponents.suitMaterialPreviewRevision=revision;
+  assert.deepEqual(characterSuitPendingPreviewViews(asset),[]);
+  files[1].sha256='new-lod';files[2].sha256='new-rig';
+  assert.equal(characterMeshPreviewRevision(files,'staticMesh'),revision);
+  files[3].normalizedName='T_F01_Medium001_Zhou_DeathSquad_Arm_01_D.tga';
+  assert.equal(needsCharacterMeshPreview(part,'staticMesh'),true);
+  assert.deepEqual(characterSuitPendingPreviewViews(asset),['front','right','back']);
 });
 
 test('suit preview status follows automatic view work and preserves manual directions', () => {
@@ -84,6 +111,22 @@ test('suit preview status follows automatic view work and preserves manual direc
   assert.equal(characterPreviewState(asset), 'current');
 });
 
+test('suit SM marks absent textures and tracks cross-part material changes without changing owned files', async t => {
+  const f = await fixture(t, true);
+  const { componentAssetRecord, characterMeshPreviewRevision } = require('../shared/characterComponents.mjs');
+  const manifest = f.asset.meta.characterManifest.files;
+  f.asset.meta.characterManifest.files = manifest.filter(file => file.role !== 'texture');
+  const bare = listCharacterComponents(f.asset)[0];
+  assert.equal(componentAssetRecord(f.asset, bare).meta.componentView.missingTextures, true);
+  f.asset.meta.characterManifest.files.push({ role: 'texture', normalizedName: 'T_M01_Heavy001_Stone_Cape_D.tga', storedPath: 'Texture/cape.tga', sha256: 'cape-v1' });
+  const textured = listCharacterComponents(f.asset)[0];
+  assert.equal(componentAssetRecord(f.asset, textured).meta.componentView.missingTextures, false);
+  assert.deepEqual(textured.files, bare.files);
+  const before = characterMeshPreviewRevision(textured.previewFiles, 'staticMesh');
+  f.asset.meta.characterManifest.files.at(-1).sha256 = 'cape-v2';
+  assert.notEqual(characterMeshPreviewRevision(listCharacterComponents(f.asset)[0].previewFiles, 'staticMesh'), before);
+});
+
 test('freshly imported preview revision survives scanner projection and saves without a false conflict', async t => {
   const f = await fixture(t, true);
   const { characterMeshPreviewRevision } = require('../shared/characterComponents.mjs');
@@ -95,8 +138,8 @@ test('freshly imported preview revision survives scanner projection and saves wi
   const scanned = await require('../electron/services/assetScanner').getAssetDetailsByMetaPath(f.asset.metaPath);
   const part = listCharacterComponents(scanned)[0];
   assert.ok(part, JSON.stringify(scanned));
-  const revision = characterMeshPreviewRevision(part.files, 'staticMesh');
-  assert.equal(revision, characterMeshPreviewRevision(listCharacterComponents(f.asset)[0].files, 'staticMesh'));
+  const revision = characterMeshPreviewRevision(part.previewFiles || part.files, 'staticMesh');
+  assert.equal(revision, characterMeshPreviewRevision(listCharacterComponents(f.asset)[0].previewFiles || listCharacterComponents(f.asset)[0].files, 'staticMesh'));
   const sourcePath = path.join(f.temp, 'view.png');
   await sharp({ create: { width: 16, height: 16, channels: 3, background: '#123456' } }).png().toFile(sourcePath);
   await updateCharacterComponentPreview({ ...f, slot: part.slot, meshKind: 'staticMesh', automatic: true,
@@ -256,9 +299,10 @@ for (const family of ['suit', 'monster', 'npc', 'weapon']) test(`${family} renam
     const kind = family === 'suit' ? 'staticMesh' : 'skeletalMesh';
     return [part.slot, { activeRevision: 'edited-version', revisions: [{ id: 'edited-version', files: part.files, name: part.name }],
       previewUri: images[0].uri, previewImages: images, previewRevision: 'edited-version', previewOrigin: 'rendered',
-      meshPreviews: { [kind]: { previewUri: images[0].uri, previewImages: images, previewRevision: characterMeshPreviewRevision(part.files, kind) } } }];
+      meshPreviews: { [kind]: { previewUri: images[0].uri, previewImages: images, previewRevision: characterMeshPreviewRevision(part.previewFiles || part.files, kind) } } }];
   }));
   f.asset.meta.characterComponents = { slots, contentRevision: 'content-v2', previewRevision: 'content-v2', suitPreviewNeedsUpdate: false, autoPreviewPendingViews: [] };
+  if (family === 'suit') f.asset.meta.characterComponents.suitMaterialPreviewRevision = characterMeshPreviewRevision(activeCharacterFiles(f.asset), 'staticMesh');
   f.asset.meta.previews = { images };
   const oldUEPath = `/Game/Actual/${f.asset.name}/Mesh`;
   f.asset.meta.enginePath = oldUEPath;
@@ -527,6 +571,7 @@ test('SK four-view completion and gallery edits preserve SM and suit images; rev
   const part = listCharacterComponents(f.asset)[0];
   meta.characterComponents = { schemaVersion: 1, slots: { [part.slot]: {
     previewUri: 'Preview/good-sm.png', previewOrigin: 'rendered-front', previewRevision: 'initial',
+    meshPreviews: { staticMesh: { previewRevision: characterMeshPreviewRevision(part.previewFiles || part.files, 'staticMesh') } },
     previewImages: ['front', 'left', 'right', 'back'].map(view => ({ uri: view === 'front' ? 'Preview/good-sm.png' : `Preview/good-sm-${view}.png`, tags: ['preview', `view:${view}`, ...(view === 'front' ? ['cover'] : [])] }))
   } } };
   await fs.writeFile(f.asset.metaPath, JSON.stringify(meta));
@@ -549,6 +594,12 @@ test('SK four-view completion and gallery edits preserve SM and suit images; rev
   assert.deepEqual(after.meshPreviews.staticMesh, before.meshPreviews.staticMesh);
   assert.equal(after.meshPreviews.skeletalMesh.previewImages.length, 4);
   assert.equal(needsCharacterMeshPreview(after, 'skeletalMesh'), false);
+  // Duplicate queued work after a refresh/reopen must not replace files or add
+  // history once the exact content revision already has all four views.
+  const saved = await fs.readFile(f.asset.metaPath, 'utf8');
+  await updateCharacterComponentPreview({ ...f, asset: await f.reload(), slot: part.slot, automatic: true,
+    meshKind: 'skeletalMesh', expectedRevision: characterMeshPreviewRevision(before.files, 'skeletalMesh'), expectedPreviewUri: '', images });
+  assert.equal(await fs.readFile(f.asset.metaPath, 'utf8'), saved);
   const gallery = after.meshPreviews.skeletalMesh.previewImages.map((image, index) => ({ ...image,
     tags: [...image.tags.filter(tag => tag !== 'cover'), ...(index === 1 ? ['cover'] : [])] }));
   await updateCharacterPreviewGallery({ ...f, asset: updated, slot: part.slot, meshKind: 'skeletalMesh',
@@ -556,7 +607,7 @@ test('SK four-view completion and gallery edits preserve SM and suit images; rev
   const edited = listCharacterComponents(await f.reload())[0];
   assert.equal(edited.meshPreviews.skeletalMesh.previewUri, gallery[1].uri);
   assert.deepEqual(edited.meshPreviews.staticMesh, before.meshPreviews.staticMesh);
-  const changed = { ...after, files: after.files.map(file => file.role === 'model' ? { ...file, sha256: 'sm-v2' } : file) };
+  const changed = { ...after, previewFiles: (after.previewFiles || after.files).map(file => file.role === 'model' ? { ...file, sha256: 'sm-v2' } : file) };
   assert.equal(needsCharacterMeshPreview(changed, 'staticMesh'), true);
   assert.equal(needsCharacterMeshPreview(changed, 'skeletalMesh'), false);
 });
@@ -966,7 +1017,7 @@ for (const family of ['monster', 'npc']) test(`${family} body and owned weapon i
   const sourcePath = path.join(f.temp, 'view.png');
   await sharp({ create: { width: 16, height: 16, channels: 3, background: '#123456' } }).png().toFile(sourcePath);
   for (const part of parts) await updateCharacterComponentPreview({ ...f, slot: part.slot, meshKind: 'skeletalMesh', automatic: true,
-    expectedRevision: characterMeshPreviewRevision(part.files, 'skeletalMesh'), expectedPreviewUri: '',
+    expectedRevision: characterMeshPreviewRevision(part.previewFiles || part.files, 'skeletalMesh'), expectedPreviewUri: '',
     images: ['front', 'left', 'right', 'back'].map(view => ({ view, sourcePath })) });
   const updated = await f.reload();
   const cards = characterModelPreviewComponents(updated).map(part => characterMeshAssetRecord(updated, part, 'skeletalMesh'));
