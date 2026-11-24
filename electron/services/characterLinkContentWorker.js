@@ -52,8 +52,14 @@ function lodModels(bytes, index) {
   const attributes = new Set(objects.filter(node => node.name === 'NodeAttribute' && type(node) === 'lodgroup').map(node => id(node.props[0])));
   const groups = objects.filter(node => node.name === 'Model' && (type(node) === 'lodgroup' || edges.some(([source, target]) => target === id(node.props[0]) && attributes.has(source))));
   if (!groups.length) {
+    if (index === 'count') return 1;
     if (index === 0) return null;
     throw Error('UE 导出中缺少 LOD 分组，无法核验 LOD' + index);
+  }
+  if (index === 'count') {
+    const counts = new Set(groups.map(group => edges.filter(([child,parent]) => parent === id(group.props[0]) && models.has(child)).length));
+    if (counts.size !== 1 || counts.has(0)) throw Error('FBX LOD 分组等级数量不一致，无法核验');
+    return [...counts][0];
   }
   const selected = new Set();
   function descend(model) {
@@ -76,6 +82,7 @@ async function inspect(file) {
   manager.addHandler(/./, { setPath() { return this; }, load() { return new THREE.Texture(); } });
   globalThis.window = { URL };
   const bytes = await fs.readFile(file);
+  if (workerData.lodIndex === 'count') return {count:lodModels(bytes,'count')};
   const selectedModels = lodModels(bytes, workerData.lodIndex);
   const scene = new FBXLoader(manager).parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), '');
   scene.updateMatrixWorld(true);

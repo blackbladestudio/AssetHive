@@ -1,6 +1,6 @@
 {
   "name": "assethive",
-  "version": "2.3.6",
+  "version": "2.3.7",
   "description": "3D asset manager with Unreal import workflow",
   "main": "electron/main.js",
   "scripts": {

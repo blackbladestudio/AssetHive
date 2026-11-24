@@ -211,6 +211,7 @@ async function prepareComponentReplacement({ root: rootValue, asset, slot, sourc
     if (beforeHash === file.sha256) file.reuseStoredPath = before.storedPath;
     if (before) previous.delete(before.normalizedName.toLowerCase());
   }
+  require('./characterLodInvalidation').invalidateReplacedBaseLods(planned, previous, changes, part.files);
   for (const file of previous.values()) changes.push({ name: file.normalizedName, status: "retained" });
   require('../../shared/characterLods.cjs').validate([...planned, ...previous.values()]);
   const plan = { parentId: parent.id, slot, componentRole: part.role, sharedAcrossForms: part.sharedAcrossForms, formId: part.sharedAcrossForms ? "" : parent.meta.character?.formIds?.[0] || "", expectedRevision: part.currentRevision, parentRevision: parent.meta.characterComponents?.contentRevision || "initial", sourceFolder, sourcePaths, name: modelName, files: planned, excludedFiles, retainedFiles: [...previous.values()], changes, unchanged: changes.every(item => ["unchanged", "retained"].includes(item.status)) };
@@ -252,6 +253,7 @@ async function replaceCharacterComponent(options) {
       if (await fileHash(destination) !== file.sha256) throw new Error("源文件在更新过程中变化，未发布：" + file.sourcePath);
       files.push({ sourcePath: file.sourcePath, originalName: path.basename(file.sourcePath), normalizedName: file.normalizedName, storedPath, role: file.role, size: file.size, sha256: file.sha256,
         rigNeedsUpdate: file.reuseStoredPath ? activeCharacterFiles(parent).find(item => item.storedPath === file.reuseStoredPath)?.rigNeedsUpdate : undefined,
+        lodReset: file.lodReset, ignoreEmbeddedLods: file.ignoreEmbeddedLods,
         componentRole: plan.componentRole, sharedAcrossForms: plan.sharedAcrossForms, formId: plan.formId });
       completed++;
     }

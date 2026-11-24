@@ -6,11 +6,32 @@ const path = require('node:path');
 const { buildSuitExport } = require('../electron/services/characterSuitExport');
 const { verifyCharacterLodReceipt } = require('../electron/services/characterLodReceipt');
 
+for (const reverse of [false, true]) test(`SM LOD1 pairs with SK LOD0 independently of arrival order (${reverse})`, async t => {
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'skin-lod-pair-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ const files=['SK_F01_Medium001_Test_Arm.fbx','SM_F01_Medium001_Test_Arm_LOD1.fbx'].map(name=>({normalizedName:name,storedPath:name,role:name.startsWith('SK')?'skeletalMesh':'staticMesh'}));
+ for(const file of files) await fs.writeFile(path.join(dir,file.storedPath),file.storedPath);
+ const asset={id:'skin-pair',name:'F01_Medium001_Test',assetType:'suit',path:dir,meta:{character:{gender:'Female',bodyCode:'01',serial:'001',variant:'Medium',suitClass:'Medium',suitName:'Test'},characterManifest:{files:reverse?[...files].reverse():files}}};
+ const analyze=async file=>({meshKind:path.basename(file).startsWith('SK')?'skeletalMesh':'staticMesh',hasSkin:path.basename(file).startsWith('SK'),skinnedMeshCount:1,bones:[{name:'root',parent:''}],materialNames:[]});
+ const first=await buildSuitExport(asset,{includeStaticMeshes:false},analyze);
+ const sk=first.entries.find(e=>e.kind==='skeletalMesh');
+ assert.ok(sk.config.skinLodSource);assert.equal(sk.config.skinLodSource.sourceLod,0);
+ assert.equal(first.entries.filter(e=>e.kind==='staticMesh').length,0);
+ const repeated=await buildSuitExport(asset,{includeStaticMeshes:false},analyze);
+ assert.equal(repeated.entries.find(e=>e.kind==='skeletalMesh').fingerprint,sk.fingerprint);
+ await fs.writeFile(path.join(dir,files[1].storedPath),'changed SM LOD1');
+ const changed=await buildSuitExport(asset,{includeStaticMeshes:false},analyze);
+ assert.notEqual(changed.entries.find(e=>e.kind==='skeletalMesh').fingerprint,sk.fingerprint);
+ assert.equal(changed.entries.find(e=>e.kind==='skeletalMesh').sourceHash,sk.sourceHash);
+ asset.meta.characterManifest.files=[files[0]];
+ const baseOnly=await buildSuitExport(asset,{},analyze);
+ assert.equal(baseOnly.entries.find(e=>e.kind==='skeletalMesh').config.skinLodSource,undefined);
+});
+
 test('UE model success without verified artist LODs and reduction is recorded as failure', () => {
  const entry = {config:{lodPolicy:'lod1-reduction-v2',lodSources:[{index:1}]}};
  const row = {status:'success',action:'added'};
  assert.equal(verifyCharacterLodReceipt(entry,row).status,'failed');
- const report = {policy:'lod1-reduction-v2',count:6,levels:Array.from({length:6},(_,index)=>({index,triangles:index===0?2048:1024/2**(index-1),source:index<2?'imported':'generated'}))};
+ const report = {policy:'lod1-reduction-v2',qualityVersion:1,count:6,levels:Array.from({length:6},(_,index)=>({index,triangles:index===0?2048:1024/2**(index-1),source:index<2?'imported':'generated',structureVerified:index>=2}))};
  assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:report}).status,'success');
  for (const index of [0,1,2,5]) {
   const missing = JSON.parse(JSON.stringify(report)); missing.levels[index].triangles=0;
@@ -19,7 +40,11 @@ test('UE model success without verified artist LODs and reduction is recorded as
  const wrongArtist=JSON.parse(JSON.stringify(report));wrongArtist.levels[1].source='generated';
  assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:wrongArtist}).status,'failed');
  const noReduction=JSON.parse(JSON.stringify(report));noReduction.levels[5].triangles=1024;
- assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:noReduction}).status,'failed');
+ assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:noReduction}).status,'success');
+ const brokenChain=JSON.parse(JSON.stringify(report));brokenChain.levels[2].structureVerified=false;
+ assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:brokenChain}).status,'failed');
+ const oldPlugin=JSON.parse(JSON.stringify(report));delete oldPlugin.qualityVersion;
+ assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:oldPlugin}).status,'failed');
  const manual=JSON.parse(JSON.stringify(report));manual.levels[5]={index:5,triangles:500,source:'existing'};
  assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:manual}).status,'success');
 });
@@ -74,7 +99,7 @@ test('LOD review renders visible level files, missing generation settings hint a
   files:[{name:'SK_Sword001_Test.fbx'},{name:'SK_Sword001_Test_LOD1.fbx',status:'added'}],t:zh=>zh,confirmed:false,onConfirm:()=>{}
  }));
  assert.match(html,/character-identity-unconfirmed/);assert.match(html,/type="checkbox"/);
- assert.match(html,/SK_Sword001_Test_LOD1.fbx/);assert.match(html,/LOD2、LOD3、LOD4、LOD5/);assert.match(html,/LOD1 成功挂入后/);
+ assert.match(html,/SK_Sword001_Test_LOD1.fbx/);assert.match(html,/LOD2、LOD3、LOD4、LOD5/);assert.match(html,/替换 LOD0 后/);
  assert.match(html,/新增/);
  assert.match(html, /来源文件/); assert.match(html, /入库文件名/); assert.match(html, /<table/);
  const render = props => require('react-dom/server').renderToStaticMarkup(require('react').createElement(mod.exports.CharacterLodReview, {t:zh=>zh,onConfirm:()=>{}, ...props}));

@@ -7,6 +7,18 @@ const crypto = require('node:crypto');
 const { buildSuitExport: build, managedFile } = require('../electron/services/characterSuitExport');
 const buildSuitExport = (asset, options, analyze) => build(asset, options, analyze, async () => false);
 
+test('local monster blockout resolves exact engine placeholder aliases without owning a material', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'monster-blockout-'));
+  t.after(() => fs.rm(dir, {recursive:true,force:true,maxRetries:5}));
+  await fs.writeFile(path.join(dir,'mesh.fbx'),'blockout');
+  const asset = {id:'blockout',name:'GreatDingBeast',assetType:'monster',path:dir,meta:{category:'1_Boss',character:{name:'GreatDingBeast'},characterManifest:{files:[{role:'skeletalMesh',normalizedName:'SK_GreatDingBeast_01.fbx',storedPath:'mesh.fbx'}]}}};
+  const result = await buildSuitExport(asset,{},async()=>({meshKind:'skeletalMesh',hasSkin:true,skinnedMeshCount:1,materialNames:['WorldGridMaterial','WorldGridMaterial_1','WorldGridMaterial_2']}));
+  const mesh = result.entries.find(e=>e.kind==='skeletalMesh');
+  assert.deepEqual(mesh.unresolvedMaterials,[]);
+  assert.deepEqual(Object.values(mesh.externalMaterials),Array(3).fill('/Engine/EngineMaterials/WorldGridMaterial'));
+  assert.equal(result.entries.filter(e=>e.kind==='material').length,0);
+});
+
 test('manual UE refresh sends known paths, scopes projects and refuses incomplete responses', async t => {
   const { refreshSuitStatus } = require('../electron/services/characterSuitExport');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'suit-status-'));
@@ -601,12 +613,12 @@ test('Public character MIs follow suit gender and body, without being mistaken f
   }
 });
 
-test('SM stays managed but is not read, sent or counted; adding SK sends only SK with textures and MIs', async t => {
+test('SM is inspected for embedded LODs but not sent or counted when static export is off', async t => {
   const { asset, analyze, files } = await fixture(t, 'F01_Medium001_Test', true);
   const calls = [];
   const inspect = async file => { calls.push(path.basename(file)); return analyze(file); };
   const before = await buildSuitExport(asset, {}, inspect);
-  assert.deepEqual(calls.sort(), ['SK_F01_Medium001_Test_Arm.fbx', 'SK_F01_Medium001_Test_Head.fbx']);
+  assert.deepEqual(calls.sort(), ['SK_F01_Medium001_Test_Arm.fbx', 'SK_F01_Medium001_Test_Head.fbx', 'SM_F01_Medium001_Test_Arm.fbx', 'SM_F01_Medium001_Test_Head.fbx']);
   assert.equal(before.entries.filter(entry => entry.kind === 'skeletalMesh').length, 2);
   assert.equal(before.entries.filter(entry => entry.kind === 'staticMesh').length, 0);
   assert.equal(before.entries.filter(entry => entry.kind === 'material').length, 2);

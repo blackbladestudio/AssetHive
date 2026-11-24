@@ -441,6 +441,7 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
     changes.push({ name: file.normalizedName, status: !previous ? "added" : beforeHash === file.sha256 ? "unchanged" : "changed" });
     if (previous) old.delete(previous.normalizedName.toLowerCase());
   }
+  require('./characterLodInvalidation').invalidateReplacedBaseLods(files, old, changes, oldFiles);
   for (const previous of old.values()) changes.push({ name: previous.normalizedName, status: "retained" });
   const merged = [...files, ...old.values()];
   characterLod.validate(merged);
@@ -471,7 +472,7 @@ async function updateCharacterPackage(options) {
       const previous = existing.get(file.normalizedName.toLowerCase());
       // Unchanged resources keep their existing stored path; only changed bytes are copied.
       if (previous && plan.changes.find(item => item.name === file.normalizedName)?.status === "unchanged") {
-        nextFiles.push({ ...previous, sha256: file.sha256 });
+        nextFiles.push({ ...previous, sha256: file.sha256, lodReset: file.lodReset, ignoreEmbeddedLods: file.ignoreEmbeddedLods });
         completed++;
         continue;
       }

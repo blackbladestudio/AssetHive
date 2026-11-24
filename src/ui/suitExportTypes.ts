@@ -14,7 +14,7 @@ export type SuitExportRow = {
   assetId: string; key: string; name: string; kind?: string; targetPath?: string; path?: string;
   status: string; action: string; message?: string;
   partSlot?: string; groupName?: string; oldKey?: string;
-  lodReport?: { policy?: string; count: number; levels?: { index: number; triangles: number; source: string }[]; missing?: number[]; pending?: number[]; missingManual?: number[] };
+  lodReport?: { policy?: string; skinTransferVersion?: number; count: number; levels?: { index: number; triangles: number; source: string }[]; missing?: number[]; pending?: number[]; missingManual?: number[] };
   lodCheckedAt?: string;
   dependencies?: string[];
   skeletonSelection?: SkeletonSelection;

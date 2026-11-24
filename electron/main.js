@@ -2036,6 +2036,7 @@ async function getUnrealConnectionStatus(targetProjectPath, targetEditorPath) {
   };
   return { connected: Boolean(info), targetName: displayPath ? path.basename(displayPath, path.extname(displayPath)) : "",
     projectPath: info?.projectPath || target || targetProjectPath || '',
+    projectId: info?.projectId || '',
     reason: diagnostic.state, message: info ? "" : reasons[diagnostic.state] || reasons.unavailable, port: diagnostic.port };
 }
 

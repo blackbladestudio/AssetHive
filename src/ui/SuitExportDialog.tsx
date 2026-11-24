@@ -5,7 +5,7 @@ import { DialogCloseButton } from './DialogCloseButton';
 import { characterSendSummary } from '../../shared/characterSendSummary.mjs';
 import { characterExportScope } from '../../shared/characterExportScope.mjs';
 
-export function SuitExportDialog({ assetIds, weapon = false, monster = false, npc = false, item = false, heroPart = '', settings, hidden, onHide, onShow, onClose, onApplied, onProjectSettings, t }: {
+export function SuitExportDialog({ assetIds, weapon = false, monster = false, npc = false, item = false, heroPart = '', settings, hidden, onHide, onShow, onClose, onApplied, onProjectSettings, onBusyChange, t }: {
   weapon?: boolean;
   monster?: boolean;
   npc?: boolean;
@@ -14,6 +14,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
   assetIds: string[]; settings: AppSettings; onClose: () => void; onApplied: () => Promise<void>;
   hidden: boolean; onHide: () => void; onShow: () => void;
   onProjectSettings: () => void;
+  onBusyChange: (busy: boolean) => void;
   t: (zh: string, en: string) => string;
 }) {
   const [options, setOptions] = useState<SuitExportOptions>({ includeStaticMeshes: false, inspectAllMeshes: true });
@@ -32,6 +33,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
   async function send(phase: 'inspect' | 'apply', exportOptions = options) {
     if (busy || (phase === 'apply' && !result)) return;
     setBusy(true); setPhase(phase); setError(''); setProgress({ percent: 0, message: '' });
+    onBusyChange(true);
     try {
       const selectedKeys = new Set(characterExportScope(result?.entries || [], Boolean(exportOptions.includeStaticMeshes)).map(row => row.key));
       const excluded = (result?.entries || []).filter(row => !selectedKeys.has(row.key));
@@ -48,7 +50,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
       // keeping the inspection spinner blocked on another library round-trip.
       void onApplied().catch(reason => console.warn('Character card refresh failed', reason));
     } catch (reason) { setError(String(reason)); if (phase === 'apply') setResult(null); }
-    finally { setBusy(false); }
+    finally { setBusy(false); onBusyChange(false); }
   }
   useEffect(() => {
     if (!started.current) { started.current = true; void send('inspect'); }
@@ -207,6 +209,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
       </section>}
       {result && <div className="suit-export-rows">{rows.filter(row => showUnchanged || row.action !== 'unchanged').map(row => <div className={`suit-export-row ${row.status}`} key={row.key}>
         <strong>{row.name}</strong><span>{done ? ({ success: t('已完成', 'Done'), unchanged: t('未重导', 'Unchanged'), failed: t('失败', 'Failed'), blocked: t('待处理', 'Blocked'), skipped: t('已跳过', 'Skipped') }[row.status] || row.status) : actionLabel[row.action] || row.action}</span>
+        {row.lodReport?.skinTransferVersion && Boolean(row.lodReport.pending?.length) && <small>{t('将使用 SM LOD1 生成 SK LOD1–5，继承现有 SK LOD0 的骨架和蒙皮；保留 SK LOD0。', 'Generate SK LOD1–5 from SM LOD1 using the existing SK LOD0 skeleton and skin weights; preserve SK LOD0.')}</small>}
         {row.lodReport?.levels && <small>{t('UE 实际 LOD：', 'Actual UE LODs: ')}{row.lodReport.levels.map(level => `LOD${level.index}: ${level.triangles.toLocaleString()}`).join(' · ')} {t('三角面', 'triangles')}</small>}
         <details className="suit-export-item-path"><summary>{t('查看引擎内位置', 'Show location in Unreal Engine')}</summary><code>{row.path || row.targetPath}</code></details>{row.message && (row.action !== 'restore' || ['failed', 'blocked'].includes(row.status)) && <small>{row.message}</small>}
         {!done && row.status === 'conflict' && <select aria-label={`${row.name} ${t('处理方式', 'Action')}`} value={decisions[row.key] || 'skip'} onChange={event => setDecisions(current => ({ ...current, [row.key]: event.target.value }))} disabled={busy}>

@@ -52,7 +52,7 @@ export function CharacterLodReview({ files, t, confirmed, onConfirm, onReveal, d
       {group.duplicate && <small role="alert" className="error">{t('同一等级有多个文件，请整理后重试', 'Multiple files for the same level. Resolve before continuing.')}</small>}
     </div>)}</div>
     <details className="character-lod-rules"><summary>{t('LOD 规则说明', 'LOD rules')}</summary>
-      <p>{t('可先只提供 LOD0。SM、SK 的美术 LOD 导入后回读验证；LOD1 成功挂入后，缺少的 LOD2–5 按 LOD1 面数的 50%、25%、12.5%、6.25% 自动减面。已有手工等级保留，验证结果记录回 AssetHive。', 'Start with LOD0 if needed. Artist LODs for SM and SK are verified after import. Once LOD1 is present, missing LOD2–5 use 50%, 25%, 12.5% and 6.25% of its triangles. Existing artist LODs are preserved and results recorded in AssetHive.')}</p>
+      <p>{t('可先只提供 LOD0。替换 LOD0 后，对应 SM/SK 的旧 LOD1 及后续等级移出当前版本，并在发送 UE 时清理。新 LOD1 到位后再生成后续等级；已有 SK LOD0 可继承骨骼和蒙皮生成同部件的 SK LOD1–5。减面优先保护造型，实际面数可能高于目标比例。', 'Start with LOD0 if needed. Replacing LOD0 invalidates the paired SM/SK LOD1 and later levels in the active version and clears them when sent to UE. A new LOD1 enables generation again; an existing SK LOD0 supplies bones and skin weights for the paired SK LOD1–5. Shape preservation takes priority over target triangle ratios.')}</p>
       <p>{t('不带后缀或 _LOD0 为主模型；各等级共用贴图，无需另建 LOD 文件夹。名称或文件变化后需重新确认。', 'No suffix or _LOD0 is the base. Levels share textures; no extra LOD folder is needed. Review again after names or files change.')}</p>
     </details>
     </>}

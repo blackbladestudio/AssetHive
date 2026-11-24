@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
-const { compareLinkContent } = require('./characterLinkContent');
+const projectIdentity = require('./characterProjectIdentity');
+const { compareLinkContent, meshLodCount } = require('./characterLinkContent');
 const { updateAssetMetadataFile } = require('./assetMetadata');
 const pending = new Map();
 const normalize = value => String(value || '').replaceAll('\\', '/').toLowerCase();
@@ -42,15 +43,25 @@ async function sendCharacterLinkJob(assets, options, onProgress, client) {
           if (row.verification !== 'groomContent' || row.fingerprint !== source.fingerprint) throw new Error('Groom 内容核验回执不完整');
           row.status = 'ready'; row.message = 'Groom 曲线和属性核验通过'; verified.push(row.key); continue;
         }
-        const lodSources = source.config?.lodSources || [];
-        if (JSON.stringify(row.lodSources || []) !== JSON.stringify(lodSources)) throw new Error('LOD 核验回执不完整');
-        const comparison = await compareLinkContent(source.sourcePath, row.exportedPath, row.kind, {source: row.sourceMaterialPaths, target: row.exportedMaterialPaths, targetLod: lodSources.length ? 0 : null});
+        const allLodSources = source.config?.lodSources || [];
+        if (JSON.stringify(row.lodSources || []) !== JSON.stringify(allLodSources)) throw new Error('LOD 核验回执不完整');
+        const pendingLods = new Set(row.pendingLods || []);
+        if ([...pendingLods].some(index => !allLodSources.some(lod => lod.index === index))) throw new Error('待发送 LOD 回执不完整');
+        const lodSources = allLodSources.filter(lod => !pendingLods.has(lod.index));
+        const isMesh = ['staticMesh','skeletalMesh'].includes(row.kind);
+        const embeddedCount = isMesh ? await meshLodCount(source.sourcePath) : 1;
+        const comparison = await compareLinkContent(source.sourcePath, row.exportedPath, row.kind, {source: row.sourceMaterialPaths, target: row.exportedMaterialPaths, sourceLod: isMesh ? 0 : null, targetLod: isMesh ? 0 : null});
         let equal = comparison.equal;
+        if (equal) for (let index=1; index<embeddedCount; index++) {
+          if (allLodSources.some(lod=>lod.index===index)) continue;
+          const level = await compareLinkContent(source.sourcePath,row.exportedPath,row.kind,{source:row.sourceMaterialPaths,target:row.exportedMaterialPaths,sourceLod:index,targetLod:index});
+          if (!level.equal) {equal=false;break;}
+        }
         if (equal) for (const lod of lodSources) {
-          const level = await compareLinkContent(lod.sourcePath, row.exportedPath, row.kind, {source: row.sourceMaterialPaths, target: row.exportedMaterialPaths, targetLod: lod.index});
+          const level = await compareLinkContent(lod.sourcePath, row.exportedPath, row.kind, {source: row.sourceMaterialPaths, target: row.exportedMaterialPaths, sourceLod: 0, targetLod: lod.index});
           if (!level.equal) { equal = false; break; }
         }
-        if (!equal && ['staticMesh', 'skeletalMesh'].includes(row.kind)) {
+        if (!equal && isMesh && embeddedCount === 1) {
           // Original FBX axes, triangulation and UE-generated attributes differ
           // legitimately. Ask UE to parse a transient copy using its recorded
           // import settings; never relax the actual content comparison.
@@ -65,12 +76,13 @@ async function sendCharacterLinkJob(assets, options, onProgress, client) {
             const level = levels.find(value => value.index === original.index);
             if (!level || level.sourceHash !== original.sourceHash) throw new Error('源内容解析版本不一致');
             if (level.sourceLod !== original.index) throw new Error('源内容 LOD 索引不一致');
-            const proof = await compareLinkContent(level.exportedPath, row.exportedPath, row.kind, {source:row.exportedMaterialPaths, target:row.exportedMaterialPaths, sourceLod:level.sourceLod, targetLod:lodSources.length ? original.index : null});
+            const proof = await compareLinkContent(level.exportedPath, row.exportedPath, row.kind, {source:row.exportedMaterialPaths, target:row.exportedMaterialPaths, sourceLod:level.sourceLod, targetLod:original.index});
             if (!proof.equal) { equal = false; break; }
           }
         }
         row.status = equal ? 'ready' : 'blocked';
         row.message = equal ? '内容及依赖核验通过，可仅关联' : '内容不一致或无法证明等价，未关联；不会导入覆盖';
+        if (equal && pendingLods.size) row.message = `已有模型内容与依赖核验通过；LOD${[...pendingLods].join('、LOD')} 待显式发送，关联不会导入`;
         if (equal) verified.push(row.key);
       } catch (error) { row.status = 'blocked'; row.message = String(error.message || error); }
     }
@@ -90,8 +102,13 @@ async function sendCharacterLinkJob(assets, options, onProgress, client) {
       }
     } while (changed);
     const verifiedKeys = verified.filter(key => rowsByKey.get(key)?.status === 'ready');
+    for (const row of result.entries) if (row.status === 'ready' && row.alreadyLinked) {
+      row.status = 'linked'; row.message = row.pendingLods?.length
+        ? `已关联；LOD${row.pendingLods.join('、LOD')} 待显式发送，无需重复关联`
+        : '已关联；内容与依赖核验通过，无需重复关联';
+    }
     const manifestHash = hash(suits);
-    await recordLinkInspection(unique, suits, result.entries, editor.projectPath);
+    await recordLinkInspection(unique, suits, result.entries, editor.projectPath, editor.projectId);
     pending.set(result.inspectToken, { at: Date.now(), project: normalize(editor.projectPath), ids: unique.map(a => a.id).sort(), verified: verifiedKeys, manifestHash, suits });
     return { ok: true, suitResult: { entries: publicRows(result.entries), inspectToken: result.inspectToken, manifestHash,
       projectPath: editor.projectPath, materialRequests: [], phase: 'inspect' }, message: '仅关联检查完成' };
@@ -107,17 +124,18 @@ async function sendCharacterLinkJob(assets, options, onProgress, client) {
   const entries = reply.suitResult.entries;
   const expectedKeys = new Set(cached.suits.flatMap(suit => suit.entries.map(entry => entry.key)));
   if (entries.length !== expectedKeys.size || new Set(entries.map(row => row.key)).size !== expectedKeys.size || entries.some(row => !expectedKeys.has(row.key))) throw new Error('仅关联结果不完整，请重新检查');
-  const projectKey = hash(normalize(editor.projectPath));
+  const projectKey = projectIdentity.projectKey(editor);
   for (const asset of unique) {
-    const rows = entries.filter(row => row.assetId === asset.id && row.status === 'success' && cached.verified.includes(row.key));
+    const rows = entries.filter(row => row.assetId === asset.id && ['success', 'unchanged'].includes(row.status) && cached.verified.includes(row.key));
     if (!rows.length) continue;
     await updateAssetMetadataFile(asset.metaPath, meta => {
       const receipts = meta.characterUnrealExports ||= {};
-      const receipt = receipts[projectKey] ||= { entries: {} };
+      const receipt = receipts[projectKey] ||= projectIdentity.projectReceipt(meta, editor) || { entries: {} };
       receipt.entries ||= {};
       for (const row of rows) receipt.entries[row.key] = { ...receipt.entries[row.key], ...publicRows([row])[0], action: 'linked',
         linkOnly: true, missingInUE: false, associationPending: false, livePath: row.path, lastSuccessPath: row.path };
       receipt.projectPath = editor.projectPath;
+      receipt.projectId = projectIdentity.projectId(editor);
       receipt.targetRoot = cached.suits.find(suit => suit.assetId === asset.id)?.targetRoot || '';
       receipt.checkedAt = new Date().toISOString();
       return meta;
@@ -131,21 +149,28 @@ async function sendCharacterLinkJob(assets, options, onProgress, client) {
 function publicRows(rows) {
   return rows.map(row => Object.fromEntries(['assetId', 'key', 'name', 'kind', 'partSlot', 'targetPath', 'path', 'status', 'action', 'message'].filter(key => row[key] !== undefined).map(key => [key, row[key]])));
 }
-async function recordLinkInspection(assets, suits, rows, projectPath) {
-  const projectKey = hash(normalize(projectPath));
+async function recordLinkInspection(assets, suits, rows, projectPath, projectId) {
+  const editor = {projectPath, projectId};
+  const projectKey = projectIdentity.projectKey(editor);
   for (const asset of assets) {
     const inspected = rows.filter(row => row.assetId === asset.id);
     if (!inspected.length) continue;
     await updateAssetMetadataFile(asset.metaPath, meta => {
-      const receipt = (meta.characterUnrealExports ||= {})[projectKey] ||= { entries: {} };
+      const receipt = (meta.characterUnrealExports ||= {})[projectKey] ||= projectIdentity.projectReceipt(meta, editor) || { entries: {} };
       receipt.entries ||= {};
       for (const row of inspected) {
         const previous = receipt.entries[row.key] || {};
+        if (row.status === 'linked') {
+          receipt.entries[row.key] = { ...previous, ...publicRows([row])[0], missingInUE: false,
+            livePath: row.path, lastSuccessPath: row.path, associationPending: false };
+          continue;
+        }
         if (row.status === 'ready' && previous.lastSuccessPath && !previous.missingInUE && !previous.associationPending) continue;
         receipt.entries[row.key] = { ...previous, ...publicRows([row])[0], missingInUE: row.status === 'missing',
           livePath: row.status === 'missing' ? '' : row.path || previous.livePath || '', associationPending: row.status !== 'missing' };
       }
       receipt.projectPath = projectPath;
+      receipt.projectId = projectIdentity.projectId(editor);
       receipt.targetRoot = suits.find(suit => suit.assetId === asset.id)?.targetRoot || '';
       receipt.checkedAt = new Date().toISOString();
       return meta;

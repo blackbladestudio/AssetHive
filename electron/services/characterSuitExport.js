@@ -1,6 +1,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const projectIdentity = require('./characterProjectIdentity');
 const { ownedWeaponIdentity } = require('../../shared/ownedWeaponNaming.mjs');
 const { gameplayIdentity, gameplayPrefix, gameplayFileStem } = require('../../shared/gameplayNaming.mjs');
 const { applySkeletonOptions } = require('../../shared/characterSkeletonOptions.cjs');
@@ -314,6 +315,12 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
           : suitMatch?.key ? groups.get(suitMatch.key)
           : candidates.length && !(candidates.length > 1 && candidates[0].key.length === candidates[1].key.length) ? candidates[0] : (weapon || item) && groups.size === 1 ? [...groups.values()][0] : null;
         if (!group) {
+          // Known UE blockout placeholder, including exporter slot aliases.
+          // Association still verifies this exact material on every triangle.
+          if (!chosen && /^WorldGridMaterial(?:_\d+)?$/i.test(original)) {
+            externalMaterials[original] = '/Engine/EngineMaterials/WorldGridMaterial';
+            continue;
+          }
           // UE intake keeps existing materials until a matching managed texture group is supplied.
           const recovered = asset.meta?.characterUEIntake?.materialBindings?.[mappingKey];
           if (!chosen && recovered?.startsWith('/Game/')) { externalMaterials[original] = recovered; continue; }
@@ -439,11 +446,11 @@ async function sendSuitJob(assets, options, onProgress, client) {
   if (!editor?.capabilities?.includes('characterSuitV1')) throw new Error('请编译并加载支持套装导入的 AssetHive 插件');
   if (options.unrealProjectPath && normalize(options.unrealProjectPath) !== normalize(editor.projectPath)) throw new Error('连接的 UE 工程与所选目标不一致');
   const suits = [];
-  const projectKey = hash(normalize(editor.projectPath));
+  const projectKey = projectIdentity.projectKey(editor);
   const effectiveOptions = new Map();
   const uniqueAssets = [...new Map(assets.map(asset => [asset.id, asset])).values()];
   for (const [assetIndex, asset] of uniqueAssets.entries()) {
-    const saved = asset.meta?.characterUnrealExports?.[projectKey]?.options || {};
+    const saved = projectIdentity.projectReceipt(asset.meta, editor)?.options || {};
     const selected = mergeSuitExportOptions(saved, options.suitOptions);
     const overrides = [selected.skeletonSelection, ...Object.values(selected.skeletonOverrides || {})];
     if ((asset.assetType !== 'suit' || overrides.some(choice => choice && choice.mode !== 'auto'))
@@ -501,10 +508,10 @@ async function sendSuitJob(assets, options, onProgress, client) {
     for (const asset of new Map(assets.map(asset => [asset.id, asset])).values()) {
       const suit = uniqueSuits.get(asset.id);
       const rows = result.entries.filter(row => row.assetId === asset.id);
-      if (phase === 'inspect' && !asset.meta?.characterUnrealExports?.[projectKey]) continue;
+      if (phase === 'inspect' && !projectIdentity.projectReceipt(asset.meta, editor)) continue;
       await updateAssetMetadataFile(asset.metaPath, meta => {
         const receipts = meta.characterUnrealExports || {};
-        const previous = receipts[projectKey] || { entries: {} };
+        const previous = projectIdentity.projectReceipt(meta, editor) || { entries: {} };
         if (phase === 'inspect') recordUEPresenceChanges(meta, previous,
           rows.filter(row => row.status === 'missing').map(row => ({ key: row.key, present: false, path: '' })), editor.projectPath);
         const next = { ...previous.entries };
@@ -516,7 +523,7 @@ async function sendSuitJob(assets, options, onProgress, client) {
             ...(row.status === 'missing' ? { missingInUE: true, livePath: '' } : {}) };
         }
         const successful = rows.filter(row => ['success', 'unchanged'].includes(row.status) && row.action !== 'retained');
-        receipts[projectKey] = { ...previous, projectPath: editor.projectPath, entries: next, checkedAt: new Date().toISOString(),
+        receipts[projectKey] = { ...previous, projectPath: editor.projectPath, projectId: projectIdentity.projectId(editor), entries: next, checkedAt: new Date().toISOString(),
           ...(phase === 'apply' && successful.length ? { targetRoot: suit.targetRoot } : {}),
           ...(phase === 'apply' ? { options: effectiveOptions.get(asset.id) } : {}) };
         meta.characterUnrealExports = receipts;
@@ -562,8 +569,8 @@ async function refreshSuitStatus(asset, options, client) {
   const editor = await client.getEditorInfo();
   if (!await require('./characterPluginCapabilities').hasCharacterCapability(client, editor, 'characterStatusV2')) throw new Error('请更新目标 UE 的 AssetHive 插件，以刷新实际资源状态');
   if (options.unrealProjectPath && normalize(options.unrealProjectPath) !== normalize(editor.projectPath)) throw new Error('连接的 UE 工程与所选目标不一致，未更新路径记录');
-  const projectKey = hash(normalize(editor.projectPath));
-  const savedReceipt = asset.meta?.characterUnrealExports?.[projectKey];
+  const projectKey = projectIdentity.projectKey(editor);
+  const savedReceipt = projectIdentity.projectReceipt(asset.meta, editor);
   const plan = savedReceipt && Object.keys(savedReceipt.entries || {}).length ? null : await buildSuitExport(asset, { includeStaticMeshes: true });
   const current = savedReceipt?.entries && Object.keys(savedReceipt.entries).length ? savedReceipt.entries : Object.fromEntries((plan?.entries || []).map(entry => [entry.key,
     { key: entry.key, kind: entry.kind, name: entry.name, partSlot: entry.partSlot, targetPath: entry.targetPath }]));
@@ -572,9 +579,11 @@ async function refreshSuitStatus(asset, options, client) {
   if (reply.suitResult?.error || !Array.isArray(reply.suitResult?.entries)) throw new Error(reply.suitResult?.error || 'UE 未返回资源状态');
   const updates = reply.suitResult.entries.filter(row => row.assetId === asset.id && typeof row.present === 'boolean');
   if (expected.some(row => !updates.some(update => update.key === row.key))) throw new Error('UE 状态回执不完整，未改动已有路径记录');
-  if (!updates.some(row => current[row.key] && (current[row.key].missingInUE !== !row.present || current[row.key].livePath !== row.path || Boolean(current[row.key].associationPending) !== Boolean(row.associationPending)))) return false;
+  if (savedReceipt?.projectId === projectIdentity.projectId(editor) && !updates.some(row => current[row.key] && (current[row.key].missingInUE !== !row.present || current[row.key].livePath !== row.path || Boolean(current[row.key].associationPending) !== Boolean(row.associationPending)))) return false;
   await updateAssetMetadataFile(asset.metaPath, meta => {
-    const receipt = (meta.characterUnrealExports ||= {})[projectKey] ||= { projectPath: editor.projectPath, targetRoot: plan?.targetRoot || '', entries: current };
+    const receipt = (meta.characterUnrealExports ||= {})[projectKey] ||= { ...savedReceipt, targetRoot: savedReceipt?.targetRoot || plan?.targetRoot || '', entries: current };
+    receipt.projectPath = editor.projectPath;
+    receipt.projectId = projectIdentity.projectId(editor);
     recordUEPresenceChanges(meta, receipt, updates, editor.projectPath);
     for (const row of updates) if (receipt.entries[row.key]) {
       receipt.entries[row.key] = { ...receipt.entries[row.key], missingInUE: !row.present, livePath: row.path, associationPending: Boolean(row.associationPending),

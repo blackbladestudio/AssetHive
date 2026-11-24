@@ -1,69 +1,40 @@
-# Node / Electron
-node_modules/
-dist/
+
+UE/HiveTest/Intermediate
+UE/HiveTest/Saved
+UE/HiveTest/Content
+# Independent repository: https://github.com/Biscuits-Lab/AssetHivePlugin
+/UE/HiveTest/Plugins/
+Log
+UE/HiveTest/Saved
+# Legacy standalone plugin checkout
+/AssetHive-UE-Plugin/
 Output/
-out/
-release/
-.cache/
-.update/
+dist/
 *.log
-AssetHiveUpdater.exe
+tools/
+.claude/
 
-# Local environment and credentials
-.env
-.env.*
-!.env.example
-*.pfx
-*.p12
-*.key
-*.pem
+node_modules/
+.cache/
 
-# IDE / OS
-.idea/
-.vscode/
-.vs/
-*.suo
-*.user
-*.userprefs
-.DS_Store
-Thumbs.db
-
-# Native build artifacts
-*.pdb
-*.obj
-*.lib
-*.exp
-*.ilk
-*.sarif
-
-# Unreal test host outputs
-UE/HiveTest/.vs/
+# UE 编译产物
 UE/HiveTest/Binaries/
-UE/HiveTest/Content/
-UE/HiveTest/DerivedDataCache/
 UE/HiveTest/Intermediate/
-UE/HiveTest/Saved/
-UE/HiveTest/*.sln
-UE/HiveTest/Config/UnrealBuildTool/
-UE/HiveTest/Plugins/*
-!UE/HiveTest/Plugins/AssetHive/
-!UE/HiveTest/Plugins/AssetHive/**
-UE/HiveTest/Plugins/AssetHive/Binaries/
-UE/HiveTest/Plugins/AssetHive/Intermediate/
-
-# Precompiled plugin build outputs
-AssetHive-UE-Plugin/_build_tmp/
+UE/HiveTest/.vs/
+Rerfence/MegascansPlugin/Binaries/
+Rerfence/MegascansPlugin/Intermediate/
+AssetHive-UE-Plugin/AssetHive/Binaries/
 AssetHive-UE-Plugin/AssetHive/Intermediate/
 
-# Application runtime data
-Log/
-Logs/
-import_*.json
-tmp_*.json
-
-# Local build and verification files
-/.tmp/
-/tools/
-/.wix/
+# 可下载的第三方工具与编译输出
+scripts/7-Zip/
+AssetHiveUpdater.exe
+UE/HiveTest/DerivedDataCache/VT
+# docs 下的压缩包不进版本库；原型图（html/md/css/png 等）放行
+docs/*.zip
+docs/**/*.zip
 __pycache__/
 *.pyc
+
+# Local character verification and developer temporary artifacts
+/.tmp/

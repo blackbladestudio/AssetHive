@@ -2823,7 +2823,8 @@ const AssetCard = memo(({
   const characterInfo = getCharacterAssetInfo(asset);
   const componentView = asset.meta?.componentView as { parentId: string; missingTextures?: boolean; visibleMeshKind?: "staticMesh" | "skeletalMesh"; meshSlots?: Record<"staticMesh" | "skeletalMesh", { hasModel?: boolean; previewPath?: string; previewState?: string }> } | undefined;
   const componentMeshSlots = componentView?.meshSlots;
-  const cardAssetName = characterDisplayName(asset);
+  const cardAssetName = characterInfo?.family === 'monster' && !componentView
+    ? String(characterInfo.fields.name || characterDisplayName(asset)) : characterDisplayName(asset);
   const cardWeapons = characterOwnedWeapons(asset, variantId, variantAssets);
   const cardVariant = variantId ? monsterVariantGroups([asset]).find(variant => variant.id === variantId)?.name || variantId : monsterVariantLabel(asset);
   const cardAnimationLabels = String(asset.assetType || "").trim().toLowerCase() === "animation" ? asset.animationLabels || [] : [];
@@ -2853,7 +2854,7 @@ const AssetCard = memo(({
         if (savingProgress >= 0 || event.ctrlKey || event.metaKey || event.shiftKey || (event.target as HTMLElement).closest('button, input, a')) return;
         event.preventDefault(); event.stopPropagation(); onToggleSuitParts(asset.id);
       } : undefined}
-      className={`card ${isSelected ? "active" : ""} ${getCardWidthClass(asset)} ${savingProgress >= 0 ? "saving" : ""} ${String(asset.assetType || "").trim().toLowerCase() === "hdri" ? "hdri" : ""} ${characterInfo ? "character-card" : ""} ${variantId !== undefined ? 'monster-variant-card' : ''}`}
+      className={`card ${isSelected ? "active" : ""} ${getCardWidthClass(asset)} ${savingProgress >= 0 ? "saving" : ""} ${String(asset.assetType || "").trim().toLowerCase() === "hdri" ? "hdri" : ""} ${characterInfo ? "character-card" : ""}`}
       style={{ ...(characterInfo ? { translate: `${x}px ${y}px`, transform: "perspective(1000px) rotateX(var(--card-tilt-x, 0deg)) rotateY(var(--card-tilt-y, 0deg))" } : { transform: `translate3d(${x}px, ${y}px, 0)` }), width, height, "--character-card-scale": width / 240 } as CSSProperties & { translate?: string; "--character-card-scale": number }}
       onPointerMove={characterInfo ? (event) => {
         const card = event.currentTarget;
@@ -5968,7 +5969,10 @@ export function App() {
   const [suitExportAssetIds, setSuitExportAssetIds] = useState<string[] | null>(null);
   const [linkAssetIds, setLinkAssetIds] = useState<string[] | null>(null);
   const [connectedUeProjectPath, setConnectedUeProjectPath] = useState('');
+  const [connectedUeProjectId, setConnectedUeProjectId] = useState('');
   const [suitExportHidden, setSuitExportHidden] = useState(false);
+  const [suitExportBusy, setSuitExportBusy] = useState(false);
+  const [suitExportSession, setSuitExportSession] = useState(0);
   const [refreshingUePath, setRefreshingUePath] = useState(false);
   async function refreshSelectedUePath() {
     if (!selectedAsset || refreshingUePath) return;
@@ -6044,7 +6048,13 @@ export function App() {
   }, [selectedSuitOwnerId, unrealConnected, suitExportAssetIds, bridge, refreshAssetFromDisk]);
   async function runImport(assetIds: string[]) {
     if (savingOverwritePolicy && !isBlenderTarget && !isThreeDCoatTarget) return;
-    if (suitExportAssetIds) { setSuitExportHidden(false); return; }
+    if (suitExportAssetIds && suitExportBusy) {
+      setSuitExportHidden(false);
+      if (JSON.stringify([...new Set(assetIds.map(componentParentId))].sort()) !== JSON.stringify([...suitExportAssetIds].sort())) {
+        showStatus(t('另一个资产的 UE 任务仍在运行，请等待该任务完成', 'Another asset is still processing in UE. Wait for it to finish.'), 6000);
+      }
+      return;
+    }
     const suits = assetIds.filter(id => {
       const asset = allAssets.find(item => item.id === componentParentId(id));
       return ['weapon', 'monster', 'suit', 'npc', 'item'].includes(asset?.assetType || '');
@@ -6067,6 +6077,7 @@ export function App() {
     if (!isBlenderTarget && !isThreeDCoatTarget && suits.length) {
       if (suits.length !== assetIds.length) { showStatus(t("请将套装与其他类型分批发送", "Send suits separately from other types"), 6000); return; }
       setSuitExportAssetIds([...new Set(assetIds.map(componentParentId))]);
+      setSuitExportSession(current => current + 1);
       setSuitExportHidden(false);
       return;
     }
@@ -6464,6 +6475,7 @@ export function App() {
         }
         setUnrealConnected(Boolean(result?.connected));
         setConnectedUeProjectPath(String(result?.projectPath || ''));
+        setConnectedUeProjectId(String(result?.projectId || '').replace(/[{}-]/g, '').toLowerCase());
         setUnrealConnectedTargetName(String(result?.targetName || "").trim());
         setUnrealConnectionMessage(String(result?.message || "").trim());
       } catch {
@@ -16317,7 +16329,7 @@ export function App() {
                     <div className="detail-heading-row">
                       <h2>
                         <span className={`detail-asset-name${selectedCharacterInfo ? " preserve-asset-name-case" : ""}`} title={characterDisplayName(selectedAsset)}>
-                          {characterDisplayName(selectedAsset)}
+                          {selectedCharacterInfo?.family === 'monster' && !selectedPartView ? selectedCharacterInfo.fields.name || characterDisplayName(selectedAsset) : characterDisplayName(selectedAsset)}
                         </span>
                       </h2>
                       <button type="button" className="detail-name-copy" title={t("复制资产名", "Copy asset name")} aria-label={t(`复制资产名 ${characterDisplayName(selectedAsset)}`, `Copy asset name ${characterDisplayName(selectedAsset)}`)} onClick={() => { void copyAssetName(characterDisplayName(selectedAsset)); }}><Icon name="copy" /></button>
@@ -16335,7 +16347,9 @@ export function App() {
                       <span style={{ userSelect: "text", color: "var(--text-2)", textTransform: "none" }}>{selectedAsset.id}</span>
                     </div>
                     {selectedCharacterInfo && (() => {
-                      const locations = suitExportLocations(selectedAsset.meta, settings.unrealProjectPath || connectedUeProjectPath || '');
+                      const targetProject = settings.unrealProjectPath || connectedUeProjectPath || '';
+                      const sameProject = targetProject.replaceAll('\\', '/').toLowerCase() === connectedUeProjectPath.replaceAll('\\', '/').toLowerCase();
+                      const locations = suitExportLocations(selectedAsset.meta, targetProject, unrealConnected && sameProject ? connectedUeProjectId : '');
                       if (locations) return <div>{locations.length ? locations.map(location => <div className="character-engine-location" key={location.label}>
                         <span className="character-info-label">{location.label} {t("引擎内路径：", "Engine path: ")}</span>
                         <span className="character-engine-path">{location.path.slice(0, -8)}<span className="character-engine-tail">{location.path.slice(-8) || t("未导入", "Not imported")}<button type="button" className="character-engine-copy" disabled={!location.path} title={t("复制引擎内路径", "Copy engine path")} aria-label={t("复制引擎内路径", "Copy engine path")} onClick={() => { void copyCharacterEnginePath(location.path); }}><Icon name="copy" /></button></span></span>
@@ -17299,7 +17313,7 @@ export function App() {
           onSaveSettings={async (patch) => { setSettings(await bridge.updateSettings(patch)); }}
             onCompleted={() => { if (selectedAssetId) void refreshAssetFromDisk(selectedAssetId); }}
           onClose={() => setAnimationExportAssetIds(null)} />}
-        {suitExportAssetIds && <SuitExportDialog assetIds={suitExportAssetIds} weapon={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === id)?.assetType === 'weapon')} monster={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === id)?.assetType === 'monster')} settings={settings} t={t}
+        {suitExportAssetIds && <SuitExportDialog key={suitExportSession} onBusyChange={setSuitExportBusy} assetIds={suitExportAssetIds} weapon={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === id)?.assetType === 'weapon')} monster={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === id)?.assetType === 'monster')} settings={settings} t={t}
           npc={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === componentParentId(id))?.assetType === 'npc')}
           item={suitExportAssetIds.every(id => allAssets.find(asset => asset.id === componentParentId(id))?.assetType === 'item')}
           heroPart={['Hair', 'Face'].find(part => suitExportAssetIds.every(id => heroPartKind(getCharacterAssetInfo(allAssets.find(asset => asset.id === id) || null)?.fields || {}) === part)) || ''}

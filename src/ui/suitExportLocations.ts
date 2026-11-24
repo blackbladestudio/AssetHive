@@ -1,12 +1,14 @@
 type ReceiptEntry = { kind?: string; partSlot?: string; status?: string; action?: string; path?: string; lastSuccessPath?: string; missingInUE?: boolean; livePath?: string; associationPending?: boolean };
-type Receipt = { projectPath?: string; targetRoot?: string; checkedAt?: string; entries?: Record<string, ReceiptEntry> };
+type Receipt = { projectPath?: string; projectId?: string; targetRoot?: string; checkedAt?: string; entries?: Record<string, ReceiptEntry> };
 const isPending = (row: ReceiptEntry) => row.associationPending || ['failed', 'blocked', 'skipped', 'conflict'].includes(row.status || '') || row.status === 'ready' && row.action !== 'unchanged';
 const isMissing = (row: ReceiptEntry) => row.missingInUE ?? (row.status === 'missing' || row.action === 'restore' && row.status !== 'success');
-export function suitExportLocations(meta: Record<string, unknown>, projectPath: string) {
+export function suitExportLocations(meta: Record<string, unknown>, projectPath: string, projectId = '') {
   if (!projectPath) return [];
   const records = Object.values((meta.characterUnrealExports || {}) as Record<string, Receipt>);
   const normalize = (value: string) => value.replaceAll('\\', '/').toLowerCase();
-  const receipt = (projectPath ? records.filter(item => normalize(item.projectPath || '') === normalize(projectPath)) : records)
+  const receipt = (projectPath ? records.filter(item => projectId && item.projectId
+    ? item.projectId.toLowerCase() === projectId.toLowerCase()
+    : normalize(item.projectPath || '') === normalize(projectPath)) : records)
     .sort((a, b) => String(b.checkedAt).localeCompare(String(a.checkedAt)))[0];
   // A global legacy path is not evidence of presence in the selected project.
   if (!receipt) return [];

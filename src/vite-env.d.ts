@@ -107,7 +107,7 @@ declare global {
       getAnimationUnrealFolders?: () => Promise<{ projectPath: string; folders: string[]; truncated: boolean }>;
       pickAnimationUnrealFolder?: (request: { projectPath: string; folder?: string }) => Promise<string | null>;
       getAnimationExportTargets?: (request: { projectPath: string; targets: { key: string; targetPath: string }[] }) => Promise<{ key: string; exists: boolean; targetPath: string }[]>;
-      getUnrealConnectionStatus: () => Promise<{ connected: boolean; projectPath?: string; targetName?: string; reason?: string; message?: string; port?: number }>;
+      getUnrealConnectionStatus: () => Promise<{ connected: boolean; projectPath?: string; projectId?: string; targetName?: string; reason?: string; message?: string; port?: number }>;
       getSuitUnrealStatus: (assetId: string) => Promise<{ ok: boolean; changed?: boolean; message?: string }>;
       downloadCharacterRigFiles: (assetId: string) => Promise<{ ok: boolean; canceled?: boolean; path?: string; count?: number; message?: string }>;
       pickBlenderExecutable: () => Promise<string | null>;

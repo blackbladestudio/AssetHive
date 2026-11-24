@@ -35,9 +35,9 @@ export function CharacterUpdateChanges({ changes, replacements, excludedFiles, t
   replacements?: Array<{ sourcePath: string; storedPath: string }>;
   excludedFiles?: string[]; t: Translate;
 }) {
-  const changed = changes.filter(change => ['added', 'changed'].includes(change.status));
-  const kept = changes.filter(change => !['added', 'changed'].includes(change.status));
-  const label = (status: string) => ({ added: t('新增', 'Add'), changed: t('更新', 'Update'), unchanged: t('无变化', 'Unchanged'), retained: t('未提供 · 保留', 'Not supplied · kept') })[status] || status;
+  const changed = changes.filter(change => ['added', 'changed', 'removed'].includes(change.status));
+  const kept = changes.filter(change => !['added', 'changed', 'removed'].includes(change.status));
+  const label = (status: string) => ({ added: t('新增', 'Add'), changed: t('更新', 'Update'), unchanged: t('无变化', 'Unchanged'), retained: t('未提供 · 保留', 'Not supplied · kept'), removed: t('旧 LOD 已失效 · 移出当前版本', 'Previous LOD invalidated · removed from current version') })[status] || status;
   const renderRows = (items: typeof changes) => <div className="character-update-review-list">{items.map((item, index) => <div className="character-update-review-file" key={`${item.name}:${index}`}><span>{label(item.status)}</span><span title={item.name}>{item.name}</span></div>)}</div>;
   const groups = [
     { label: t('静态模型', 'Static models'), items: changed.filter(item => /^SM_/i.test(item.name)) },
@@ -47,7 +47,7 @@ export function CharacterUpdateChanges({ changes, replacements, excludedFiles, t
   ].filter(group => group.items.length);
   return <section className="character-update-review" aria-label={t('检查结果', 'Check results')}>
     <strong>{changed.length ? t('本次更新', 'This update') : t('文件没有变化', 'No file changes')}</strong>
-    <div className="character-update-stats">{['changed', 'added', 'unchanged', 'retained'].map(status => {
+    <div className="character-update-stats">{['changed', 'added', 'removed', 'unchanged', 'retained'].map(status => {
       const count = changes.filter(item => item.status === status).length;
       return count > 0 ? <span key={status}>{label(status)} {count}</span> : null;
     })}</div>

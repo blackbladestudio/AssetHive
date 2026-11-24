@@ -12,11 +12,18 @@ async function textureSignature(file) {
   if (path.extname(file).toLowerCase() === '.tga') {
     const { TGALoader } = await import('three/examples/jsm/loaders/TGALoader.js');
     ({ data, width, height } = new TGALoader().parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
+    data = Uint16Array.from(data, value => value * 257);
   } else {
-    const result = await require('sharp')(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-    data = result.data; width = result.info.width; height = result.info.height;
+    const sharp = require('sharp');
+    const metadata = await sharp(bytes).metadata();
+    if (!['uchar', 'ushort'].includes(metadata.depth)) throw new Error('此贴图精度尚无法无损核验，未建立关联');
+    const sixteenBit = metadata.depth === 'ushort';
+    const result = await sharp(bytes).toColourspace(sixteenBit ? 'rgb16' : 'srgb').ensureAlpha().raw({depth:sixteenBit ? 'ushort' : 'uchar'}).toBuffer({ resolveWithObject: true });
+    data = sixteenBit ? result.data : Uint16Array.from(result.data, value => value * 257);
+    width = result.info.width; height = result.info.height;
   }
-  return { version: 1, kind: 'texture', width, height, digest: digest(Buffer.from(data)) };
+  const pixels = ArrayBuffer.isView(data) && !(data instanceof Buffer) ? Buffer.from(data.buffer, data.byteOffset, data.byteLength) : data;
+  return { version: 2, kind: 'texture', width, height, digest: digest(pixels) };
 }
 
 function meshSignature(file, materialPaths = {}, lodIndex = null) {
@@ -34,4 +41,5 @@ async function compareLinkContent(source, exported, kind, materials = {}) {
   const left = await read(source, materials.source, materials.sourceLod ?? null), right = await read(exported, materials.target, materials.targetLod ?? null);
   return { equal: JSON.stringify(left) === JSON.stringify(right), source: left, target: right };
 }
-module.exports = { compareLinkContent, textureSignature, meshSignature };
+const meshLodCount = async file => (await meshSignature(file, {}, 'count')).count;
+module.exports = { compareLinkContent, textureSignature, meshSignature, meshLodCount };
