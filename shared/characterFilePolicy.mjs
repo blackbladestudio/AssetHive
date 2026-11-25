@@ -3,8 +3,8 @@ const extension = filePath => {
   return name.match(/(\.[^.]+)$/)?.[1] || "";
 };
 const fileStem = filePath => String(filePath || "").replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") || "";
-const CHARACTER_TEXTURE_MAP_SUFFIX = /_(?:ORM|D|Diffuse|BaseColor|N|Normal|A|O|SS|SSC|Dis|Scatter|SRMF|Mask|Emissive|Emission|E|OpacityMask|Opacity|Alpha|Root|ID|Height|Depth|Tangent|Flow)$/i;
-const channelCodes = { d: 'D', diffuse: 'D', basecolor: 'D', albedo: 'D', n: 'N', normal: 'N', orm: 'ORM', a: 'A', o: 'A', opacity: 'A', opacitymask: 'A', alpha: 'A', ss: 'SS', ssc: 'SSC', dis: 'Dis', scatter: 'Scatter', srmf: 'SRMF', mask: 'Mask', emissive: 'E', emission: 'E', e: 'E', root: 'Root', id: 'ID', height: 'Height', depth: 'Height', tangent: 'Tangent', flow: 'Tangent' };
+const CHARACTER_TEXTURE_MAP_SUFFIX = /_(?:ShadingMask|ORM|D|Diffuse|BaseColor|N|Normal|A|O|SS|SSC|Dis|Scatter|SRMF|Mask|Emissive|Emission|E|OpacityMask|Opacity|Alpha|Root|ID|Height|Depth|Tangent|Flow)$/i;
+const channelCodes = { d: 'D', diffuse: 'D', basecolor: 'D', albedo: 'D', n: 'N', normal: 'N', orm: 'ORM', shadingmask: 'ShadingMask', a: 'A', o: 'A', opacity: 'A', opacitymask: 'A', alpha: 'A', ss: 'SS', ssc: 'SSC', dis: 'Dis', scatter: 'Scatter', srmf: 'SRMF', mask: 'Mask', emissive: 'E', emission: 'E', e: 'E', root: 'Root', id: 'ID', height: 'Height', depth: 'Height', tangent: 'Tangent', flow: 'Tangent' };
 export function characterTextureChannel(filePath, fallbackType = '') {
   const suffix = fileStem(filePath).split('_').at(-1)?.toLowerCase();
   return channelCodes[suffix] || channelCodes[String(fallbackType).toLowerCase()] || '';

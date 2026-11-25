@@ -29,11 +29,57 @@ test('unchanged upload and first SK base do not invalidate an existing SM LOD1',
 });
 test('new LOD1 in the same update survives; retained embedded LODs stay invalid on later uploads', () => {
   const old = [file('SM_Arm'), file('SK_Arm'), file('SM_Arm_LOD1')];
-  const result = plan(old, [file('SK_Arm', 'new'), file('SM_Arm_LOD1', 'new')], ['changed', 'changed']);
-  const staticBase = result.files.find(f => f.normalizedName === 'SM_Arm.fbx');
+  const result = plan(old, [file('SM_Arm', 'new'), file('SM_Arm_LOD1', 'new')], ['changed', 'changed']);
+  const staticBase = result.files.find(f => f.normalizedName === 'SK_Arm.fbx');
   assert.equal(staticBase.ignoreEmbeddedLods, true);
   assert.ok(result.files.some(f => f.normalizedName === 'SM_Arm_LOD1.fbx'));
-  const later = plan(result.files, [file('SM_Arm')], ['unchanged']);
+  const later = plan(result.files, [file('SK_Arm')], ['unchanged']);
   assert.equal(later.files[0].ignoreEmbeddedLods, true);
   assert.equal(later.files[0].lodReset, staticBase.lodReset);
+});
+
+test('replacing SK preserves completed static chain and removes only stale skeletal levels', () => {
+  for (const role of ['skeletalMesh', 'model']) {
+    const old = ['SM_Arm', 'SM_Arm_LOD1', 'SK_Arm', 'SK_Arm_LOD1', 'SK_Arm_LOD2', 'SK_Head_LOD1'].map(n => file(n));
+    old[0].lodCount = 6;
+    const incoming = [{ ...file('SK_Arm', 'new'), role }, { ...old[0] }];
+    const result = plan(old, incoming, ['changed', 'unchanged']);
+    assert.deepEqual(result.files.find(f => f.normalizedName === 'SM_Arm.fbx'), old[0]);
+    assert.deepEqual(result.files.find(f => f.normalizedName === 'SM_Arm_LOD1.fbx'), old[1]);
+    assert.deepEqual(result.changes.filter(c => c.status === 'removed').map(c => c.name).sort(), ['SK_Arm_LOD1.fbx', 'SK_Arm_LOD2.fbx']);
+    assert.ok(result.files[0].lodReset);
+    assert.ok(result.files.some(f => f.normalizedName === 'SK_Head_LOD1.fbx'));
+  }
+});
+
+test('replacing both bases still invalidates both old chains', () => {
+  const old = ['SM_Arm', 'SM_Arm_LOD1', 'SK_Arm', 'SK_Arm_LOD1'].map(n => file(n));
+  const result = plan(old, [file('SK_Arm', 'new'), file('SM_Arm', 'new')], ['changed', 'changed']);
+  assert.equal(result.files.length, 2);
+  assert.equal(result.files[0].lodReset, result.files[1].lodReset);
+});
+
+test('SK replacement export reuses retained SM LOD1 with a skeletal reset', async t => {
+  const { attachCharacterLods } = require('../electron/services/characterLodExport');
+  const old = ['SM_Arm', 'SM_Arm_LOD1', 'SK_Arm', 'SK_Arm_LOD1'].map(n => file(n));
+  const updated = plan(old, [file('SK_Arm', 'new')], ['changed']);
+  const path = require('node:path');
+  const fs = require('node:fs/promises');
+  const dir = await fs.mkdtemp(path.join(require('node:os').tmpdir(), 'rig-update-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  for (const f of updated.files) await fs.writeFile(path.join(dir, f.storedPath), f.sha256);
+  const managed = async (asset, storedPath) => ({ sourcePath: path.join(dir, storedPath), sourceHash: updated.files.find(f => f.storedPath === storedPath).sha256 });
+  const entries = await Promise.all(updated.files.filter(f => !f.normalizedName.includes('_LOD')).map(async f => ({
+    kind: f.role, key: `asset:${f.role}:arm`, name: f.normalizedName, fingerprint: f.sha256,
+    ...await managed(null, f.storedPath)
+  })));
+  const result = { entries };
+  await attachCharacterLods(result, { meta: { characterManifest: { files: updated.files } } }, { includeStaticMeshes: true },
+    async sourcePath => ({ meshKind: path.basename(sourcePath).startsWith('SK_') ? 'skeletalMesh' : 'staticMesh', materialNames: [], lodCount: 1 }), managed);
+  const sk = entries.find(e => e.kind === 'skeletalMesh');
+  const sm = entries.find(e => e.kind === 'staticMesh');
+  assert.ok(sk.config.lodReset);
+  assert.equal(sk.config.skinLodSource.sourcePath, path.join(dir, 'SM_Arm_LOD1.fbx'));
+  assert.equal(sm.config.lodReset, undefined);
+  assert.equal(sm.config.lodSources[0].sourcePath, sk.config.skinLodSource.sourcePath);
 });

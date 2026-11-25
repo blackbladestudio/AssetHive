@@ -68,6 +68,7 @@ async function analyzeFbx(filePath) {
   let skinnedMeshCount = 0;
   const boneNames = new Set();
   const materialNames = new Set();
+  const sourceMaterials = {};
   const bones = new Map();
   object.traverse((child) => {
     const candidates = [child.name, child.userData?.originalName, child.userData?.name, child.geometry?.name];
@@ -81,7 +82,16 @@ async function analyzeFbx(filePath) {
         ? [...new Set(geometry.groups.filter(group => group.count > 0).map(group => group.materialIndex))].map(index => child.material[index])
         : [child.material];
       for (const material of used) {
-        if (material?.name) materialNames.add(material.name);
+        if (material?.name) {
+          materialNames.add(material.name);
+          sourceMaterials[material.name] = {
+            color: material.color?.toArray() || [1, 1, 1],
+            opacity: Number.isFinite(material.opacity) ? material.opacity : 1,
+            emissive: material.emissive?.toArray().map(value => value * (material.emissiveIntensity ?? 1)) || [0, 0, 0],
+            roughness: Number.isFinite(material.roughness) ? material.roughness
+              : Math.sqrt(2 / ((material.shininess || 0) + 2)),
+          };
+        }
       }
       const elementCount = geometry.index?.count ?? geometry.getAttribute("position")?.count ?? 0;
       triangleCount += Math.floor(elementCount / 3);
@@ -110,6 +120,8 @@ async function analyzeFbx(filePath) {
     bounds: { x: size.x * scale, y: size.y * scale, z: size.z * scale },
     triangleCount,
     materialNames: [...materialNames],
+    sourceMaterials,
+    sourceMaterialVersion: 2,
     bones: [...bones.values()],
     meshKind: boneNames.size > 0 || skinnedMeshCount > 0 ? "skeletalMesh" : "staticMesh",
     hasSkeleton: boneNames.size > 0,

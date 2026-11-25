@@ -358,7 +358,7 @@ const { matchCharacterTextureReplacements, prepareCharacterPackageUpdate, update
 const { resolveHistorySource, relinkHistorySource } = require("../electron/services/characterUpdateHistory");
 const { validateCharacterImport } = require("../electron/services/characterImport");
 
-for (const scope of ['package', 'component']) test(`${scope}: replacing LOD0 publishes paired invalidation and removes old LOD files`, async t => {
+for (const scope of ['package', 'component']) for (const kind of ['SM', 'SK']) test(`${scope}: replacing ${kind} LOD0 invalidates only dependent LOD chains`, async t => {
   const f = await fixture(t);
   const names = ['SM_Test_01', 'SM_Test_01_LOD1', 'SK_Test_01_LOD1'];
   for (const name of names) {
@@ -367,19 +367,25 @@ for (const scope of ['package', 'component']) test(`${scope}: replacing LOD0 pub
     await fs.writeFile(path.join(f.asset.path, file.storedPath), name);
   }
   await fs.writeFile(f.asset.metaPath, JSON.stringify(f.asset.meta));
-  const target = f.asset.meta.characterManifest.files.find(file => file.normalizedName === 'SK_Test_01.fbx');
+  const target = f.asset.meta.characterManifest.files.find(file => file.normalizedName === `${kind}_Test_01.fbx`);
   const sourceFolder = await f.makeSource([target]);
   const part = require('../shared/characterComponents.mjs').characterModelPreviewComponents(f.asset).find(part => part.files.some(file => file.normalizedName === target.normalizedName));
-  const options = { ...f, sourceFolder, slot: part.slot };
+  const options = { ...f, sourceFolder, slot: part.slot, analyzeModel: async () => ({
+    meshKind: kind === 'SK' ? 'skeletalMesh' : 'staticMesh', hasSkeleton: kind === 'SK',
+    hasSkin: kind === 'SK', boneCount: kind === 'SK' ? 24 : 0, skinnedMeshCount: kind === 'SK' ? 1 : 0,
+  }) };
   const plan = scope === 'package' ? await prepareCharacterPackageUpdate(options) : await prepareComponentReplacement(options);
-  assert.equal(plan.changes.filter(change => change.status === 'removed').length, 2);
+  assert.equal(plan.changes.filter(change => change.status === 'removed').length, kind === 'SM' ? 2 : 1);
   if (scope === 'package') await updateCharacterPackage({ ...options, token: plan.token, confirmWholePackage: true });
   else await replaceCharacterComponent({ ...options, token: plan.token });
   const files = activeCharacterFiles(await f.reload());
-  assert.ok(!files.some(file => /_LOD1/.test(file.normalizedName)));
+  assert.ok(!files.some(file => file.normalizedName === 'SK_Test_01_LOD1.fbx'));
+  assert.equal(files.some(file => file.normalizedName === 'SM_Test_01_LOD1.fbx'), kind === 'SK');
   const pair = files.filter(file => /^(?:SK|SM)_Test_01\.fbx$/.test(file.normalizedName));
   assert.equal(pair.length, 2);
-  assert.ok(pair.every(file => file.lodReset && file.lodReset === pair[0].lodReset));
+  assert.ok(pair.find(file => file.normalizedName === 'SK_Test_01.fbx').lodReset);
+  if (kind === 'SM') assert.ok(pair.every(file => file.lodReset === pair[0].lodReset));
+  else assert.ok(!pair.find(file => file.normalizedName === 'SM_Test_01.fbx').lodReset);
   assert.ok(files.find(file => file.normalizedName === 'SK_Test_01_WP_Axe.fbx'));
   await fs.access(path.join(f.asset.path, 'Mesh/SM_Test_01_LOD1.fbx'));
 });

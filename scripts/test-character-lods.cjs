@@ -6,6 +6,15 @@ const path = require('node:path');
 const { buildSuitExport } = require('../electron/services/characterSuitExport');
 const { verifyCharacterLodReceipt } = require('../electron/services/characterLodReceipt');
 
+test('waiting for a new rig accepts only a verified base-only skeletal receipt', () => {
+ const entry={kind:'skeletalMesh',config:{lodPolicy:'lod1-reduction-v2',skinLodSource:{sourceHash:'new'}}};
+ const row={status:'success',lodReport:{policy:'lod1-reduction-v2',qualityVersion:1,waitingForRig:true,count:1,pending:[],levels:[{index:0,source:'imported',triangles:100}]}};
+ assert.equal(verifyCharacterLodReceipt(entry,row).status,'success');
+ assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:{...row.lodReport,count:6}}).status,'failed');
+ assert.equal(verifyCharacterLodReceipt({...entry,kind:'staticMesh'},row).status,'failed');
+ assert.equal(verifyCharacterLodReceipt(entry,{...row,lodReport:{...row.lodReport,waitingForRig:false}}).status,'failed');
+});
+
 for (const reverse of [false, true]) test(`SM LOD1 pairs with SK LOD0 independently of arrival order (${reverse})`, async t => {
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'skin-lod-pair-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
  const files=['SK_F01_Medium001_Test_Arm.fbx','SM_F01_Medium001_Test_Arm_LOD1.fbx'].map(name=>({normalizedName:name,storedPath:name,role:name.startsWith('SK')?'skeletalMesh':'staticMesh'}));
@@ -25,6 +34,14 @@ for (const reverse of [false, true]) test(`SM LOD1 pairs with SK LOD0 independen
  asset.meta.characterManifest.files=[files[0]];
  const baseOnly=await buildSuitExport(asset,{},analyze);
  assert.equal(baseOnly.entries.find(e=>e.kind==='skeletalMesh').config.skinLodSource,undefined);
+ files[0].lodReset='replaced-base';
+ const reset=await buildSuitExport(asset,{},analyze);
+ assert.equal(reset.entries.find(e=>e.kind==='skeletalMesh').config.lodResetBaseCount,1);
+ const embedded=await buildSuitExport(asset,{},async file=>({...await analyze(file),lodCount:2}));
+ assert.equal(embedded.entries.find(e=>e.kind==='skeletalMesh').config.lodResetBaseCount,2);
+ files[0].ignoreEmbeddedLods=true;
+ const invalidated=await buildSuitExport(asset,{},async file=>({...await analyze(file),lodCount:2}));
+ assert.equal(invalidated.entries.find(e=>e.kind==='skeletalMesh').config.lodResetBaseCount,1);
 });
 
 test('UE model success without verified artist LODs and reduction is recorded as failure', () => {
@@ -51,6 +68,17 @@ test('UE model success without verified artist LODs and reduction is recorded as
 const { buildFamilyPackagePlan } = require('../electron/services/characterFamilyRules');
 const { auditHeroPackage } = require('../shared/heroPackageRules.mjs');
 const fields = { gender: 'Female', bodyCode: '01', variant: 'Face', serial: '001' };
+
+test('base-only reset rejects a successful receipt retaining old levels, but accepts fresh LOD1', () => {
+ const config={lodPolicy:'lod1-reduction-v2',lodReset:'revision',lodResetBaseCount:1};
+ const base={index:0,triangles:100,source:'imported'};
+ const row={status:'success',action:'updated',lodReport:{policy:'lod1-reduction-v2',qualityVersion:1,count:1,levels:[base]}};
+ assert.equal(verifyCharacterLodReceipt({config},row).status,'success');
+ const old={...row,lodReport:{...row.lodReport,count:6,levels:[base,...Array.from({length:5},(_,i)=>({index:i+1,triangles:50,source:i?'generated':'imported',structureVerified:true}))]}};
+ assert.equal(verifyCharacterLodReceipt({config},old).status,'failed');
+ assert.equal(verifyCharacterLodReceipt({config:{...config,lodSources:[{index:1}]}},old).status,'success');
+ assert.equal(verifyCharacterLodReceipt({config:{...config,lodResetBaseCount:2}},old).status,'success');
+});
 
 test('targeted LOD slots expose five levels per mesh, preserve higher levels and exclude Groom', () => {
  const {characterLodUpdateTargets}=require('../shared/characterLodUpdateTargets.mjs');

@@ -8,7 +8,7 @@ for (const variant of ['Face', 'Hair']) test(`${variant} independent naming and 
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const fields = { gender: 'Male', bodyCode: '01', serial: '001', variant };
   const name = `M01_${variant}001`;
-  const channels = variant === 'Hair' ? ['Opacity','Root','ID','Height','Tangent'] : ['D','N','ORM'];
+  const channels = variant === 'Hair' ? ['Opacity','Root','ID','Height','Tangent','ShadingMask'] : ['D','N','ORM','ShadingMask'];
   const sources = channels.map(c => `T_${variant === 'Hair' ? 'Top_1' : 'Male01_head01'}_${c}.tga`);
   assert.ok(sources.every(require('../shared/characterFilePolicy.mjs').isAllowedCharacterTextureFile));
   assert.deepEqual(auditHeroPackage([`SK_${name}.fbx`, ...sources], fields), []);

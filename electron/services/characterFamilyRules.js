@@ -244,7 +244,7 @@ function buildFamilyPackagePlan(family, sourcePath, files = [], confirmed = {}) 
   if (identity && confirmed.category && (family === 'item' ? gameplay.normalizeCategory(confirmed.category) : confirmed.category).toLowerCase() !== identity.category.toLowerCase()) errors.push("资产类别与规范资产名称不一致");
   const sourcePackages = new Set(files.map((file) => parsePackagePath(family, file)?.packageName.toLowerCase()).filter(Boolean));
   if (family !== 'item' && sourcePackages.size > 1) errors.push("文件来自另一资产包：请分别导入每个资产包");
-  const seen = new Set();
+  const seen = new Map();
   const planned = files.map((sourceFile) => {
     const classification = classifyFamilyFile(family, sourceFile);
     const modelAnalysis = confirmed.modelAnalyses?.get(path.resolve(sourceFile).toLowerCase());
@@ -266,8 +266,9 @@ function buildFamilyPackagePlan(family, sourcePath, files = [], confirmed = {}) 
       ? sourceParts.slice(packageIndex + 1, -1).filter((part) => part !== "." && part !== "..")
       : [];
     const relativePath = [classification.folder, ...otherSubfolders, normalizedName].join("/");
-    if (seen.has(relativePath.toLowerCase())) errors.push(`目标文件重名：${relativePath}`);
-    seen.add(relativePath.toLowerCase());
+    if (seen.has(relativePath.toLowerCase())) {
+      errors.push(`目标文件重名：${relativePath}\n来源一：${seen.get(relativePath.toLowerCase())}\n来源二：${sourceFile}`);
+    } else seen.set(relativePath.toLowerCase(), sourceFile);
     const formId = family === "monster" || family === 'npc' && identity?.formIds?.length
       ? (normalizedName.replace(/\.[^.]+$/, "").match(MONSTER_IDENTITY)?.[2]
         || (classification.role === "other" ? [...sourceParts].reverse().map((part) => part.match(MONSTER_IDENTITY)?.[2]).find(Boolean) : "")

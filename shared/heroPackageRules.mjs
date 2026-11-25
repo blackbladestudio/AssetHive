@@ -58,7 +58,7 @@ function heroAssociationTokens(file) {
   const stem = heroFileStem(file)
     .replace(/^(?:SK|SM|MI|T)_/i, "")
     .replace(/_LOD\d+$/i, "")
-    .replace(/_(?:ORM|D|N|A|Emissive|Emission|E|OpacityMask|Opacity)$/i, "")
+    .replace(/_(?:ShadingMask|ORM|D|N|A|Emissive|Emission|E|OpacityMask|Opacity)$/i, "")
     .toLowerCase();
   return stem.split(/[^a-z0-9]+/).filter(token => token && !["sk", "sm", "mi", "t", "char", "character"].includes(token));
 }

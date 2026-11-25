@@ -130,6 +130,19 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
         <code>{result?.projectPath || settings.unrealProjectPath || t('自动识别当前连接的 UE 工程', 'Use the currently connected UE project')}</code>
         <button type="button" className="character-name-edit" disabled={busy} onClick={onProjectSettings}>{t('设置目标工程', 'Set project')}</button>
       </div>
+      <label className="suit-export-static-option">{t('材质模式', 'Material mode')}
+        <select disabled={busy || done} value={options.materialMode || result?.materialMode || 'formal'}
+          onChange={event => {
+            const next = { ...options, materialMode: event.target.value as 'formal' | 'blockout' };
+            changeOptions(next);
+            void send('inspect', next);
+          }}>
+          <option value="formal">{t('正式资产', 'Production asset')}</option>
+          <option value="blockout">{t('Blockout · 使用 FBX 基础颜色', 'Blockout · FBX base colors')}</option>
+        </select>
+      </label>
+      {(options.materialMode || result?.materialMode) === 'blockout' && <p className="settings-field-hint">{t('允许无贴图和任意命名的多材质槽。使用 M_Blockout 母材质创建子材质实例，保留 FBX 基础颜色及分配；透明度等效果以母材质设置为准。', 'Allows untextured meshes and arbitrary material slot names. Creates instances of M_Blockout with FBX base colors and assignments; opacity and other effects follow the master material.')}</p>}
+      <p className="settings-field-hint">{t('更新模型不会自动切换材质模式。转正式时，请补齐正式材质及贴图，选择“正式资产”并重新检查后发送。成功后挂上正式材质；旧 Blockout 材质保留在原文件夹，由人工清理，不自动检测或删除。', 'Updating a model does not switch material mode. Supply production materials and textures, select Production asset, recheck and send. A successful send assigns production materials. Old Blockout materials stay in their folder for manual cleanup; they are not scanned or deleted automatically.')}</p>
       <label className="suit-export-static-option"><input type="checkbox" disabled={busy && phase === 'apply' || done} checked={Boolean(options.includeStaticMeshes)} onChange={event => {
         const checked = event.target.checked;
         setOptions(current => ({ ...current, includeStaticMeshes: checked }));

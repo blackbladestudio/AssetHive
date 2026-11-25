@@ -14,13 +14,13 @@ export function weaponSideInternal(value, owner = '') {
   if (lod) return weaponSideInternal(value.slice(0, lod.index), owner) + `_LOD${Number(lod[1])}`;
   const ownerPrefix = String(owner || '').match(/^([A-Za-z]+\d{3})_/i)?.[1];
   if (ownerPrefix) {
-    const shared = String(value || '').match(new RegExp('^((?:SM|SK|SKEL|MI|M|T)_)' + ownerPrefix + '(_(?:Physics|D|N|ORM|A|E))?$', 'i'));
+    const shared = String(value || '').match(new RegExp('^((?:SM|SK|SKEL|MI|M|T)_)' + ownerPrefix + '(_(?:Physics|ShadingMask|D|N|ORM|A|E))?$', 'i'));
     if (shared) return `${shared[1]}${owner}${shared[2] || ''}`;
   }
-  const short = String(value || '').match(/^((?:SM|SK|SKEL|MI|M|T)_)?([A-Za-z]+\d{3})_([LR])(_(?:Physics|D|N|ORM|A|E))?$/i);
+  const short = String(value || '').match(/^((?:SM|SK|SKEL|MI|M|T)_)?([A-Za-z]+\d{3})_([LR])(_(?:Physics|ShadingMask|D|N|ORM|A|E))?$/i);
   if (short && owner.toLowerCase().startsWith(short[2].toLowerCase() + '_')) return `${short[1] || ''}${owner}_${short[3].toUpperCase()}${short[4] || ''}`;
   if (short) return value;
-  return String(value || '').replace(/^((?:(?:SM|SK|SKEL|MI|M|T)_)?[A-Za-z]+\d{3})_([LR])_(.+?)(_(?:D|N|ORM|A|E|Physics))?$/i,
+  return String(value || '').replace(/^((?:(?:SM|SK|SKEL|MI|M|T)_)?[A-Za-z]+\d{3})_([LR])_(.+?)(_(?:ShadingMask|D|N|ORM|A|E|Physics))?$/i,
     (_, head, side, name, tail = '') => `${head}_${name}_${side.toUpperCase()}${tail}`);
 }
 export function weaponSideOutput(value) {
@@ -117,7 +117,7 @@ export function weaponFileSuffix(sourceStem, role, sourceIdentity) {
     const slot = weaponModelSlot(raw);
     if (slot) return '_' + slot;
   }
-  if (role === 'texture') suffix = suffix.replace(/_(?:D|N|ORM|A)$/i, '');
+  if (role === 'texture') suffix = suffix.replace(/_(?:ShadingMask|D|N|ORM|A)$/i, '');
   if (role === 'physicsAsset') suffix = suffix.replace(/_Physics$/i, '');
   return suffix;
 }

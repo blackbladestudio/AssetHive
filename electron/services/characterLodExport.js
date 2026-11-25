@@ -32,10 +32,11 @@ async function attachCharacterLods(result, asset, options, analyze, managedFile)
     const entry = result.entries.find(item => ['staticMesh', 'skeletalMesh'].includes(item.kind)
       && absolute(item.sourcePath) === absolute(source.sourcePath));
     if (!entry) continue;
-    entry.config = { ...entry.config, lodReset: base.lodReset,
+    const lodResetBaseCount = base.ignoreEmbeddedLods ? 1 : await embeddedLodCount(source, analyze);
+    entry.config = { ...entry.config, lodReset: base.lodReset, lodResetBaseCount,
       ...(base.ignoreEmbeddedLods ? { ignoreEmbeddedLods: true } : {}) };
     entry.fingerprint = crypto.createHash('sha256').update(JSON.stringify({ previous: entry.fingerprint,
-      lodReset: base.lodReset, ignoreEmbeddedLods: Boolean(base.ignoreEmbeddedLods) })).digest('hex');
+      lodReset: base.lodReset, lodResetBaseCount, ignoreEmbeddedLods: Boolean(base.ignoreEmbeddedLods) })).digest('hex');
   }
   const chains = new Map();
   for (const file of files) {

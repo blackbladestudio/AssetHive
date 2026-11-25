@@ -74,7 +74,7 @@ async function inspectCharacterModel(filePath, analyze = analyzeFbxInWorker) {
   if (cache.has(key)) return cache.get(key);
   if (analyze === analyzeFbxInWorker) {
     const stored = await readCache('model', key);
-    if (stored?.sourceHash === key && stored.result?.meshKind && !stored.result.error) return remember(cache, key, stored.result);
+    if (stored?.sourceHash === key && stored.result?.meshKind && stored.result.sourceMaterialVersion === 2 && !stored.result.error) return remember(cache, key, stored.result);
   }
   const result = await analyze(source.sourcePath, { geometryOnlyTextures: true });
   if (result.error) return result;

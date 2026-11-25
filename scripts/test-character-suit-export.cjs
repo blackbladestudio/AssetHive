@@ -7,6 +7,44 @@ const crypto = require('node:crypto');
 const { buildSuitExport: build, managedFile } = require('../electron/services/characterSuitExport');
 const buildSuitExport = (asset, options, analyze) => build(asset, options, analyze, async () => false);
 
+test('explicit blockout preserves arbitrary multi-slot colors and stable resources without textures', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'character-blockout-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'mesh.fbx'), 'blockout');
+  const asset = { id: 'bo', name: 'GreatDingBeast', assetType: 'monster', path: dir, meta: { category: '1_Boss', character: { name: 'GreatDingBeast' }, characterManifest: { files: [{ role: 'staticMesh', normalizedName: 'SM_GreatDingBeast_01.fbx', storedPath: 'mesh.fbx' }] } } };
+  const analyze = async () => ({ meshKind: 'staticMesh', materialNames: ['blinn1', 'namespace:红色球'], sourceMaterials: {
+    blinn1: { color: [1, 0, 0], opacity: 1, emissive: [0, 0, 0], roughness: .5 },
+    'namespace:红色球': { color: [0, 1, 0], opacity: .5, emissive: [0, 0, 0], roughness: 1 }
+  } });
+  const options = { includeStaticMeshes: true, materialMode: 'blockout' };
+  const result = await buildSuitExport(asset, options, analyze);
+  assert.deepEqual(result.materialRequests, []);
+  const mesh = result.entries.find(e => e.kind === 'staticMesh');
+  assert.deepEqual(mesh.unresolvedMaterials, []);
+  assert.deepEqual(Object.keys(mesh.materials), ['blinn1', 'namespace:红色球']);
+  const materials = result.entries.filter(e => e.kind === 'material');
+  assert.equal(materials.length, 2);
+  assert.ok(materials.every(m => m.name.startsWith('MI_BO_') && m.key.endsWith(':mi')));
+  assert.ok(materials.every(m => m.config.parentPath === '/Game/MaterialLibrary/Character/Common/M_Blockout'));
+  assert.deepEqual(materials[0].config.blockoutMaterial.color, [1, 0, 0]);
+  assert.equal(materials[1].config.blockoutMaterial.opacity, .5);
+  assert.equal(result.entries.filter(e => e.kind === 'texture').length, 0);
+  assert.equal((await buildSuitExport(asset, options, analyze)).manifestHash, result.manifestHash);
+  assert.equal((await buildSuitExport(asset, { includeStaticMeshes: true }, analyze)).materialRequests.length, 2);
+  assert.equal((await buildSuitExport(asset, { ...options, linkOnly: true }, analyze)).materialRequests.length, 2);
+});
+
+test('blockout supplies white fallback for an untextured mesh with no material slots', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'blockout-empty-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'mesh.fbx'), 'white');
+  const asset = { id: 'empty', name: 'Test', assetType: 'monster', path: dir, meta: { category: '1_Boss', character: { name: 'Test' }, characterManifest: { files: [{ role: 'staticMesh', normalizedName: 'SM_Test_01.fbx', storedPath: 'mesh.fbx' }] } } };
+  const result = await buildSuitExport(asset, { includeStaticMeshes: true, materialMode: 'blockout' }, async () => ({ meshKind: 'staticMesh', materialNames: [] }));
+  assert.deepEqual(result.materialRequests, []);
+  assert.deepEqual(result.entries.find(e => e.kind === 'material').config.blockoutMaterial.color, [1, 1, 1]);
+  assert.equal(result.entries.find(e => e.kind === 'staticMesh').config.blockoutFallback, true);
+});
+
 test('local monster blockout resolves exact engine placeholder aliases without owning a material', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'monster-blockout-'));
   t.after(() => fs.rm(dir, {recursive:true,force:true,maxRetries:5}));

@@ -47,7 +47,7 @@ async function managedFile(asset, relative) {
 }
 
 function materialGroup(name, parentName) {
-  return String(name || '').replace(/^(?:MI|M|T)_/i, '').replace(/_(D|N|ORM|A|O|Opacity|OpacityMask|E|Emissive|Emission|SS|SSC|Dis|Root|ID|Height|Depth|Tangent|Flow|Scatter|SRMF|Mask)$/i, '').replace(new RegExp('^' + parentName + '_', 'i'), '');
+  return String(name || '').replace(/^(?:MI|M|T)_/i, '').replace(/_(ShadingMask|D|N|ORM|A|O|Opacity|OpacityMask|E|Emissive|Emission|SS|SSC|Dis|Root|ID|Height|Depth|Tangent|Flow|Scatter|SRMF|Mask)$/i, '').replace(new RegExp('^' + parentName + '_', 'i'), '');
 }
 
 function inferMonsterMaterialType(groupName) {
@@ -68,9 +68,9 @@ function mergeSuitExportOptions(saved = {}, requested = {}) {
 function monsterWeaponSubject(file, ownerName) {
   file = { ...file, normalizedName: require('../../shared/characterLods.cjs').strip(file.normalizedName) };
   const owned = ownedWeaponIdentity(String(file.normalizedName || '').replace(/\.[^.]+$/, ''), ownerName);
-  if (owned) return owned.suffix.replace(/_(?:D|N|ORM|A|E|Emissive|Emission)$/i, '');
+  if (owned) return owned.suffix.replace(/_(?:ShadingMask|D|N|ORM|A|E|Emissive|Emission)$/i, '');
   const stem = String(file.normalizedName || file.storedPath || '').replaceAll('\\', '/').split('/').pop().replace(/\.[^.]+$/, '')
-    .replace(/^(?:SM|SK|SKEL|MI|M|T)_/i, '').replace(/_(?:D|N|ORM|A|E|Emissive|Emission)$/i, '');
+    .replace(/^(?:SM|SK|SKEL|MI|M|T)_/i, '').replace(/_(?:ShadingMask|D|N|ORM|A|E|Emissive|Emission)$/i, '');
   const legacy = /(?:^|_)WP_(.+)$/i.exec(stem);
   if (legacy) return legacy[1];
   if (file.componentRole !== 'weapon' && !/(?:^|\/)Weapon\//i.test(String(file.storedPath || file.sourcePath || '').replaceAll('\\', '/'))) return '';
@@ -285,7 +285,18 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
       const linkMaterialPaths = {};
       const sharedMaterialSlots = [];
       const unresolvedMaterials = [];
-      for (const original of analysis.materialNames || []) {
+      const blockout = options.materialMode === 'blockout' && !options.linkOnly;
+      for (const original of (analysis.materialNames?.length ? analysis.materialNames : blockout ? ['DefaultMaterial'] : [])) {
+        if (blockout) {
+          const materialKey = `${meshKey}:blockout:${hash(original).slice(0, 16)}:mi`;
+          const materialName = `MI_BO_${meshName}_${hash(original).slice(0, 12)}`;
+          const appearance = analysis.sourceMaterials?.[original] || { color: [1, 1, 1], opacity: 1, emissive: [0, 0, 0], roughness: 1 };
+          materials[original] = materialKey;
+          entries.push({ key: materialKey, kind: 'material', name: materialName, partSlot: part.slot,
+            targetPath: `${resourceRoot}/Material/Blockout/${materialName}`, textures: {},
+            sourceHash: hash(appearance), config: { version: VERSION, family, parentPath: '/Game/MaterialLibrary/Character/Common/M_Blockout', blockoutMaterial: appearance, blockoutInstanceVersion: 1 } });
+          continue;
+        }
         const mappingKey = `${meshKey}|${original}`;
         const recovered = asset.meta?.characterUEIntake?.materialBindings?.[mappingKey];
         const importChoice = family === 'suit' && fields.materialSlotMappings?.[suitMaterialChoiceKey(heroSuitPart(file.normalizedName), original)];
@@ -342,31 +353,32 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
         usedGroups.add(group.key);
         materials[original] = `${assetId}:material:${group.key}`;
       }
-      if (!weapon && !item && !(analysis.materialNames || []).length) unresolvedMaterials.push('模型未提供材质槽');
+      if (!blockout && !weapon && !item && !(analysis.materialNames || []).length) unresolvedMaterials.push('模型未提供材质槽');
       entries.push({ key: meshKey, kind, name: meshName, partSlot: part.slot,
         targetPath: `${kind === 'skeletalMesh' ? skeletalDirectory : meshDirectory + '/StaticMesh'}/${meshName}`,
         ...source, materials, externalMaterials, linkMaterialPaths, sharedMaterialSlots, unresolvedMaterials, bones: analysis.bones || [],
         ...(kind === 'skeletalMesh' ? { skeletonPath: ownSkeleton ? `${skeletalDirectory}/SKEL_${outputName}${outputSubject ? '_' + outputSubject : ''}` : String(options.skeletonPath || DEFAULT_SKELETON) } : {}),
-        config: { version: VERSION, family, ...(item ? { itemMaterialVersion: 1 } : {}), ...(ownSkeleton && kind === 'skeletalMesh' ? { ownSkeleton: true,
+        config: { version: VERSION, family, ...(blockout ? { materialMode: 'blockout', blockoutFallback: !analysis.materialNames?.length } : {}), ...(item && !blockout ? { itemMaterialVersion: 1 } : {}), ...(ownSkeleton && kind === 'skeletalMesh' ? { ownSkeleton: true,
           physicsAssetPath: `${skeletalDirectory}/SK_${outputName}${outputSubject ? '_' + outputSubject : ''}_Physics` } : {}),
           importAnimations: false, createPhysicsAsset: ownSkeleton && kind === 'skeletalMesh', updateReferencePose: false } });
     }
   }
-  if (!selectedSlot) for (const group of groups.values()) usedGroups.add(group.key);
+  if (!selectedSlot && !(options.materialMode === 'blockout' && !options.linkOnly)) for (const group of groups.values()) usedGroups.add(group.key);
   for (const groupKey of usedGroups) {
     const group = groups.get(groupKey);
     const suitHair = family === 'suit' && /(?:^|_)(?:hair|fur)(?:_|$)/i.test(group.name.replace(/([a-z])([A-Z])/g, '$1_$2'));
     const resourceRoot = monster ? `${monsterMeshRoot}${group.monsterWeapon ? '/Weapon' : ''}` : group.monsterWeapon ? `${targetRoot}/Weapon` : targetRoot;
     const groupOutputName = group.monsterWeapon ? group.name : outputSuffix(group.name);
     const textureKeys = {};
+    const groupUsesVT = item || !(weapon || group.monsterWeapon) || group.files.some(file => file.channel === 'ShadingMask');
     for (const { file, channel } of group.files) {
       const textureName = safeName(`T_${group.monsterWeapon && !monster ? 'WP_' : ''}${outputName}${groupOutputName ? '_' + groupOutputName : ''}_${channel}`);
       const key = `${assetId}:texture:${groupKey}:${channel}`;
       // Auxiliary textures remain available in UE; only documented parameters
       // of the existing parent material receive automatic bindings.
       if (suitHair) {
-        if (['D', 'A', 'Root', 'ID', 'Height', 'Tangent'].includes(channel)) textureKeys[channel === 'A' ? 'Opacity' : channel] = key;
-      } else if (['D', 'N', 'ORM', 'A', 'E'].includes(channel) || item && ['SS', 'SSC', 'Dis'].includes(channel)) textureKeys[channel] = key;
+        if (['D', 'A', 'Root', 'ID', 'Height', 'Tangent', 'ShadingMask'].includes(channel)) textureKeys[channel === 'A' ? 'Opacity' : channel] = key;
+      } else if (['D', 'N', 'ORM', 'A', 'E', 'ShadingMask'].includes(channel) || item && ['SS', 'SSC', 'Dis'].includes(channel)) textureKeys[channel] = key;
       const source = managedSources.get(file.storedPath);
       let validationError = '';
       if (channel === 'N') {
@@ -383,7 +395,7 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
       }
       entries.push({ key, kind: 'texture', name: textureName, groupName: group.name || name, channel, targetPath: `${resourceRoot}/${ownSkeleton ? 'Texture' : 'Textures'}/${textureName}`,
         ...source, validationError, config: { version: VERSION, ...(channel === 'N' ? { normalFormat: options.normalFormat || asset.meta.normalMapFormat || 'unknown' } : {}),
-          family, virtualTexture: item || !(weapon || group.monsterWeapon), maxSize: item ? 2048 : 0, lodBias: 0, preserveAlpha: true,
+          family, virtualTexture: groupUsesVT, maxSize: item ? 2048 : 0, lodBias: 0, preserveAlpha: true,
           ...(item ? { itemMaterialVersion: 1 } : {}) } });
     }
     const materialName = `MI_${group.monsterWeapon && !monster ? 'WP_' : ''}${outputName}${groupOutputName ? '_' + groupOutputName : ''}`;
@@ -406,7 +418,7 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
         : weapon || group.monsterWeapon ? { version: VERSION, family,
         ...(group.monsterWeapon ? { materialRole: 'monsterWeapon' } : {}),
         parentPath: `/Game/MaterialLibrary/Weapon/Common/${group.monsterWeapon ? 'M_Weapon_Monster' : 'M_Weapon_Slab'}`,
-        virtualTexture: false, useOpacityMasked: Boolean(textureKeys.A) }
+        virtualTexture: groupUsesVT, useOpacityMasked: Boolean(textureKeys.A) }
         : monster ? (() => {
           const materialRole = materialType === 'skin' ? 'monsterSkin' : 'monsterCloth';
           return { version: VERSION, family, materialRole,
@@ -452,6 +464,10 @@ async function sendSuitJob(assets, options, onProgress, client) {
   for (const [assetIndex, asset] of uniqueAssets.entries()) {
     const saved = projectIdentity.projectReceipt(asset.meta, editor)?.options || {};
     const selected = mergeSuitExportOptions(saved, options.suitOptions);
+    if (selected.materialMode === 'blockout'
+      && !await require('./characterPluginCapabilities').hasCharacterCapability(client, editor, 'characterBlockoutInstancesV2')) {
+      throw new Error('请更新 AssetHive UE 插件，以保留 Blockout 的多材质槽和基础颜色。');
+    }
     const overrides = [selected.skeletonSelection, ...Object.values(selected.skeletonOverrides || {})];
     if ((asset.assetType !== 'suit' || overrides.some(choice => choice && choice.mode !== 'auto'))
       && !editor.capabilities.includes('characterUpgradeV1')) {
@@ -465,6 +481,10 @@ async function sendSuitJob(assets, options, onProgress, client) {
     reportPreparation(1, '文件检查完成');
     console.info(`[SuitExport] manifest ${asset.id}: ${Date.now() - startedAt}ms`);
   }
+  if (suits.some(suit => suit.entries.some(entry => entry.channel === 'ShadingMask'))
+    && !await require('./characterPluginCapabilities').hasCharacterCapability(client, editor, 'characterShadingMaskV1')) {
+    throw new Error('请更新 AssetHive UE 插件，以支持 ShadingMask 贴图及材质参数绑定。');
+  }
   // Selecting an owner and its parts (or multiple parts) must never duplicate a resource.
   const uniqueSuits = new Map();
   for (const suit of suits) {
@@ -477,6 +497,10 @@ async function sendSuitJob(assets, options, onProgress, client) {
     }
   }
   const mergedSuits = [...uniqueSuits.values()];
+  if (mergedSuits.some(suit => suit.entries.some(entry => entry.config?.lodReset))
+    && !await require('./characterPluginCapabilities').hasCharacterCapability(client, editor, 'characterLodResetV2')) {
+    throw new Error('请更新 AssetHive UE 插件：当前插件不能验证 LOD0 替换后的旧 LOD 清理，未发送模型。');
+  }
   if (mergedSuits.some(suit => suit.entries.some(entry => entry.config?.lodPolicy === 'lod1-reduction-v2'))
     && !editor.capabilities.includes('characterLodsV2')) {
     throw new Error('请更新 AssetHive UE 插件并重启编辑器：当前插件不支持 SM/SK LOD 导入验证与 LOD1 自动减面。');
@@ -554,7 +578,7 @@ async function sendSuitJob(assets, options, onProgress, client) {
       key: entry.key, name: entry.groupName || suit.name, assetName: suit.name, type: entry.materialType || ''
     })));
   onProgress?.({ percent: 100, message: phase === 'inspect' ? '检查完成' : '发送完成' });
-  return { ok: true, suitResult: { ...result, monsterMaterialGroups, materialRequests: mergedSuits.flatMap(suit => suit.materialRequests), projectPath: editor.projectPath, manifestHash: hash(mergedSuits), phase },
+  return { ok: true, suitResult: { ...result, materialMode: [...effectiveOptions.values()].every(value => value.materialMode === 'blockout') ? 'blockout' : 'formal', monsterMaterialGroups, materialRequests: mergedSuits.flatMap(suit => suit.materialRequests), projectPath: editor.projectPath, manifestHash: hash(mergedSuits), phase },
     message: phase === 'inspect' ? '套装检查完成' : '套装逐项处理完成' };
 }
 

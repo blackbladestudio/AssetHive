@@ -17414,7 +17414,7 @@ export function App() {
                   {!characterUpdatePlan.changes.some(file => /\.fbx$/i.test(file.name)) && <label className={`character-update-confirm${!characterUpdateConfirmed ? " import-required-label" : ""}`}><input type="checkbox" checked={characterUpdateConfirmed} onChange={event => setCharacterUpdateConfirmed(event.target.checked)} disabled={busy} />{t("我已确认本次更新内容", "I have reviewed this update")}</label>}
                 </>}
               </>}
-              <div className="confirm-actions"><button className="confirm-btn ghost" disabled={busy} onClick={() => setCharacterUpdateTarget(null)}>{t("取消", "Cancel")}</button><button className="confirm-btn" disabled={busy || !characterUpdatePlan || characterUpdatePlan.unchanged || !characterUpdateConfirmed || !characterUpdateNote.trim()} onClick={() => { void confirmCharacterUpdate(); }}>{t("确认更新", "Confirm Update")}</button></div>
+              <div className="confirm-actions"><button className="confirm-btn ghost" disabled={busy} onClick={() => setCharacterUpdateTarget(null)}>{t("取消", "Cancel")}</button><button className="confirm-btn primary" disabled={busy || !characterUpdatePlan || characterUpdatePlan.unchanged || !characterUpdateConfirmed || !characterUpdateNote.trim()} onClick={() => { void confirmCharacterUpdate(); }}>{t("确认更新", "Confirm Update")}</button></div>
             </div>
           </div>
         )}

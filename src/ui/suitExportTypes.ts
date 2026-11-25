@@ -1,5 +1,6 @@
 export type SkeletonSelection = { mode: 'auto' | 'existing' | 'create'; path?: string };
 export type SuitExportOptions = {
+  materialMode?: 'formal' | 'blockout';
   linkOnly?: boolean;
   skeletonSelection?: SkeletonSelection;
   skeletonOverrides?: Record<string, SkeletonSelection>;
@@ -14,13 +15,14 @@ export type SuitExportRow = {
   assetId: string; key: string; name: string; kind?: string; targetPath?: string; path?: string;
   status: string; action: string; message?: string;
   partSlot?: string; groupName?: string; oldKey?: string;
-  lodReport?: { policy?: string; skinTransferVersion?: number; count: number; levels?: { index: number; triangles: number; source: string }[]; missing?: number[]; pending?: number[]; missingManual?: number[] };
+  lodReport?: { policy?: string; skinTransferVersion?: number; waitingForRig?: boolean; count: number; levels?: { index: number; triangles: number; source: string }[]; missing?: number[]; pending?: number[]; missingManual?: number[] };
   lodCheckedAt?: string;
   dependencies?: string[];
   skeletonSelection?: SkeletonSelection;
   skeletonPath?: string;
 };
 export type SuitExportResult = {
+  materialMode?: 'formal' | 'blockout';
   entries: SuitExportRow[]; inspectToken: string; manifestHash: string; projectPath: string;
   phase: 'inspect' | 'apply';
   monsterMaterialGroups?: { key: string; name: string; assetName: string; type: '' | 'cloth' | 'skin' }[];

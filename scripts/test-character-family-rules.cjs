@@ -12,6 +12,16 @@ const {
 const { buildScope } = require("./import-draft-harness.cjs");
 const { auditMonsterPackage } = require("../shared/monsterPackageAudit.mjs");
 
+test('texture collision reports both source files without discarding either', () => {
+  const files = ['C:/art/SK_Bow003_JingruiGong.fbx',
+    'C:/art/first/T_Bow003_JingruiGong_D.tga', 'C:/art/second/T_Bow003_JingruiGong_D.tga'];
+  const plan = buildFamilyPackagePlan('weapon', files[0], files, { assetName: 'Bow003_JingruiGong', category: 'Bow' });
+  assert.equal(plan.ok, false);
+  const error = plan.errors.find(value => value.includes('目标文件重名'));
+  assert.ok(error.includes(files[1]) && error.includes(files[2]), error);
+  assert.equal(plan.files.length, 3);
+});
+
 test('NPC H/NH confirmation uses canonical categories without changing model identity', () => {
   for (const [alias, category] of [['H', 'Human'], ['NH', 'Nonhuman']]) {
     const source = `C:/NPC/${alias}/SK_Keeper_01/Mesh/SK_Keeper_01.fbx`;

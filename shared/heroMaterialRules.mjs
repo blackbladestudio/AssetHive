@@ -1,4 +1,4 @@
-const channels = { d: 'D', diffuse: 'D', basecolor: 'D', n: 'N', normal: 'N', orm: 'ORM', a: 'Opacity', alpha: 'Opacity', opacity: 'Opacity', opacitymask: 'Opacity', root: 'Root', id: 'ID', height: 'Height', depth: 'Height', tangent: 'Tangent', flow: 'Tangent', e: 'E', emissive: 'E', emission: 'E' };
+const channels = { d: 'D', diffuse: 'D', basecolor: 'D', n: 'N', normal: 'N', orm: 'ORM', shadingmask: 'ShadingMask', a: 'Opacity', alpha: 'Opacity', opacity: 'Opacity', opacitymask: 'Opacity', root: 'Root', id: 'ID', height: 'Height', depth: 'Height', tangent: 'Tangent', flow: 'Tangent', e: 'E', emissive: 'E', emission: 'E' };
 export function heroTextureChannel(source) {
   const stem = String(source || '').replace(/\.[^.]+$/, '');
   const token = stem.split(/[_/\\]/).at(-1).toLowerCase();

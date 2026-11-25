@@ -162,7 +162,7 @@ function inferCharacterSourcePackageName(folderName, files = []) {
 
 function inferCharacterTextureType(filePath) {
   const stem = String(filePath || "").replace(/\\/g, "/").split("/").pop()?.replace(/\.[^.]+$/, "") || "";
-  const hairChannel = /_(Opacity|Alpha|Root|ID|Height|Depth|Tangent|Flow|Scatter|SRMF|Mask)$/i.test(stem) ? require('../../shared/heroMaterialRules.mjs').heroTextureChannel(filePath) : '';
+  const hairChannel = /_(Opacity|Alpha|Root|ID|Height|Depth|Tangent|Flow|ShadingMask|Scatter|SRMF|Mask)$/i.test(stem) ? require('../../shared/heroMaterialRules.mjs').heroTextureChannel(filePath) : '';
   return hairChannel || (/(?:^|_)A$/i.test(stem) ? "Opacity" : "");
 }
 

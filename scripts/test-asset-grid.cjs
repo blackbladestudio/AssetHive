@@ -13,6 +13,16 @@ const { populatePreviewSize } = require("../electron/services/previewSize");
 const asset = (id, size, assetType = "3d") => ({ id: String(id), assetType, meta: { previews: { relativeSize: size } } });
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.00001, `${actual} != ${expected}`);
 
+test('mixed character records never flatten outfit rows when a legacy item lacks topCategory', () => {
+  const cards = [asset('s', '1x1', 'suit'), ...['head', 'upbody', 'downbody', 'arm'].map(slot => ({
+    ...asset(`s::part::${slot}`, '1x1', 'suit'), name: `SM_Suit_${slot}`
+  })), asset('legacy-item', '1x1', 'item')];
+  const layout = buildAssetGridLayout(cards, 1000, false, 12, true, true);
+  assert.equal(layout.outfitGroups[0].id, 's');
+  assert.equal(new Set(layout.items.filter(item => item.asset.id.startsWith('s')).map(item => item.y)).size, 1);
+  assert.ok(layout.items.find(item => item.asset.id === 'legacy-item').y > layout.outfitGroups[0].y + layout.outfitGroups[0].height);
+});
+
 test('monster variants remain independent cards without columns or collapsible headings', () => {
   const shared = { ...asset('guard', '1x1', 'monster'), name: 'Guard', meta: { character: { name: 'Guard', entityKey: 'guard-family', monsterVariant: 'NormalShield' }, monsterVariants: [
     { id: 'NormalShield', name: 'Normal Shield', assetIds: ['guard'] }, { id: 'BigShield', name: 'Big Shield', assetIds: ['guard'] }

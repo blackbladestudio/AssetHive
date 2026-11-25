@@ -192,7 +192,10 @@ export function buildAssetGridLayout(list: AssetRecord[], viewportWidth: number,
   const narrow = viewport <= 900;
   const medium = viewport <= 1200;
   const characterGrid = list.length > 0 && list.every((asset) => asset.topCategory === "character" || ["suit", "monster", "npc", "weapon"].includes(String(asset.assetType || "").toLowerCase()));
-  const fixed = fixedCharacterCards && characterGrid;
+  // The selected character context owns the layout. A legacy record with a
+  // missing category must not flatten every other outfit into the generic grid.
+  const fixed = fixedCharacterCards && list.some(asset => asset.topCategory === 'character'
+    || ['suit', 'monster', 'npc', 'weapon', 'item', 'gameplayitem'].includes(String(asset.assetType || '').toLowerCase()));
   const gap = fixed ? 12 : narrow ? 6 : medium ? 8 : 12;
   // Character cards keep the same origin when the details pane changes viewport width.
   const padding = Math.min(inset ?? (fixed ? 24 : narrow ? 10 : medium ? 12 : 24), Math.max(0, (viewport - 1) / 2));
