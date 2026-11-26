@@ -1,4 +1,5 @@
 const path = require("node:path");
+const { characterMaterialSuffix } = require('../../shared/characterMaterialSuffix.mjs');
 const { ownedWeaponIdentity } = require('../../shared/ownedWeaponNaming.mjs');
 const gameplay = require('../../shared/gameplayCategories.mjs');
 const { gameplayIdentity, gameplayFileStem, gameplayCategoryFromName } = require('../../shared/gameplayNaming.mjs');
@@ -164,7 +165,8 @@ function expectedFamilyStem(family, packageInfo, role, sourceStem) {
     return base;
   }
   const variant = family === "monster" || numberedNpc ? (confirmedForm !== null ? (confirmedForm === 'base' ? '' : confirmedForm) : sourceStem.match(/_(\d{2})(?:_(?:ORM|D|N|A|Physics))?$/i)?.[1] || "") : "";
-  const suffix = family === 'weapon' ? weaponFileSuffix(sourceStem, role, packageInfo.sourcePackageName || packageInfo.packageName) : '';
+  const suffix = family === 'weapon' ? weaponFileSuffix(sourceStem, role, packageInfo.sourcePackageName || packageInfo.packageName)
+    : characterMaterialSuffix(sourceStem, role, [packageInfo.sourcePackageName, packageInfo.sourceName, packageInfo.packageName, subject]);
   const rawBase = `${prefix}_${subject}${suffix}${variant ? `_${variant}` : ""}`;
   const base = family === 'weapon' ? weaponPackageOutput(weaponSideOutput(rawBase), subject) : rawBase;
   if (role === "physicsAsset") return `${base}_Physics`;

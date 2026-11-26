@@ -60,7 +60,7 @@ class UnrealDiscovery extends EventEmitter {
     const other = this.clients.find(client => client.editorInfo && !client.client?.destroyed);
     if (other) return { state: "target-mismatch", connected: false, port: other.port,
       projectPath: other.editorInfo.projectPath, editorPath: other.editorInfo.editorPath };
-    const diagnostic = this.clients.find(client => ["incompatible", "handshake-timeout", "heartbeat-timeout", "handshaking"].includes(client.diagnostic.state))?.diagnostic;
+    const diagnostic = this.clients.find(client => ["editor-busy", "incompatible", "handshake-timeout", "heartbeat-timeout", "handshaking"].includes(client.diagnostic.state))?.diagnostic;
     return { ...(diagnostic || { state: "unavailable" }), connected: false };
   }
 

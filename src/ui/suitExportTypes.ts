@@ -20,6 +20,7 @@ export type SuitExportRow = {
   dependencies?: string[];
   skeletonSelection?: SkeletonSelection;
   skeletonPath?: string;
+  skeletonAddedBones?: string[];
 };
 export type SuitExportResult = {
   materialMode?: 'formal' | 'blockout';

@@ -137,10 +137,11 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
             changeOptions(next);
             void send('inspect', next);
           }}>
-          <option value="formal">{t('正式资产', 'Production asset')}</option>
+          <option value="formal">{t('正式材质 · 使用材质与贴图', 'Production materials · Materials and textures')}</option>
           <option value="blockout">{t('Blockout · 使用 FBX 基础颜色', 'Blockout · FBX base colors')}</option>
         </select>
       </label>
+      <p className="settings-field-hint">{t('两种材质模式均使用正式模型命名和 UE 目录。上传绑定 SK 不会将临时材质转为正式材质；仍使用 FBX 临时颜色时，请选择 Blockout。', 'Both material modes use production mesh names and UE folders. Uploading a rig does not convert temporary materials; choose Blockout while using FBX colors.')}</p>
       {(options.materialMode || result?.materialMode) === 'blockout' && <p className="settings-field-hint">{t('允许无贴图和任意命名的多材质槽。使用 M_Blockout 母材质创建子材质实例，保留 FBX 基础颜色及分配；透明度等效果以母材质设置为准。', 'Allows untextured meshes and arbitrary material slot names. Creates instances of M_Blockout with FBX base colors and assignments; opacity and other effects follow the master material.')}</p>}
       <p className="settings-field-hint">{t('更新模型不会自动切换材质模式。转正式时，请补齐正式材质及贴图，选择“正式资产”并重新检查后发送。成功后挂上正式材质；旧 Blockout 材质保留在原文件夹，由人工清理，不自动检测或删除。', 'Updating a model does not switch material mode. Supply production materials and textures, select Production asset, recheck and send. A successful send assigns production materials. Old Blockout materials stay in their folder for manual cleanup; they are not scanned or deleted automatically.')}</p>
       <label className="suit-export-static-option"><input type="checkbox" disabled={busy && phase === 'apply' || done} checked={Boolean(options.includeStaticMeshes)} onChange={event => {
@@ -151,17 +152,21 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
         ? t('尚未上传骨骼模型。本次包含静态模型，绑定完成后可再次发送。', 'No rigged meshes yet. This send includes static meshes; send again after rigging.')
         : t('尚未上传骨骼模型，本次仅发送贴图和材质。上传绑定文件后可再次发送。', 'No skeletal meshes yet. This send includes textures and materials only. Upload rigged meshes and send again later.')}</p>}
       {skeletonRows.length > 0 && <details className="suit-export-settings">
-        <summary>{t('骨架：按模型设置 · 更改', 'Skeleton settings · Change')}</summary>
+        <summary>{t('骨架设置', 'Skeleton settings')}</summary>
+        <p className="settings-field-hint">{weapon || monster || npc || item
+          ? t('自动：新资源创建自己的骨架，已关联资源沿用已有骨架。变体共用骨架时选择“使用已有骨架”，填写 UE 骨架对象路径。', 'Automatic: create a Skeleton for new resources; retain the linked Skeleton for existing resources. For shared variant rigs, choose an existing Skeleton and enter its UE object path.')
+          : t('自动：男装使用 SKEL_Character，女装使用 SKEL_Female。已接管资源保留记录的骨架；需要更换时明确指定。', 'Automatic: male outfits use SKEL_Character; female outfits use SKEL_Female. Recovered resources retain their recorded Skeleton; select an explicit override to change it.')}</p>
         <p className="settings-field-hint">{t('默认沿用当前规则。绑定可指定已有骨架或创建新骨架，发送后记住选择。更换骨架可能影响动画关联，发送前会检查兼容性。', 'Defaults follow existing rules. Choose an existing or new Skeleton; choices are saved on send. Changing a Skeleton may affect animations; compatibility is checked before sending.')}</p>
         {skeletonRows.map(row => {
           const selection = options.skeletonOverrides?.[row.key] || options.skeletonSelection || row.skeletonSelection || { mode: 'auto' };
-          return <div className="suit-export-mappings" key={row.key}>
-            <label>{row.name}<select disabled={busy || done} value={selection.mode}
+          return <div className="suit-export-skeleton-row" key={row.key}>
+            <span title={row.name}>{row.partSlot && partNames[row.partSlot.toLowerCase()] || row.name}</span>
+            <select aria-label={`${row.name} ${t('骨架策略', 'Skeleton policy')}`} disabled={busy || done} value={selection.mode}
               onChange={event => changeSkeleton(row.key, { mode: event.target.value as SkeletonSelection['mode'] })}>
               <option value="auto">{t('自动（按当前规则）', 'Automatic (current rules)')}</option>
               <option value="existing">{t('使用已有骨架', 'Use existing Skeleton')}</option>
               <option value="create">{t('从此模型创建新骨架', 'Create Skeleton from this model')}</option>
-            </select></label>
+            </select>
             {selection.mode !== 'auto' && <input aria-label={t(`${row.name} 骨架路径`, `${row.name} Skeleton path`)}
               disabled={busy || done} placeholder={selection.mode === 'create' ? t('可选：新骨架路径；默认放在模型旁边', 'Optional new Skeleton path; defaults beside the model') : '/Game/…/SKEL_…'} value={selection.path || ''}
               onChange={event => changeSkeleton(row.key, { mode: selection.mode, path: event.target.value })} />}
@@ -222,6 +227,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
       </section>}
       {result && <div className="suit-export-rows">{rows.filter(row => showUnchanged || row.action !== 'unchanged').map(row => <div className={`suit-export-row ${row.status}`} key={row.key}>
         <strong>{row.name}</strong><span>{done ? ({ success: t('已完成', 'Done'), unchanged: t('未重导', 'Unchanged'), failed: t('失败', 'Failed'), blocked: t('待处理', 'Blocked'), skipped: t('已跳过', 'Skipped') }[row.status] || row.status) : actionLabel[row.action] || row.action}</span>
+        {!!row.skeletonAddedBones?.length && <small>{t(`发送时扩展目标骨架：新增 ${row.skeletonAddedBones.length} 根辅助骨骼`, `Sending extends the target skeleton with ${row.skeletonAddedBones.length} auxiliary bones`)}</small>}
         {row.lodReport?.skinTransferVersion && Boolean(row.lodReport.pending?.length) && <small>{t('将使用 SM LOD1 生成 SK LOD1–5，继承现有 SK LOD0 的骨架和蒙皮；保留 SK LOD0。', 'Generate SK LOD1–5 from SM LOD1 using the existing SK LOD0 skeleton and skin weights; preserve SK LOD0.')}</small>}
         {row.lodReport?.levels && <small>{t('UE 实际 LOD：', 'Actual UE LODs: ')}{row.lodReport.levels.map(level => `LOD${level.index}: ${level.triangles.toLocaleString()}`).join(' · ')} {t('三角面', 'triangles')}</small>}
         <details className="suit-export-item-path"><summary>{t('查看引擎内位置', 'Show location in Unreal Engine')}</summary><code>{row.path || row.targetPath}</code></details>{row.message && (row.action !== 'restore' || ['failed', 'blocked'].includes(row.status)) && <small>{row.message}</small>}

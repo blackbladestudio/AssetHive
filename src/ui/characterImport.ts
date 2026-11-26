@@ -1,4 +1,5 @@
 import type { CharacterImportFields } from "./hooks/types";
+import { characterMaterialSuffix } from '../../shared/characterMaterialSuffix.mjs';
 import { ownedWeaponIdentity } from '../../shared/ownedWeaponNaming.mjs';
 import type { MonsterModelAnalysis } from "../../shared/monsterPackageAudit.mjs";
 import { heroPartKind, heroPartName, inferHeroPart, cleanSuitName } from "../../shared/heroPackageRules.mjs";
@@ -448,7 +449,7 @@ export function previewFamilyFileName(family: string, assetName: string, filePat
   const numberedFamily = family === 'monster' || Boolean(npcIdentity);
   const variant = numberedFamily ? (stem.match(/_(\d{2})(?:_(?:ORM|D|N|A|Physics))?$/i)?.[1] || "") : "";
   const subject = family === "monster" && monsterName ? monsterName : npcIdentity ? npcIdentity[1]
-    : rule.assetNameSubject === "package" || (family === "npc" && role === "staticMesh") ? assetName : parsed[1];
+    : rule.assetNameSubject === "package" || family === 'item' || (family === "npc" && role === "staticMesh") ? assetName : parsed[1];
   const ownedWeapon = numberedFamily && /^(?:SM|SK|SKEL|MI|T)_WP_/i.test(stem) ? ownedWeaponIdentity(stem, subject) : null;
   if (ownedWeapon) return `${prefix}_WP_${subject}_${role === 'texture' ? ownedWeapon.suffix.replace(CHARACTER_MAP_SUFFIX, '') + '_' + map : ownedWeapon.suffix}${ext}`;
   const monsterIdentity = numberedFamily ? stem.match(MONSTER_FILE_IDENTITY) : null;
@@ -474,7 +475,8 @@ export function previewFamilyFileName(family: string, assetName: string, filePat
     const base = `${prefix}_${subject}${targetForm}${suffix}`;
     return `${role === 'physicsAsset' ? base + '_Physics' : role === 'texture' ? base + '_' + map : base}${ext}`;
   }
-  const suffix = family === 'weapon' ? weaponFileSuffix(stem, role, subject) : '';
+  const suffix = family === 'weapon' ? weaponFileSuffix(stem, role, subject)
+    : characterMaterialSuffix(stem, role, [monsterName, assetName, subject]);
   const expected = `${prefix}_${subject}${suffix}${targetForm !== null ? targetForm : variant ? `_${variant}` : ""}${role === "physicsAsset" ? "_Physics" : ""}${map ? `_${map}` : ""}`;
   const valid = stem.toLowerCase() === expected.toLowerCase()
     || (role === "material" && stem.toLowerCase().startsWith(`${expected.toLowerCase()}_`))

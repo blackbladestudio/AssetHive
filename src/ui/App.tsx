@@ -1,5 +1,6 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode, CSSProperties } from "react";
+import { CharacterFileChangeTag } from './CharacterFileChangeTag';
 import { removeAssetNameTags } from "../../shared/assetNameTags.mjs";
 import { gameplayIdentity, gameplayUsesResourceId } from '../../shared/gameplayNaming.mjs';
 import { selectionLevels as gameplaySelectionLevels, filterLevels as gameplayFilterLevels, categories as gameplayLeafCategories } from '../../shared/gameplayCategories.mjs';
@@ -16819,7 +16820,7 @@ export function App() {
                           {selectedCharacterInfo.modelParts.map((part) => (
                             <button type="button" {...characterDropProps(selectedAsset, [{ storedPath: part.storedPath, fileName: part.normalizedName }])} key={`${part.normalizedName}:${part.storedPath}`} className="character-component-row character-model-link" onClick={() => { void revealCharacterModel(selectedAsset, part.storedPath); }} title={`${t("点击定位 · 拖入同格式模型以预检更新", "Locate · drop a same-format model to preview update")} · ${part.storedPath}`}>
                               <span className="character-component-kind">{part.normalizedName.split(".").pop()?.toUpperCase() || "Mesh"}</span>
-                              <span className="character-model-filename">{part.normalizedName || characterFileBaseName(part.storedPath)}{part.componentRole === "weapon" ? ` · ${part.sharedAcrossForms ? t("共享武器", "Shared Weapon") : t("配套武器", "Owned Weapon")}` : ""}</span>
+                              <span className="character-model-filename">{part.normalizedName || characterFileBaseName(part.storedPath)}{part.componentRole === "weapon" ? ` · ${part.sharedAcrossForms ? t("共享武器", "Shared Weapon") : t("配套武器", "Owned Weapon")}` : ""} <CharacterFileChangeTag history={selectedAsset.meta?.characterUpdateHistory} storedPath={part.storedPath} name={part.normalizedName} english={uiLanguage === 'en'} /></span>
                               <span className="character-model-triangles">{t("面数", "Faces")}：{part.triangleCount === null ? t("未知", "Unknown") : part.triangleCount.toLocaleString()}</span>
                               <span className="character-model-action">{t("打开位置", "Show in Folder")}</span>
                             </button>
@@ -16855,7 +16856,7 @@ export function App() {
                                 </div>
                               </div>
                               <details className="character-texture-file-details"><summary>{t("文件名", "File names")} · {group.maps.length}</summary>
-                                {group.maps.map(map => <button type="button" {...characterDropProps(selectedAsset, [map])} key={map.storedPath} onClick={() => { void revealCharacterTexture(selectedAsset, map.storedPath); }} title={t("点击定位 · 拖入同格式贴图以预检更新", "Locate · drop a same-format texture to preview update")}><span className="character-texture-file-name">{map.fileName}</span><span className="character-texture-file-action">{t("打开位置", "Show in Folder")}</span></button>)}
+                                {group.maps.map(map => <button type="button" {...characterDropProps(selectedAsset, [map])} key={map.storedPath} onClick={() => { void revealCharacterTexture(selectedAsset, map.storedPath); }} title={t("点击定位 · 拖入同格式贴图以预检更新", "Locate · drop a same-format texture to preview update")}><span className="character-texture-file-name">{map.fileName} <CharacterFileChangeTag history={selectedAsset.meta?.characterUpdateHistory} storedPath={map.storedPath} name={map.fileName} english={uiLanguage === 'en'} /></span><span className="character-texture-file-action">{t("打开位置", "Show in Folder")}</span></button>)}
                               </details>
                             </div>
                           ))}

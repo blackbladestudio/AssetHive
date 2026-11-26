@@ -4,6 +4,15 @@ const { splitWeaponPackage, weaponAssemblyKind, weaponModelSlot } = require('../
 const { buildFamilyPackagePlan } = require('../electron/services/characterFamilyRules');
 const { applySkeletonOptions } = require('../shared/characterSkeletonOptions.cjs');
 
+test('hero skeleton defaults distinguish female and male without overriding explicit choices', () => {
+  const { defaultHeroSkeleton } = require('../shared/characterSkeletonOptions.cjs');
+  assert.equal(defaultHeroSkeleton({ gender: 'Female' }), '/Game/Characters/Hero/Asset_PJZ/Common/SKEL_Female');
+  assert.equal(defaultHeroSkeleton({ gender: 'Male' }), '/Game/Characters/Hero/Asset_PJZ/Common/SKEL_Character');
+  const entry = { key: 'female:head', name: 'SK_F01_Head', kind: 'skeletalMesh', targetPath: '/Game/Test/SK_F01_Head', skeletonPath: defaultHeroSkeleton({ gender: 'Female' }), config: {} };
+  assert.equal(applySkeletonOptions(entry, { skeletonSelection: { mode: 'auto' } }).skeletonPath, entry.skeletonPath);
+  assert.equal(applySkeletonOptions(entry, { skeletonSelection: { mode: 'existing', path: '/Game/Shared/SKEL_Shared' } }).skeletonPath, '/Game/Shared/SKEL_Shared');
+});
+
 test('new Gameplay filenames retain separate material groups and use the agreed package layout', () => {
   const files = ['SM_WoodenCase.fbx', 'SK_WoodenCase.fbx', 'T_WoodenCase_Wood_D.tga', 'T_WoodenCase_Wood_01_D.tga', 'T_WoodenCase_Wood_01_A.tga'];
   const plan = buildFamilyPackagePlan('item', 'C:/Art/WoodenCase', files, {

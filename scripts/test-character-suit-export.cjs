@@ -376,7 +376,7 @@ test('modern WP weapon names keep owner and multi-material indices through UE ex
   const asset = { id: 'modern-wp', name: 'Fire_Keeper', assetType: 'monster', path: root, meta: { category: '3_Elite', character: { name: 'Fire_Keeper' }, characterManifest: { files } } };
   const result = await buildSuitExport(asset, {}, async () => ({ meshKind: 'skeletalMesh', hasSkin: true, skinnedMeshCount: 1, bones: [], materialNames: ['MI_WP_Fire_Keeper_Torch_01', 'MI_WP_Fire_Keeper_Torch_02'] }));
   assert.equal(result.materialRequests.length, 0);
-  assert.equal(result.entries.find(e => e.kind === 'skeletalMesh').name, 'SK_Fire_Keeper_Torch');
+  assert.equal(result.entries.find(e => e.kind === 'skeletalMesh').name, 'SK_WP_Fire_Keeper_Torch');
   assert.deepEqual(result.entries.filter(e => e.kind === 'texture').map(e => e.name), files.slice(1).map(file => file.normalizedName.replace('.tga', '').replace('T_WP_', 'T_')));
   assert.equal(result.entries.filter(e => e.kind === 'material').length, 2);
 });
@@ -405,15 +405,15 @@ test('fresh Monster and NPC layouts use only explicit variants for Mesh subfolde
       const byName=new Map(result.entries.map(entry=>[entry.name,entry]));
       for(const form of ['01','02']) {
         const mesh=byName.get(`SK_${stem}_${form}`);
-        assert.equal(mesh.targetPath,`${bodyRoot}/SkeletalMesh/SK_${stem}_${form}`);
-        assert.equal(mesh.skeletonPath,`${bodyRoot}/SkeletalMesh/SKEL_${stem}_${form}`);
-        assert.equal(mesh.config.physicsAssetPath,`${bodyRoot}/SkeletalMesh/SK_${stem}_${form}_Physics`);
+        assert.equal(mesh.targetPath,`${bodyRoot}/SK_${stem}_${form}`);
+        assert.equal(mesh.skeletonPath,`${bodyRoot}/SKEL_${stem}_${form}`);
+        assert.equal(mesh.config.physicsAssetPath,`${bodyRoot}/SK_${stem}_${form}_Physics`);
         assert.equal(byName.get(`SM_${stem}_${form}`).targetPath,`${bodyRoot}/StaticMesh/SM_${stem}_${form}`);
         assert.equal(byName.get(`MI_${stem}_${form}`).targetPath,`${bodyRoot}/Material/MI_${stem}_${form}`);
         assert.equal(byName.get(`T_${stem}_${form}_D`).targetPath,`${bodyRoot}/Texture/T_${stem}_${form}_D`);
       }
-      assert.equal(byName.get(`SK_${stem}_Axe`).targetPath,`${bodyRoot}/Weapon/Mesh/SkeletalMesh/SK_${stem}_Axe`);
-      assert.equal(byName.get(`SM_${stem}_Axe`).targetPath,`${bodyRoot}/Weapon/Mesh/StaticMesh/SM_${stem}_Axe`);
+      assert.equal(byName.get(`SK_WP_${stem}_Axe`).targetPath,`${bodyRoot}/Weapon/SK_WP_${stem}_Axe`);
+      assert.equal(byName.get(`SM_WP_${stem}_Axe`).targetPath,`${bodyRoot}/Weapon/StaticMesh/SM_WP_${stem}_Axe`);
       assert.equal(byName.get(`MI_${stem}_Axe`).targetPath,`${bodyRoot}/Weapon/Material/MI_${stem}_Axe`);
       assert.equal(byName.get(`T_${stem}_Axe_D`).targetPath,`${bodyRoot}/Weapon/Texture/T_${stem}_Axe_D`);
       assert(result.entries.every(entry=>!entry.targetPath.includes('/Variants/')&&!entry.targetPath.includes('/02/')));
@@ -441,7 +441,7 @@ test('NPC exports body and owned weapon into its own category with independent s
   assert(result.entries.every(e => e.config.family === 'npc' && e.targetPath.startsWith(result.targetRoot + '/')));
   assert(result.entries.filter(e => e.kind === 'skeletalMesh').every(e => e.config.ownSkeleton && e.config.createPhysicsAsset));
   assert(result.entries.some(e => e.name === 'SK_FireKeeper_01'));
-  assert(result.entries.some(e => e.name === 'SK_FireKeeper_Torch'));
+  assert(result.entries.some(e => e.name === 'SK_WP_FireKeeper_Torch'));
   assert(result.entries.some(e => e.config.materialRole === 'monsterSkin'));
   assert(result.entries.some(e => e.config.materialRole === 'monsterWeapon'));
   const withStatic = await buildSuitExport(asset, { includeStaticMeshes: true }, analyze);
@@ -465,14 +465,14 @@ test('Monster forms and owned weapons export together with independent skeletons
   assert.equal(manifest.materialRequests.length,0);
   const meshes=manifest.entries.filter(e=>e.kind==='skeletalMesh');
   assert.equal(meshes.length,3);
-  assert(meshes.every(e=>e.config.ownSkeleton && e.config.createPhysicsAsset && e.skeletonPath.includes('/SKEL_Executioner_')));
+  assert(meshes.every(e=>e.config.ownSkeleton && e.config.createPhysicsAsset && /\/SKEL_(?:WP_)?Executioner_/.test(e.skeletonPath)));
   const weaponMaterial = manifest.entries.find(e=>e.kind==='material' && e.config.materialRole==='monsterWeapon');
   assert.equal(weaponMaterial.config.parentPath,'/Game/MaterialLibrary/Weapon/Common/M_Weapon_Monster');
   assert.ok(weaponMaterial.textures.E);
   assert.equal(weaponMaterial.targetPath,manifest.targetRoot+'/Mesh/Weapon/Material/MI_Executioner_GreatSword');
   assert(manifest.entries.filter(e=>e.kind==='material' && e!==weaponMaterial).every(e=>e.config.materialRole==='monsterCloth' && e.config.parentPath==='/Game/MaterialLibrary/Character/Common/M_Char_Monster_ComplexShading'));
-  const weaponMesh = meshes.find(e=>e.name==='SK_Executioner_GreatSword');
-  assert.equal(weaponMesh.targetPath,manifest.targetRoot+'/Mesh/Weapon/Mesh/SkeletalMesh/SK_Executioner_GreatSword');
+  const weaponMesh = meshes.find(e=>e.name==='SK_WP_Executioner_GreatSword');
+  assert.equal(weaponMesh.targetPath,manifest.targetRoot+'/Mesh/Weapon/SK_WP_Executioner_GreatSword');
   assert.equal(weaponMesh.materials.MI_Executioner_01_WP_GreatSword,weaponMaterial.key);
   assert(manifest.entries.filter(e=>e.kind==='texture' && e.groupName==='GreatSword').every(e=>e.targetPath.includes('/Weapon/Texture/') && e.config.virtualTexture===false));
   const emissiveTextures = manifest.entries.filter(e=>e.kind==='texture' && e.channel==='E');
@@ -594,6 +594,18 @@ test('Static opt-in sends SM to its own directory; later SK reuses unchanged mat
   for (const mesh of later.entries.filter(entry => entry.kind === 'skeletalMesh')) {
     assert.match(mesh.targetPath, /\/Mesh\/SkeletalMesh\/SK_/);
     assert(Object.values(mesh.materials).every(key => first.entries.some(entry => entry.kind === 'material' && entry.key === key)));
+  }
+});
+
+test('pending SM blockout bindings cannot overwrite the SK plan before a successful UE send', async t => {
+  const { asset, analyze } = await fixture(t, 'F01_Medium001_Test', true);
+  const result = await buildSuitExport(asset, { includeStaticMeshes: true, materialMode: 'blockout' }, analyze);
+  const meshes = result.entries.filter(entry => entry.kind === 'skeletalMesh');
+  assert.ok(meshes.length);
+  for (const sk of meshes) {
+    assert.ok(sk.materialHandoff);
+    assert.ok(Object.values(sk.materials).length);
+    assert.ok(Object.values(sk.materials).every(key => key.startsWith(sk.key + ':blockout:')));
   }
 });
 

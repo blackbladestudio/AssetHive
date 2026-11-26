@@ -110,6 +110,15 @@ export function weaponFileSuffix(sourceStem, role, sourceIdentity) {
     if (slot) return '_' + slot;
   }
   const raw = String(sourceStem).replace(/^(?:SM|SK|SKEL|MI|T)_/i, '').replace(/^SheidAxe/i, 'ShieldAxe');
+  // Older art exports use Bow_03 rather than Bow003_Name. Keep their
+  // material-group suffix when replacing the source identity on import.
+  const legacy = raw.match(/^([A-Za-z]+)_(\d+)(.*)$/);
+  if (['texture', 'material'].includes(role) && legacy
+    && WEAPON_TYPES.some(type => type.toLowerCase() === legacy[1].toLowerCase())) {
+    return role === 'texture'
+      ? legacy[3].replace(/_(?:ShadingMask|D|N|ORM|A|E)$/i, '')
+      : legacy[3];
+  }
   const identity = sourceIdentity || raw.match(/^[A-Za-z]+\d{3}_[A-Za-z][A-Za-z0-9]*/)?.[0];
   if (!identity || !raw.toLowerCase().startsWith(identity.toLowerCase())) return '';
   let suffix = raw.slice(identity.length);

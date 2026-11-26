@@ -14,9 +14,10 @@ async function buildHeroPartExport(asset, options, analyze, managedFile) {
   const cardRoot = fields.variant === 'Hair' ? `${root}/HairCard` : root;
   const files = asset.meta.characterManifest?.files || [];
   const entries = [], materialRequests = [], groups = new Map();
+  const blockout = options.materialMode === 'blockout' && !options.linkOnly;
   const models = files.filter(f => ['model', 'staticMesh', 'skeletalMesh'].includes(f.role) && !require('../../shared/characterLods.cjs').level(f.normalizedName || f.storedPath));
   const hasCards = models.some(f => /\.fbx$/i.test(f.storedPath));
-  for (const file of files.filter(f => f.role === 'texture' && hasCards)) {
+  for (const file of files.filter(f => f.role === 'texture' && hasCards && !blockout)) {
     const sourceName = file.normalizedName || file.originalName || file.storedPath;
     const group = heroTextureGroup(sourceName, fields.variant);
     const { role } = group;
@@ -34,7 +35,7 @@ async function buildHeroPartExport(asset, options, analyze, managedFile) {
       config: { version: 1, family: 'suit', heroPart: fields.variant, virtualTexture: role !== 'eye', normalFormat: options.normalFormat || 'directx' } });
   }
   const mainRole = fields.variant === 'Hair' ? 'hair' : 'face';
-  if (hasCards && ![...groups.values()].some(group => group.role === mainRole)) groups.set(mainRole, { key: mainRole, role: mainRole, part: '', textures: {} });
+  if (hasCards && !blockout && ![...groups.values()].some(group => group.role === mainRole)) groups.set(mainRole, { key: mainRole, role: mainRole, part: '', textures: {} });
   for (const [groupKey, { role, part, textures }] of groups) {
     const suffix = part ? '_' + part : role === 'face' || fields.variant === 'Hair' ? '' : '_' + role;
     const materialName = `MI_${name}${suffix}`;
@@ -56,7 +57,17 @@ async function buildHeroPartExport(asset, options, analyze, managedFile) {
     const meshName = groom ? `${name}_Groom` : `${kind === 'skeletalMesh' ? 'SK' : 'SM'}_${name}`;
     const key = `${asset.id}:${kind}:main`;
     const materials = {}, heroSharedRoles = {}, unresolvedMaterials = [];
-    for (const slot of analysis.materialNames || []) {
+    for (const slot of (analysis.materialNames?.length ? analysis.materialNames : blockout && !groom ? ['DefaultMaterial'] : [])) {
+      if (blockout) {
+        const materialKey = `${key}:blockout:${hash(slot).slice(0, 16)}:mi`;
+        const materialName = `MI_BO_${meshName}_${hash(slot).slice(0, 12)}`;
+        const appearance = analysis.sourceMaterials?.[slot] || { color: [1, 1, 1], opacity: 1, emissive: [0, 0, 0], roughness: 1 };
+        materials[slot] = materialKey;
+        entries.push({ key: materialKey, kind: 'material', name: materialName,
+          targetPath: `${cardRoot}/Material/Blockout/${materialName}`, textures: {}, sourceHash: hash(appearance),
+          config: { version: 1, family: 'suit', parentPath: '/Game/MaterialLibrary/Character/Common/M_Blockout', blockoutMaterial: appearance, blockoutInstanceVersion: 1 } });
+        continue;
+      }
       const role = heroMaterialRole(slot, fields.variant);
       const known = fields.variant === 'Hair' || /head|face|hair|beard|mustache|eyebrow|eyelash|iris|eye|lacri|tearline|oral|teeth|mouth|skin|body|arm|hand|foot|leg/i.test(slot);
       const chosen = options.materialMappings?.[`${key}|${slot}`];
@@ -71,8 +82,14 @@ async function buildHeroPartExport(asset, options, analyze, managedFile) {
     }
     entries.push({ key, kind, name: meshName, targetPath: `${groom ? root + '/Groom' : cardRoot}/${meshName}`, ...source, materials, externalMaterials: {},
       heroSharedRoles, unresolvedMaterials, bones: analysis.bones || [],
-      ...(kind === 'skeletalMesh' ? { skeletonPath: options.skeletonPath || `${ROOT}/Common/SKEL_Character` } : {}),
+      ...(kind === 'skeletalMesh' && !options.linkOnly ? { materialHandoff: {
+        slots: analysis.materialNames?.length ? analysis.materialNames : ['DefaultMaterial'],
+        staticTargetPath: `${cardRoot}/${meshName.replace(/^SK_/, 'SM_')}`,
+        appearances: analysis.sourceMaterials || {}, blockoutRoot: `${cardRoot}/Material/Blockout`,
+      } } : {}),
+      ...(kind === 'skeletalMesh' ? { skeletonPath: options.skeletonPath || require('../../shared/characterSkeletonOptions.cjs').defaultHeroSkeleton(fields) } : {}),
       config: { version: 1, family: 'suit', heroPart: fields.variant, gender: fields.gender, bodyCode: fields.bodyCode,
+        ...(blockout && !groom ? { materialMode: 'blockout', blockoutFallback: !analysis.materialNames?.length } : {}),
         importAnimations: false, createPhysicsAsset: false, updateReferencePose: false } });
   }
   if (new Set(entries.map(e => e.key)).size !== entries.length) throw new Error('同类型主体模型存在多个候选');

@@ -12,6 +12,19 @@ const {
 const { buildScope } = require("./import-draft-harness.cjs");
 const { auditMonsterPackage } = require("../shared/monsterPackageAudit.mjs");
 
+test('legacy bow textures retain separate body and Parts_a groups when renamed', () => {
+  const root = 'D:/GuiliWorkSpace/M1M2 Weapon/20261124/SK_Bow_03_材质_20261124/sen';
+  const files = [`${root}/SK_Bow_03.fbx`, ...['D', 'N', 'ORM', 'A', 'ShadingMask'].flatMap(map =>
+    [`${root}/Texture/T_Bow_03_${map}.tga`, `${root}/Texture/T_Bow_03_Parts_a_${map}.tga`])];
+  const plan = buildFamilyPackagePlan('weapon', root, files, { assetName: 'Bow003_Jingrui', category: 'Bow' });
+  assert.equal(plan.ok, true, plan.errors.join(';'));
+  for (const map of ['D', 'N', 'ORM', 'A', 'ShadingMask']) {
+    assert.ok(plan.files.some(file => file.relativePath === `Texture/T_Bow003_Jingrui_${map}.tga`));
+    assert.ok(plan.files.some(file => file.relativePath === `Texture/T_Bow003_Jingrui_Parts_a_${map}.tga`));
+  }
+  assert.equal(new Set(plan.files.map(file => file.relativePath)).size, files.length);
+});
+
 test('texture collision reports both source files without discarding either', () => {
   const files = ['C:/art/SK_Bow003_JingruiGong.fbx',
     'C:/art/first/T_Bow003_JingruiGong_D.tga', 'C:/art/second/T_Bow003_JingruiGong_D.tga'];

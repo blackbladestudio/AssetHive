@@ -1,5 +1,9 @@
 const path = require('node:path').posix;
 
+function defaultHeroSkeleton(fields = {}) {
+  return `/Game/Characters/Hero/Asset_PJZ/Common/${String(fields.gender).toLowerCase() === 'female' ? 'SKEL_Female' : 'SKEL_Character'}`;
+}
+
 function applySkeletonOptions(entry, options = {}) {
   if (entry.kind !== 'skeletalMesh') return entry;
   const choice = options.skeletonOverrides?.[entry.key] || options.skeletonSelection;
@@ -13,4 +17,4 @@ function applySkeletonOptions(entry, options = {}) {
       skeletonOverridePath: String(choice.path || '').trim() } };
 }
 
-module.exports = { applySkeletonOptions };
+module.exports = { applySkeletonOptions, defaultHeroSkeleton };

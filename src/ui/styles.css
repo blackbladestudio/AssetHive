@@ -7602,12 +7602,19 @@ textarea,
 .suit-export-row code, .suit-export-row small, .suit-export-row select { grid-column: 1 / -1; overflow-wrap: anywhere; user-select: text; }
 .suit-export-row strong { min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
 .suit-export-row > span { font-size: 12px; color: #aaa; align-self: start; }
+.character-file-change-tag { display: inline-flex; padding: 2px 7px; border-radius: 4px; font-size: 12px; font-weight: 500; white-space: nowrap; flex-shrink: 0; }
+.character-file-change-tag.added { color: #8de0b0; background: #203e30; }
+.character-file-change-tag.updated { color: #9dceff; background: #203b55; }
 .suit-export-item-path { grid-column: 1 / -1; color: #888; font-size: 11px; }
 .suit-export-item-path code { display: block; margin-top: 6px; font-family: inherit; }
 .suit-export-row.blocked, .suit-export-row.failed, .suit-export-error { color: #ff9c8f; }
 .suit-export-row.conflict { border-color: #987038; }
 .suit-export-row.success { border-color: #50875a; }
 .suit-export-mappings { display: grid; gap: 10px; }
+.suit-export-skeleton-row { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(180px, 2fr); gap: 8px 16px; padding: 12px 0; border-top: 1px solid #333; }
+.suit-export-skeleton-row > span { align-self: center; overflow-wrap: anywhere; }
+.suit-export-skeleton-row > input, .suit-export-skeleton-row > small { grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
+.suit-export-skeleton-row select, .suit-export-skeleton-row input { width: 100%; min-width: 0; box-sizing: border-box; padding: 8px; background: var(--surface-1, #202020); color: var(--text-1, #eee); border: 1px solid #444; border-radius: 5px; }
 .suit-export-background { position: fixed; right: 24px; bottom: 90px; z-index: 1100; width: min(420px, calc(100vw - 48px)); box-sizing: border-box; padding: 14px; display: flex; align-items: center; gap: 12px; background: #242424; border: 1px solid #525252; border-radius: 10px; box-shadow: 0 6px 24px #0008; color: #eee; font-size: 13px; }
 .suit-export-background > div { flex: 1; min-width: 0; }
 .suit-export-background-message { display: block; margin-top: 6px; color: #b6b6b6; overflow-wrap: anywhere; max-height: 64px; overflow: auto; }
