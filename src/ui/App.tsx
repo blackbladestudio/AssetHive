@@ -12,6 +12,7 @@ import type { AppSettings, AssetRecord, TextureAnalysis } from "../types";
 import type { AppUpdateDownloadProgress, AppUpdateSnapshot } from "../vite-env";
 import { monsterBodyMetrics, characterDisplayName, componentParentId, characterComponentLabel, listCharacterComponents, characterModelPreviewComponents, characterMeshAssetRecord, componentAssetRecord, expandCharacterCards, activeCharacterFiles, characterRigProgress, characterRigReviewSignature, characterModelGroups, characterModelUpdateGroups } from "../../shared/characterComponents.mjs";
 import { WEAPON_TYPES, weaponCategory, splitWeaponPackage } from "../../shared/weaponRules.mjs";
+import { splitMonsterPackage } from "../../shared/monsterPackageAudit.mjs";
 import { characterOwnedWeapons, monsterVariantId, monsterVariantLabel, monsterVariantGroups, monsterVariantModelGroups, monsterCardOccurrence } from "../../shared/monsterVariants.mjs";
 import { parseAnimationLabels } from "../../shared/animationUnrealExport.mjs";
 import animationImportRules from '../../shared/animation-import-rules.json';
@@ -46,6 +47,8 @@ import { suitExportLocations } from "./suitExportLocations";
 import type { ThreeDCoatConnection } from "../threeDCoat";
 import { PreviewLoader } from "./previewLoader";
 import { AnimationCoverQueue, type AnimationCoverTarget } from "./animationCoverQueue";
+import { isAnimationPreviewActive, subscribeToAnimationPreviewActivity } from "./animationPreviewActivity";
+import { AnimationPreviewVideo } from "./AnimationPreviewVideo";
 import { getPreviewUrl } from "./previewUrl";
 import { evaluateUnifiedAnimationRules as evaluateAnimationImportRules, loadAnimationRuleReference } from "./animationRuleEvaluation";
 import { getAnimationAssetNameIssue, getMissingAnimationFields, suggestAnimationArchiveRelativePath, type AnimationFbxStats } from "./animationRules";
@@ -129,17 +132,17 @@ function AnimationCoverWorker({ queue, loader, bridge, enabled, assets, resolveR
   enabled: boolean;
 }) {
   const target = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
-  const captureAsset = assets.find(asset => asset.id === target?.assetId);
+  const captureAsset = target && assets.find(asset => asset.id === target.assetId);
   const autoRig = useAutoAnimationRig(resolveRig, target?.modelPath || '', captureAsset?.animationGameTag?.id);
   const rig = chooseAnimationPreviewRig({ skeletonPath: captureAsset?.previewSkeletonPath, skeletalMeshPath: captureAsset?.previewSkeletalMeshPath }, autoRig || '', rememberedRig);
   const [prepared, setPrepared] = useState<{ target: AnimationCoverTarget; key: string } | null>(null);
   useEffect(() => {
     const update = () => queue.setEnabled(Boolean(enabled && bridge?.getAnimationPreview && bridge.cacheAnimationPreview)
-      && document.visibilityState === "visible");
+      && isAnimationPreviewActive());
+    const unsubscribe = subscribeToAnimationPreviewActivity(update);
     update();
-    document.addEventListener("visibilitychange", update);
     return () => {
-      document.removeEventListener("visibilitychange", update);
+      unsubscribe();
       queue.setEnabled(false);
     };
   }, [queue, bridge, enabled]);
@@ -2479,13 +2482,9 @@ const PreviewDropSlot = memo(({
         {previewImagePath ? (
           <>
             {isMotionVideoPreviewPath(previewImagePath) ? (
-              <video
+              <AnimationPreviewVideo
                 className="preview-slot-image"
                 src={getPreviewUrl(displayPreviewPath || previewImagePath)}
-                autoPlay
-                loop
-                muted
-                playsInline
               />
             ) : (
               <img className="preview-slot-image" src={getPreviewUrl(displayPreviewPath || previewImagePath)} alt="preview" />
@@ -3251,13 +3250,9 @@ const RelatedAssetCard = ({ asset, onSelect, caption }: { asset: AssetRecord; on
     <button key={asset.id} className={`related-card${caption ? ' related-form-card' : ''}`} title={characterDisplayName(asset)} onClick={() => onSelect(asset.id)}>
       {(asset.previewImage || asset.preview) ? (
         isMotionVideoPreviewPath(String(asset.previewImage || asset.preview || "")) ? (
-          <video
+          <AnimationPreviewVideo
             src={getPreviewUrl(asset.previewImage || asset.preview)}
             className={fitScaled ? "fit-scaled" : ""}
-            autoPlay
-            loop
-            muted
-            playsInline
             onLoadedMetadata={(event) => {
               const video = event.currentTarget;
               const ratio = video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : 1;
@@ -3511,7 +3506,7 @@ export function App() {
   const [characterPreviewManager, setCharacterPreviewManager] = useState<CharacterPreviewManagerState | null>(null);
   const [characterHistoryTarget, setCharacterHistoryTarget] = useState<AssetRecord | null>(null);
   const [characterNameEditor, setCharacterNameEditor] = useState<{ target: AssetRecord; value: string; english: string; confirmed: boolean; error: string } | null>(null);
-  const [characterUpdatePlan, setCharacterUpdatePlan] = useState<{ token: string; unchanged: boolean; sourcePaths?: string[]; replacements?: Array<{ sourcePath: string; storedPath: string }>; excludedFiles?: string[]; changes: Array<{ name: string; status: string }>; replacedComponentCount?: number } | null>(null);
+  const [characterUpdatePlan, setCharacterUpdatePlan] = useState<{ token: string; unchanged: boolean; sourcePaths?: string[]; replacements?: Array<{ sourcePath: string; storedPath: string }>; excludedFiles?: string[]; changes: Array<{ name: string; status: string }>; replacedComponentCount?: number; sharedChanges?: { affectedAssets: Array<{ assetId: string; name: string }> } } | null>(null);
   const [characterUpdateError, setCharacterUpdateError] = useState("");
   const [characterOperationProgress, setCharacterOperationProgress] = useState<{ progress: number; message: string } | null>(null);
   const [characterUpdateConfirmed, setCharacterUpdateConfirmed] = useState(false);
@@ -8715,6 +8710,26 @@ export function App() {
           normalMapFormats: { ...defaultImportForm.normalMapFormats }
         }, inferredType) });
       }
+      // Numbered forms are independent cards. Keep subject-wide appearances
+      // available to each form without assigning an ambiguous body by guesswork.
+      for (let index = drafts.length - 1; index >= 0; index--) {
+        const draft = drafts[index];
+        if (draft.form.assetType !== 'monster') continue;
+        const partition = splitMonsterPackage(draft.form.characterPackageFiles);
+        if (partition.groups.length < 2 || partition.unassigned.length) continue;
+        const relationGroupId = crypto.randomUUID();
+        drafts.splice(index, 1, ...partition.groups.map(group => {
+          const fields = { ...draft.form.characterFields, name: group.name, formIds: [group.form], variant: group.form,
+            monsterVariant: '', confirmed: false, identityConfirmed: false, nameConfirmed: false, relatedAssetId: '' };
+          const modelSlots = characterPackageModelSlots('monster', group.files);
+          return { ...draft, form: { ...draft.form, queueId: crypto.randomUUID(), characterFields: fields,
+            assetName: buildMonsterAssetName(group.name, [group.form]), characterRelationGroupId: relationGroupId,
+            characterPackageFiles: group.files, modelSlots, enabledModelTypes: Object.keys(modelSlots),
+            textureEntries: filterCharacterTextureEntries(draft.form.textureEntries, group.files),
+            modelVariantKeys: {}, modelLodFiles: {}, previewImagePath: '',
+            characterPreviewPaths: { front: '', left: '', right: '', back: '' }, characterExtraPreviewPaths: [] } };
+        }));
+      }
       // Split independent weapon identities before model inspection and previews.
       // A bow and its arrow get separate cards, metadata and managed directories.
       for (let index = drafts.length - 1; index >= 0; index--) {
@@ -9319,13 +9334,13 @@ export function App() {
                                     onChange={event => { const value = event.target.value.replace(/\D/g, '').slice(0, 2); applyImportBatchPatch(form => updateCharacterFields(form, { formIds: value ? [value] : [] })); }}
                                     title={t("可修改；以确认后的两位编号入库", "Editable; the confirmed two-digit number is used for import")} />
                                 </label>
-                                <label className="monster-field-group">
-                                  <span className="monster-field-label">{t('变体（可选）', 'Variant (optional)')}</span>
+                                {Boolean(importForm.characterFields.monsterVariant) && <label className="monster-field-group">
+                                  <span className="monster-field-label">{t('原有变体名称', 'Existing variant name')}</span>
                                   <input className="settings-input" value={getImportSelectionValue(form => form.characterFields.monsterVariant || '') ?? ''}
                                     placeholder="NormalShield"
                                     onChange={event => { const monsterVariant = event.target.value.replace(/[^A-Za-z0-9_]/g, ''); applyImportBatchPatch(form => updateCharacterFields(form, { monsterVariant })); }}
                                     title={t('同一角色的变体；填写后在 Mesh 下创建变体目录，不替代形态编号', 'A character variant; creates a variant folder under Mesh, separate from its form number')} />
-                                </label>
+                                </label>}
                               </>
                             ) : (
                               <input className="settings-input"
@@ -9338,7 +9353,7 @@ export function App() {
                               <>
                               {monsterFieldIssues.name && <div id="monster-name-guidance" className="settings-field-hint monster-name-guidance">{t("名称以字母开头，仅含字母、数字、下划线；不含 SK_ 和形态编号。", "Use letters, digits and underscores, starting with a letter; omit SK_ and the form number.")}</div>}
                               <div className="settings-field-hint">
-                                {t("初始编号从主体识别，可修改；入库以确认值为准。", "Initially detected from the body; editable. The confirmed number is used for import.")}
+                                {t("同一怪物的不同外形统一编号为 01、02、03…，每个编号一张卡片。请确认名称和编号。", "Number appearances 01, 02, 03…; each number gets its own card. Confirm the name and number.")}
                               </div>
                               {importSelectionAssetType === 'monster' && getMonsterFormSummary(importForm.characterPackageFiles, importForm.characterModelAnalysis).length > 1 && (
                                 <div className="settings-field-hint" style={{ color: "var(--warning)" }}>
@@ -17306,7 +17321,8 @@ export function App() {
             </div>
           </div>
         )}
-        {linkAssetIds && <CharacterLinkDialog assetIds={linkAssetIds} settings={settings} t={t} onClose={() => setLinkAssetIds(null)} onApplied={async () => { if (selectedAsset) await refreshAssetFromDisk(selectedAsset.id); }} />}
+        {linkAssetIds && <CharacterLinkDialog assetIds={linkAssetIds} settings={settings} t={t} onBusyChange={setSuitExportBusy}
+          onClose={() => setLinkAssetIds(null)} onApplied={async () => { if (selectedAsset) await refreshAssetFromDisk(selectedAsset.id); }} />}
         {animationExportAssetIds && <AnimationExportDialog
           assets={animationExportAssetIds.map(id => allAssets.find(asset => asset.id === id)).filter((asset): asset is AssetRecord => Boolean(asset))}
           settings={settings} t={t}
@@ -17407,6 +17423,7 @@ export function App() {
               {characterUpdatePlan && <>
                 <CharacterUpdateChanges changes={characterUpdatePlan.changes} replacements={characterUpdatePlan.replacements}
                   excludedFiles={[...new Set([...(characterUpdatePlan.excludedFiles || []), ...(characterUpdateBatchReport?.excludedFiles || [])])]} t={t} />
+                {!!characterUpdatePlan.sharedChanges?.affectedAssets.length && <p role="status">{t('这次共享贴图更新会同时影响：', 'This shared texture update also affects: ')}{characterUpdatePlan.sharedChanges.affectedAssets.map(asset => asset.name).join('、')}{t('。仅更新贴图不需要重新上传绑定模型；确认发送后才更新 UE。', '. Texture-only changes do not require a new rig upload. UE updates only after you confirm sending.')}</p>}
                 <CharacterLodReview files={characterUpdatePlan.changes.map(file => ({ ...file }))} t={t}
                   confirmed={characterUpdateConfirmed} onConfirm={setCharacterUpdateConfirmed} disabled={busy || characterUpdatePlan.unchanged} />
                 {characterUpdatePlan.unchanged ? <p>{t("所有文件与库内一致，无需更新。", "All files match the library. No update needed.")}</p> : <>

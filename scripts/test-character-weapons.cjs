@@ -80,7 +80,8 @@ test('weapon export excludes SM, owns its skeleton and material, and detects onl
   assert(manifest.entries.filter(entry => entry.kind === 'texture').every(entry => entry.targetPath.includes('/Texture/T_Bow001_ChangGong_')));
   assert.equal(manifest.entries.find(entry => entry.kind === 'material').name, `MI_${name}`);
   assert.equal(manifest.entries.find(entry => entry.kind === 'material').config.parentPath, '/Game/MaterialLibrary/Weapon/Common/M_Weapon_Slab');
-  assert.equal(manifest.entries.find(entry => entry.kind === 'material').config.virtualTexture, false);
+  assert.equal(manifest.entries.find(entry => entry.kind === 'material').config.virtualTexture, true);
+  assert(manifest.entries.filter(entry => entry.kind === 'texture').every(entry => entry.config.virtualTexture));
   assert.equal(manifest.entries.find(entry => entry.kind === 'material').config.useOpacityMasked, false);
   assert.equal(listCharacterComponents(asset).length, 0);
   assert.equal(characterModelPreviewComponents(asset).length, 1);

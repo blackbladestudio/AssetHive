@@ -3,6 +3,7 @@ const projectIdentity = require('./characterProjectIdentity');
 const { compareLinkContent, meshLodCount } = require('./characterLinkContent');
 const { updateAssetMetadataFile } = require('./assetMetadata');
 const pending = new Map();
+const sharedLifecycle = require('./characterSharedLifecycle');
 const normalize = value => String(value || '').replaceAll('\\', '/').toLowerCase();
 const hash = value => crypto.createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 
@@ -20,10 +21,11 @@ async function sendCharacterLinkJob(assets, options, onProgress, client) {
       onProgress?.({ percent: 0, message: '正在准备仅关联检查：' + asset.name });
       suits.push(await require('./characterSuitExport').buildSuitExport(asset, { includeStaticMeshes: true, inspectAllMeshes: true }));
     }
-    const reply = await client.importAssets({ characterSuit: { version: 1, phase: 'linkInspect', suits } }, { projectPath: editor.projectPath });
+    const sharedPlan = await sharedLifecycle.prepareSharedExport(options.customLibraryPath, unique, suits);
+    const reply = await client.importAssets({ characterSuit: { version: 1, phase: 'linkInspect', suits: sharedPlan.suits } }, { projectPath: editor.projectPath });
     const result = reply.suitResult;
     if (result?.error || !Array.isArray(result?.entries) || !result.inspectToken) throw new Error(result?.error || 'UE 未返回仅关联检查结果');
-    const expected = new Map(suits.flatMap(suit => suit.entries.map(entry => [entry.key, entry])));
+    const expected = new Map(sharedPlan.suits.flatMap(suit => suit.entries.map(entry => [entry.key, entry])));
     if (result.entries.length !== expected.size || new Set(result.entries.map(row => row.key)).size !== expected.size
       || result.entries.some(row => !expected.has(row.key))) throw new Error('仅关联回执不完整，未建立关联');
     const verified = [];
@@ -107,10 +109,11 @@ async function sendCharacterLinkJob(assets, options, onProgress, client) {
         ? `已关联；LOD${row.pendingLods.join('、LOD')} 待显式发送，无需重复关联`
         : '已关联；内容与依赖核验通过，无需重复关联';
     }
-    const manifestHash = hash(suits);
-    await recordLinkInspection(unique, suits, result.entries, editor.projectPath, editor.projectId);
-    pending.set(result.inspectToken, { at: Date.now(), project: normalize(editor.projectPath), ids: unique.map(a => a.id).sort(), verified: verifiedKeys, manifestHash, suits });
-    return { ok: true, suitResult: { entries: publicRows(result.entries), inspectToken: result.inspectToken, manifestHash,
+    const manifestHash = hash(Object.keys(sharedPlan.aliases).length ? { local: suits, shared: sharedPlan.suits } : suits);
+    const localRows = sharedLifecycle.localizeSharedRows(result.entries, sharedPlan.aliases);
+    await recordLinkInspection(unique, suits, localRows, editor.projectPath, editor.projectId);
+    pending.set(result.inspectToken, { at: Date.now(), project: normalize(editor.projectPath), ids: unique.map(a => a.id).sort(), verified: verifiedKeys, manifestHash, suits: sharedPlan.suits, aliases: sharedPlan.aliases });
+    return { ok: true, suitResult: { entries: publicRows(localRows), inspectToken: result.inspectToken, manifestHash,
       projectPath: editor.projectPath, materialRequests: [], phase: 'inspect' }, message: '仅关联检查完成' };
   }
   const cached = pending.get(options.suitInspectToken);
@@ -118,15 +121,17 @@ async function sendCharacterLinkJob(assets, options, onProgress, client) {
     || JSON.stringify(cached.ids) !== JSON.stringify(unique.map(a => a.id).sort()) || cached.manifestHash !== options.suitManifestHash) throw new Error('检查已失效，请重新检查后仅关联');
   const current = [];
   for (const asset of unique) current.push(await require('./characterSuitExport').buildSuitExport(asset, { includeStaticMeshes: true, inspectAllMeshes: true }));
-  if (hash(current) !== cached.manifestHash) throw new Error('库内内容或配置已变化，请重新核验后关联');
+  const currentShared = await sharedLifecycle.prepareSharedExport(options.customLibraryPath, unique, current);
+  if (hash(Object.keys(currentShared.aliases).length ? { local: current, shared: currentShared.suits } : current) !== cached.manifestHash) throw new Error('库内内容或配置已变化，请重新核验后关联');
   const reply = await client.importAssets({ characterSuit: { version: 1, phase: 'linkApply', inspectToken: options.suitInspectToken, verifiedKeys: cached.verified } }, { projectPath: editor.projectPath });
   if (reply.suitResult?.error || !Array.isArray(reply.suitResult?.entries)) throw new Error(reply.suitResult?.error || 'UE 关联回执缺失');
-  const entries = reply.suitResult.entries;
+  const canonicalEntries = reply.suitResult.entries;
   const expectedKeys = new Set(cached.suits.flatMap(suit => suit.entries.map(entry => entry.key)));
-  if (entries.length !== expectedKeys.size || new Set(entries.map(row => row.key)).size !== expectedKeys.size || entries.some(row => !expectedKeys.has(row.key))) throw new Error('仅关联结果不完整，请重新检查');
+  if (canonicalEntries.length !== expectedKeys.size || new Set(canonicalEntries.map(row => row.key)).size !== expectedKeys.size || canonicalEntries.some(row => !expectedKeys.has(row.key))) throw new Error('仅关联结果不完整，请重新检查');
+  const entries = sharedLifecycle.localizeSharedRows(canonicalEntries, cached.aliases);
   const projectKey = projectIdentity.projectKey(editor);
   for (const asset of unique) {
-    const rows = entries.filter(row => row.assetId === asset.id && ['success', 'unchanged'].includes(row.status) && cached.verified.includes(row.key));
+    const rows = entries.filter(row => row.assetId === asset.id && ['success', 'unchanged'].includes(row.status) && cached.verified.includes(row.sharedEntryKey || row.key));
     if (!rows.length) continue;
     await updateAssetMetadataFile(asset.metaPath, meta => {
       const receipts = meta.characterUnrealExports ||= {};
@@ -147,7 +152,7 @@ async function sendCharacterLinkJob(assets, options, onProgress, client) {
 }
 
 function publicRows(rows) {
-  return rows.map(row => Object.fromEntries(['assetId', 'key', 'name', 'kind', 'partSlot', 'targetPath', 'path', 'status', 'action', 'message'].filter(key => row[key] !== undefined).map(key => [key, row[key]])));
+  return rows.map(row => Object.fromEntries(['assetId', 'key', 'sharedEntryKey', 'name', 'kind', 'partSlot', 'targetPath', 'path', 'status', 'action', 'message'].filter(key => row[key] !== undefined).map(key => [key, row[key]])));
 }
 async function recordLinkInspection(assets, suits, rows, projectPath, projectId) {
   const editor = {projectPath, projectId};

@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { AppSettings } from '../types';
 import type { SkeletonSelection, SuitExportOptions, SuitExportResult } from './suitExportTypes';
 import { DialogCloseButton } from './DialogCloseButton';
+import { CharacterSendError } from './CharacterSendError';
 import { characterSendSummary } from '../../shared/characterSendSummary.mjs';
-import { characterExportScope } from '../../shared/characterExportScope.mjs';
+import { characterExportScope, skipUnreadyCharacterEntries } from '../../shared/characterExportScope.mjs';
 
 export function SuitExportDialog({ assetIds, weapon = false, monster = false, npc = false, item = false, heroPart = '', settings, hidden, onHide, onShow, onClose, onApplied, onProjectSettings, onBusyChange, t }: {
   weapon?: boolean;
@@ -40,7 +41,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
       const reply = await window.arkhive.exportToUnreal({ assetIds, options: { ...settings, suitPhase: phase,
         suitOptions: exportOptions, suitManifestHash: result?.manifestHash, suitInspectToken: result?.inspectToken,
         suitDecisions: { ...decisions,
-          ...Object.fromEntries((result?.entries || []).filter(row => row.status === 'missing').map(row => [row.key, 'restore'])),
+          ...Object.fromEntries((result?.entries || []).filter(row => row.status === 'missing' && decisions[row.key] !== 'skip').map(row => [row.key, 'restore'])),
           ...Object.fromEntries(excluded.map(row => [row.key, 'skip'])) } } });
       if (!reply.ok || !reply.suitResult) throw new Error(reply.message);
       setResult(reply.suitResult);
@@ -64,17 +65,15 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
   const actionLabel: Record<string, string> = {
     added: t('新增', 'Add'), updated: t('更新', 'Update'), renamed: t('改名', 'Rename'),
     updatedRenamed: t('更新并改名', 'Update & rename'), unchanged: t('无变化', 'Unchanged'),
-    restore: t('新增', 'Add'), adopt: t('UE 已有同名资源', 'Existing UE resource'), retained: t('保持不变', 'Keep existing'),
+    restore: t('补回 UE 缺失资源', 'Restore missing UE resource'), adopt: t('UE 已有同名资源', 'Existing UE resource'), retained: t('保持不变', 'Keep existing'),
     repair: t('更新材质关联', 'Update material references'), relinked: t('自动重新关联', 'Reassociate automatically')
   };
   const done = result?.phase === 'apply';
   const rows = characterExportScope(result?.entries || [], Boolean(options.includeStaticMeshes)).filter(row => row.action !== 'retained');
   const adoptRows = rows.filter(row => row.status === 'conflict' && row.action === 'adopt');
   const needsAttention = Boolean(error || rows.some(row => ['failed', 'blocked', 'conflict', 'skipped'].includes(row.status)));
-  const sendBlocked = Boolean(error || rows.some(row => ['failed', 'blocked'].includes(row.status) || row.status === 'conflict' && !decisions[row.key]));
-  const unchanged = rows.filter(row => row.action === 'unchanged').length;
-  const added = rows.filter(row => ['added', 'restore'].includes(row.action)).length;
-  const updated = rows.filter(row => ['updated', 'updatedRenamed', 'renamed', 'repair', 'relinked'].includes(row.action)).length;
+  const sendBlocked = Boolean(error || rows.some(row => ['failed', 'blocked'].includes(row.status) && decisions[row.key] !== 'skip' || row.status === 'conflict' && !decisions[row.key]));
+  const unchanged = rows.filter(row => row.action === 'unchanged' && ['ready', 'unchanged', 'success'].includes(row.status)).length;
   const content = characterSendSummary(rows, decisions, done);
   const visibleKeys = new Set(rows.map(row => row.key));
   const materialGroups = (result?.monsterMaterialGroups || []).filter(group => visibleKeys.has(group.key));
@@ -108,7 +107,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
   const modelParts = (parts: string[]) => parts.map(part => partNames[part.toLowerCase().replace(/^.*_/, '')] || part).join(' · ');
   const taskStatus = busy
     ? phase === 'apply' ? t('正在发送到 UE', 'Sending to UE') : t('正在检查变化', 'Inspecting changes')
-    : needsAttention ? t('有项目待处理', 'Items need attention')
+    : needsAttention ? t('部分资源未完成，请查看原因', 'Some resources need attention; view the details')
       : done ? t('发送完成', 'Send complete') : t('检查完成，等待确认', 'Inspection ready');
   if (hidden) return <aside className="suit-export-background" aria-label={t(`${subject} UE 后台任务`, `${subject} UE background task`)}>
     <div role="status"><strong>{taskStatus}</strong>
@@ -124,7 +123,6 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
       </header>
       <div className="suit-export-body">
       <p>{t('只发送新增或有变化的资源，其他资源保持不变。', 'Send new or changed resources only. Everything else stays unchanged.')}</p>
-      {item && <p className="settings-field-hint">{t('玩法物件使用项目指定母材质，自动连接颜色、法线、ORM及发光贴图，并启用所需的虚拟纹理。透明等未支持通道会明确提示。', 'Items use the project master with color, normal, ORM and emissive textures and required virtual texturing. Unsupported channels such as opacity are reported explicitly.')}</p>}
       <div className="suit-export-project">
         <span>{t('目标工程', 'Project')}</span>
         <code>{result?.projectPath || settings.unrealProjectPath || t('自动识别当前连接的 UE 工程', 'Use the currently connected UE project')}</code>
@@ -141,9 +139,9 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
           <option value="blockout">{t('Blockout · 使用 FBX 基础颜色', 'Blockout · FBX base colors')}</option>
         </select>
       </label>
-      <p className="settings-field-hint">{t('两种材质模式均使用正式模型命名和 UE 目录。上传绑定 SK 不会将临时材质转为正式材质；仍使用 FBX 临时颜色时，请选择 Blockout。', 'Both material modes use production mesh names and UE folders. Uploading a rig does not convert temporary materials; choose Blockout while using FBX colors.')}</p>
-      {(options.materialMode || result?.materialMode) === 'blockout' && <p className="settings-field-hint">{t('允许无贴图和任意命名的多材质槽。使用 M_Blockout 母材质创建子材质实例，保留 FBX 基础颜色及分配；透明度等效果以母材质设置为准。', 'Allows untextured meshes and arbitrary material slot names. Creates instances of M_Blockout with FBX base colors and assignments; opacity and other effects follow the master material.')}</p>}
-      <p className="settings-field-hint">{t('更新模型不会自动切换材质模式。转正式时，请补齐正式材质及贴图，选择“正式资产”并重新检查后发送。成功后挂上正式材质；旧 Blockout 材质保留在原文件夹，由人工清理，不自动检测或删除。', 'Updating a model does not switch material mode. Supply production materials and textures, select Production asset, recheck and send. A successful send assigns production materials. Old Blockout materials stay in their folder for manual cleanup; they are not scanned or deleted automatically.')}</p>
+      <details className="suit-export-settings"><summary>{t('什么时候选择 Blockout？', 'When should I use Blockout?')}</summary>
+        <p>{t('还没有正式贴图、只使用模型基础颜色时选 Blockout，可保留多个临时材质槽。准备好正式材质和贴图后，选择“正式材质”，重新检查并发送。旧 Blockout 材质保留，按需人工清理。', 'Choose Blockout when using mesh colors without production textures; multiple temporary slots are supported. Once materials and textures are ready, choose Production materials, recheck and send. Old Blockout materials remain for manual cleanup.')}</p>
+      </details>
       <label className="suit-export-static-option"><input type="checkbox" disabled={busy && phase === 'apply' || done} checked={Boolean(options.includeStaticMeshes)} onChange={event => {
         const checked = event.target.checked;
         setOptions(current => ({ ...current, includeStaticMeshes: checked }));
@@ -194,9 +192,10 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
         {mappingChanged && <small>{t('调整后点击“重新检查”。', 'Recheck after changing a type.')}</small>}
       </details>}
       {!!materialRequests.length && <div className="suit-export-mappings">
-        <h4>{t('请指定未匹配的材质槽', 'Resolve unmatched material slots')}</h4>
+        <h4>{t('这些模型还没有找到对应材质', 'These models need a material')}</h4>
+        <p>{t('请选择已有材质。白模或临时颜色模型可在上方选择 Blockout；不确定用哪颗材质时，请联系 TA。', 'Choose an existing material. For a blockout or temporary colors, choose Blockout above. Ask your TA if you are unsure which material to use.')}</p>
         {materialRequests.map(request => <label key={request.key}>{request.meshName} · {request.slot}
-          <input list={`suit-groups-${request.key}`} placeholder={t('选择材质组或输入已有 UE 材质路径', 'Select group or enter an existing UE material path')}
+          <input list={`suit-groups-${request.key}`} placeholder={t('选择已有材质，或粘贴 UE 材质路径', 'Choose a material or paste its UE path')}
             disabled={busy}
             value={options.materialMappings?.[request.key] || ''}
             onChange={event => { setMappingChanged(true); setOptions(current => ({ ...current, materialMappings: { ...current.materialMappings, [request.key]: event.target.value } })); }} />
@@ -204,9 +203,13 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
         </label>)}
         <p>{t('修改后点击“重新检查”。', 'Recheck after making changes.')}</p>
       </div>}
-      {result && <div className="suit-export-summary"><span>{t('新增', 'New')} {added}</span><span>{t('更新', 'Updated')} {updated}</span><span>{t('无变化', 'Unchanged')} {unchanged}</span>
+      {result && <div className="suit-export-summary"><span>{done ? t('已完成', 'Completed') : t('本次处理', 'To process')} {content.total}</span>{content.pending > 0 && <span>{t('待处理', 'Needs attention')} {content.pending}</span>}{unchanged > 0 && <span>{t('无变化', 'Unchanged')} {unchanged}</span>}
         {unchanged > 0 && <button type="button" className="suit-export-text-button" onClick={() => setShowUnchanged(value => !value)}>{showUnchanged ? t('收起无变化项', 'Hide unchanged') : t('查看无变化项', 'Show unchanged')}</button>}
       </div>}
+      {!done && rows.some(row => ['failed', 'blocked'].includes(row.status) && decisions[row.key] !== 'skip') && <p>
+        <button type="button" className="suit-export-text-button" disabled={busy} onClick={() => setDecisions(current => skipUnreadyCharacterEntries(rows, current))}>{t('暂时跳过待处理项，先发送其他资源', 'Skip unresolved items and send the remaining resources')}</button>
+        <small>{t('使用这些资源的模型或材质也会一起跳过。下方清单会显示本次实际发送内容。', 'Meshes and materials that depend on these items will also be skipped. The list below shows what will be sent.')}</small>
+      </p>}
       {!done && adoptRows.length > 0 && <section className="suit-export-adoption">
         <strong>{t('UE 目标位置已有同名资源', 'Resources already exist in the UE destination')} · {adoptRows.length}</strong>
         <p>{t('这些资源尚未与本条 AssetHive 记录关联。新入库的资产也可能对应 UE 里已有的文件。关联后会更新现有资源，保留 UE 对象引用。', 'These resources are not linked to this library record. A new library asset can have existing UE files. Association updates those resources while preserving UE object references.')}</p>
@@ -215,30 +218,36 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
         <small>{t('可在下方逐项调整，点击“确认发送”后才会执行。', 'Adjust individual choices below. Nothing changes until you confirm the send.')}</small>
       </section>}
       {result && <section className="suit-send-content" aria-label={t('本次发送内容', 'Contents of this send')}>
-        <h4>{done ? t('本次已发送', 'Sent this time') : t('本次发送内容', 'Sending this time')}</h4>
+        <h4>{done ? t('本次发送结果', 'Send results') : t('本次发送内容', 'Sending this time')}</h4>
+        {!!result.sharedAffectedAssets?.length && <p>{t('本次共享外观变化会同时影响：', 'This shared appearance change affects: ')}{result.sharedAffectedAssets.map(asset => asset.name).join('、')}</p>}
         <dl>
           {(options.includeStaticMeshes || content.staticMesh.count > 0) && <div><dt>{t('静态模型', 'Static meshes')}</dt><dd>{content.staticMesh.count} {t('个', '')}</dd><small>{modelParts(content.staticMesh.parts) || t('本次无需发送', 'Nothing to send')}</small></div>}
-          <div><dt>{t('骨骼模型', 'Skeletal meshes')}</dt><dd>{content.skeletalMesh.count} {t('个', '')}</dd><small>{modelParts(content.skeletalMesh.parts) || t('本次无需发送', 'Nothing to send')}</small></div>
+          {content.skeletalMesh.count > 0 && <div><dt>{t('绑定模型', 'Rigged meshes')}</dt><dd>{content.skeletalMesh.count} {t('个', '')}</dd><small>{modelParts(content.skeletalMesh.parts)}</small></div>}
           {content.groom.count > 0 && <div><dt>Groom ABC</dt><dd>{content.groom.count}</dd><small>{modelParts(content.groom.parts)}</small></div>}
-          <div><dt>{t('贴图', 'Textures')}</dt><dd>{content.textures.count} {t('张', '')} · {content.textures.groupCount} {t('组', 'groups')}</dd><small>{content.textures.groups.join(' · ') || t('本次无需发送', 'Nothing to send')}</small></div>
-          <div><dt>{t('材质实例', 'Material instances')}</dt><dd>{content.materials.count} {t('个', '')}</dd><small>{content.materials.groups.join(' · ') || t('本次无需发送', 'Nothing to send')}</small></div>
+          {content.textures.count > 0 && <div><dt>{t('贴图', 'Textures')}</dt><dd>{content.textures.count} {t('张', '')}</dd><small>{content.textures.groups.join(' · ')}</small></div>}
+          {content.materials.count > 0 && <div><dt>{t('材质', 'Materials')}</dt><dd>{content.materials.count} {t('个', '')}</dd><small>{content.materials.groups.join(' · ')}</small></div>}
         </dl>
-        {content.pending > 0 && <p>{t(`另有 ${content.pending} 项待处理或已跳过，未计入以上内容。`, `${content.pending} items need attention or were skipped; excluded above.`)}</p>}
+        {content.pending > 0 && <p>{t(`另有 ${content.pending} 项尚未发送，请查看下方原因。`, `${content.pending} items have not been sent. See the reasons below.`)}</p>}
       </section>}
-      {result && <div className="suit-export-rows">{rows.filter(row => showUnchanged || row.action !== 'unchanged').map(row => <div className={`suit-export-row ${row.status}`} key={row.key}>
-        <strong>{row.name}</strong><span>{done ? ({ success: t('已完成', 'Done'), unchanged: t('未重导', 'Unchanged'), failed: t('失败', 'Failed'), blocked: t('待处理', 'Blocked'), skipped: t('已跳过', 'Skipped') }[row.status] || row.status) : actionLabel[row.action] || row.action}</span>
+      {result && <div className="suit-export-rows">{rows.filter(row => showUnchanged || row.action !== 'unchanged' || ['blocked', 'failed', 'conflict', 'skipped'].includes(row.status)).map(row => <div className={`suit-export-row ${row.status}`} key={row.key}>
+        <strong>{row.name}</strong><span>{!done && decisions[row.key] === 'skip' ? t('本次跳过', 'Skip this time') : ['failed', 'blocked'].includes(row.status) ? t('需要处理', 'Needs attention') : done ? ({ success: t('已完成', 'Done'), unchanged: t('无变化', 'Unchanged'), skipped: t('已跳过', 'Skipped') }[row.status] || row.status) : actionLabel[row.action] || row.action}</span>
         {!!row.skeletonAddedBones?.length && <small>{t(`发送时扩展目标骨架：新增 ${row.skeletonAddedBones.length} 根辅助骨骼`, `Sending extends the target skeleton with ${row.skeletonAddedBones.length} auxiliary bones`)}</small>}
         {row.lodReport?.skinTransferVersion && Boolean(row.lodReport.pending?.length) && <small>{t('将使用 SM LOD1 生成 SK LOD1–5，继承现有 SK LOD0 的骨架和蒙皮；保留 SK LOD0。', 'Generate SK LOD1–5 from SM LOD1 using the existing SK LOD0 skeleton and skin weights; preserve SK LOD0.')}</small>}
-        {row.lodReport?.levels && <small>{t('UE 实际 LOD：', 'Actual UE LODs: ')}{row.lodReport.levels.map(level => `LOD${level.index}: ${level.triangles.toLocaleString()}`).join(' · ')} {t('三角面', 'triangles')}</small>}
-        <details className="suit-export-item-path"><summary>{t('查看引擎内位置', 'Show location in Unreal Engine')}</summary><code>{row.path || row.targetPath}</code></details>{row.message && (row.action !== 'restore' || ['failed', 'blocked'].includes(row.status)) && <small>{row.message}</small>}
-        {!done && row.status === 'conflict' && <select aria-label={`${row.name} ${t('处理方式', 'Action')}`} value={decisions[row.key] || 'skip'} onChange={event => setDecisions(current => ({ ...current, [row.key]: event.target.value }))} disabled={busy}>
+        <details className="suit-export-item-path"><summary>{t('查看 UE 位置与 LOD', 'Show UE location and LODs')}</summary><code>{row.path || row.targetPath}</code>
+          {row.lodReport?.levels && <small>{row.lodReport.levels.map(level => `LOD${level.index}: ${level.triangles.toLocaleString()}`).join(' · ')} {t('三角面', 'triangles')}</small>}
+        </details>
+        {row.message && (['failed', 'blocked'].includes(row.status) || row.lodReport?.waitingForRig
+          ? <CharacterSendError message={`${row.name}\n${row.message}`} t={t} />
+          : row.action !== 'restore' && <small>{row.message}</small>)}
+        {!done && row.status === 'conflict' && <select aria-label={`${row.name} ${t('处理方式', 'Action')}`} value={decisions[row.key] || ''} onChange={event => setDecisions(current => ({ ...current, [row.key]: event.target.value }))} disabled={busy}>
+          <option value="" disabled>{t('请选择处理方式', 'Choose an action')}</option>
           <option value="skip">{t('跳过本次', 'Skip this time')}</option>
           {row.action === 'adopt' ? <option value="adopt">{t('确认关联并更新此同名资产', 'Associate and update this asset')}</option>
               : <><option value="keepUE">{t('保留 UE 材质设置', 'Keep UE material settings')}</option><option value="applyMapping">{t('采用本次贴图映射', 'Apply new texture mapping')}</option></>}
         </select>}
       </div>)}</div>}
-      {result && unchanged === rows.length && rows.length > 0 && <p className="suit-export-empty">{t('资源已是最新，无需再次发送。', 'Everything is up to date. Nothing to send.')}</p>}
-      {error && <p className="suit-export-error">{error}</p>}
+      {result && !needsAttention && unchanged === rows.length && rows.length > 0 && <p className="suit-export-empty">{t('资源已是最新，无需再次发送。', 'Everything is up to date. Nothing to send.')}</p>}
+      {error && <CharacterSendError key={error} message={error} t={t} />}
       </div>
       <footer className="suit-export-footer">
       {busy && <div role="status"><p>{progress.message || (phase === 'apply' ? t('正在发送资源…', 'Sending resources…') : t('正在检查资源…', 'Checking resources…'))}</p>
@@ -246,7 +255,7 @@ export function SuitExportDialog({ assetIds, weapon = false, monster = false, np
       <div className="confirm-actions">
         <button className="browse-btn" onClick={onHide}>{busy ? t('后台运行', 'Run in background') : t('收起窗口', 'Minimize')}</button>
         <button className="browse-btn" disabled={busy} onClick={() => void send('inspect')}>{t('重新检查', 'Recheck')}</button>
-        <button className="browse-btn primary-btn" disabled={busy || sendBlocked || mappingChanged || !result || done || !rows.some(row => row.status === 'missing' || row.status === 'ready' && row.action !== 'unchanged' || decisions[row.key] && decisions[row.key] !== 'skip')} onClick={() => void send('apply')}>{t('确认发送', 'Confirm send')}</button>
+        <button className="browse-btn primary-btn" disabled={busy || sendBlocked || mappingChanged || !result || done || content.total === 0} onClick={() => void send('apply')}>{t('确认发送', 'Confirm send')}</button>
       </div>
       </footer>
     </div>

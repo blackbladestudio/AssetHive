@@ -4,7 +4,6 @@ const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { test } = require("node:test");
 const { createStartupWindow } = require("../electron/services/startupWindow");
-const { startupScanDelay } = require("../electron/services/scanTiming");
 
 const source = fs.readFileSync(path.join(__dirname, "../electron/main.js"), "utf8");
 const start = source.indexOf("  const rendererLoadStartedAt = Date.now();");
@@ -12,10 +11,10 @@ const end = source.indexOf('  win.webContents.on("render-process-gone"', start);
 assert.ok(start >= 0 && end > start);
 const startup = source.slice(start, end);
 
-function fixture({ autoScan = false, hasCache = false } = {}) {
+function fixture({ autoScan = false } = {}) {
   let elapsed = 0;
   const timers = new Set();
-  const calls = { shown: 0, watching: 0, periodic: 0, scans: 0, splashFinished: 0, logs: [], dialogs: [] };
+  const calls = { shown: 0, watching: 0, periodic: [], splashFinished: 0, logs: [], dialogs: [] };
   const win = new EventEmitter();
   win.webContents = new EventEmitter();
   win.loadURL = async () => {};
@@ -37,12 +36,8 @@ function fixture({ autoScan = false, hasCache = false } = {}) {
     },
     writeLog: (...args) => calls.logs.push(args),
     startWatching: () => { calls.watching++; },
-    startPeriodicScan: () => { calls.periodic++; },
+    startPeriodicScan: (_win, options) => calls.periodic.push(options),
     shouldAutoScanOnStartup: () => autoScan,
-    startupScanDelay, getScanClientId: () => "startup-test-client",
-    index: hasCache ? [{ id: "cached" }] : [],
-    waitForLibraryCacheRestore: async () => {},
-    performScan: async () => { calls.scans++; },
     dialog: { showMessageBox: async (_win, options) => { calls.dialogs.push(options); } }
   };
   new Function("scope", "with (scope) { " + startup + " }")(scope);
@@ -70,25 +65,55 @@ test("slow renderer stays hidden past three seconds and shows on first paint", (
   assert.equal(f.calls.shown, 1);
   assert.equal(f.calls.splashFinished, 1);
   assert.equal(f.calls.watching, 1);
-  assert.equal(f.calls.periodic, 1);
+  assert.deepEqual(f.calls.periodic, [{ startup: false }]);
   assert.equal(f.calls.logs.at(-1)[2].durationMs, 27000);
 });
 
-test("staggered startup scans begin only after the window is shown and the delay expires", async () => {
-  for (const hasCache of [false, true]) {
-    const f = fixture({ autoScan: true, hasCache });
-    assert.equal(f.calls.scans, 0);
-    f.win.emit("ready-to-show");
-    assert.equal(f.calls.shown, 1);
-    assert.equal(f.calls.scans, 0);
-    const delay = startupScanDelay("startup-test-client", hasCache);
-    assert.equal([...f.timers][0].delay, delay);
-    f.advance(delay - 1);
-    assert.equal(f.calls.scans, 0);
-    f.advance(delay);
-    await Promise.resolve();
-    assert.equal(f.calls.scans, 1);
+test("animation foreground state follows the native window through minimize, restore and focus changes", () => {
+  const start = source.indexOf("  const publishForegroundState =");
+  const end = source.indexOf("  const diagnostics =", start);
+  assert.ok(start >= 0 && end > start);
+  const win = new EventEmitter();
+  const state = { visible: false, minimized: false, focused: false };
+  const foreground = [];
+  win.isDestroyed = () => false;
+  win.isVisible = () => state.visible;
+  win.isMinimized = () => state.minimized;
+  win.isFocused = () => state.focused;
+  win.webContents = { ipc: new EventEmitter(), isDestroyed: () => false, send: (channel, active) => {
+    assert.equal(channel, "window:foregroundChanged");
+    foreground.push(active);
+  } };
+  const foregroundWindows = new Set();
+  const reschedule = [];
+  new Function("win", "foregroundWindows", "periodicScanTimer", "startPeriodicScan", source.slice(start, end))(
+    win, foregroundWindows,
+    {}, (_window, options) => reschedule.push(options.immediate)
+  );
+  win.webContents.ipc.emit("window:requestForeground");
+  for (const [event, patch] of [
+    ["show", { visible: true }], ["focus", { focused: true }], ["minimize", { minimized: true }],
+    ["blur", { focused: false }], ["restore", { minimized: false }], ["focus", { focused: true }],
+    ["blur", { focused: false }], ["focus", { focused: true }], ["hide", { visible: false }]
+  ]) {
+    Object.assign(state, patch);
+    win.emit(event);
   }
+  assert.deepEqual(foreground, [false, false, true, false, false, false, true, false, true, false]);
+  assert.deepEqual(reschedule, [true, false, true, false, true, false]);
+  Object.assign(state, { visible: true });
+  win.emit("focus");
+  assert.equal(foregroundWindows.has(win), true);
+  win.emit("closed");
+  assert.equal(foregroundWindows.has(win), false);
+});
+
+test("startup joins the automatic timer after the window is shown", () => {
+  const f = fixture({ autoScan: true });
+  assert.deepEqual(f.calls.periodic, []);
+  f.win.emit("ready-to-show");
+  assert.equal(f.calls.shown, 1);
+  assert.deepEqual(f.calls.periodic, [{ startup: true }]);
 });
 
 test("load completion cannot expose a window before its first paint", () => {

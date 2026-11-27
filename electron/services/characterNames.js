@@ -125,6 +125,11 @@ async function updateCharacterNames(options) {
       remapped.updatedAt = at;
       return remapped;
     });
+    const shared = require('./characterSharedResources');
+    const before = await shared.readRegistry(root);
+    const next = shared.renameOwnerReferences(before, parent.id, oldToken, newToken,
+      new Map(renames.map(item => [path.basename(item.source).toLowerCase(), path.basename(item.destination)])));
+    if (next !== before) await shared.writeRegistryInTransaction(root, next);
     return { ok: true, parentId: parent.id, assetName: newAssetName, renamedFiles: renames.length, ...names, message: `中英文名已更新，${renames.length} 个管理文件已按英文名重命名` };
   }));
 }

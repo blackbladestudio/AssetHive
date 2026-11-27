@@ -5,6 +5,25 @@ const os = require('node:os');
 const path = require('node:path');
 const { buildSuitExport } = require('../electron/services/characterSuitExport');
 const { verifyCharacterLodReceipt } = require('../electron/services/characterLodReceipt');
+const { requireCharacterLodCapabilities, REDUCTION_CAPABILITY } = require('../electron/services/characterLodCapabilities');
+
+test('native reduction capability is required before sending either SM or SK', () => {
+ for (const kind of ['staticMesh', 'skeletalMesh']) {
+  const suits = [{ entries: [{ kind, config: { lodReductionProfile: 'targets-40-15-10-2' } }] }];
+  assert.throws(() => requireCharacterLodCapabilities(suits, ['characterLodsV2']), /未发送资源/);
+  assert.doesNotThrow(() => requireCharacterLodCapabilities(suits, [REDUCTION_CAPABILITY]));
+ }
+ assert.doesNotThrow(() => requireCharacterLodCapabilities([{ entries: [{ kind: 'texture' }] }]));
+});
+
+test('new reduction targets reject stale plugin receipts, including unchanged meshes', () => {
+ const entry={kind:'staticMesh',config:{lodPolicy:'lod1-reduction-v2',lodReductionProfile:'targets-40-15-10-2'}};
+ const lodReport={policy:'lod1-reduction-v2',qualityVersion:1,count:1,levels:[{index:0,source:'imported',triangles:100}]};
+ for(const status of ['success','unchanged']) {
+  assert.equal(verifyCharacterLodReceipt(entry,{status,lodReport}).status,'failed');
+  assert.equal(verifyCharacterLodReceipt(entry,{status,lodReport:{...lodReport,reductionProfile:'targets-40-15-10-2'}}).status,status);
+ }
+});
 
 test('waiting for a new rig accepts only a verified base-only skeletal receipt', () => {
  const entry={kind:'skeletalMesh',config:{lodPolicy:'lod1-reduction-v2',skinLodSource:{sourceHash:'new'}}};
@@ -151,6 +170,12 @@ test('LOD review renders visible level files, missing generation settings hint a
  assert.match(compact, /LOD1 列表<span>1 个文件/);
  assert.doesNotMatch(compact, /LOD2 列表/);
  assert(compact.indexOf('SK_Test.fbx') < compact.indexOf('LOD1 列表'));
+ assert.match(compact, /绑定只需下载 SM LOD0/);
+ assert.match(compact, /无需手工制作 SK LOD1/);
+ const paired = render({files:[{name:'SM_Test.fbx'},{name:'SK_Test.fbx'},{name:'SM_Test_LOD1.fbx'}],confirmed:true});
+ assert.match(paired, /checked=""/);
+ assert.doesNotMatch(paired, /当前缺少/);
+ assert.match(paired, /只更新 SK LOD0 会保留有效的 SM LOD1/);
 });
 
 test('face auxiliary textures stay in export but never enter master bindings', async t => {
@@ -162,6 +187,18 @@ test('face auxiliary textures stay in export but never enter master bindings', a
  const material=out.entries.find(e=>e.kind==='material');
  assert.ok(material.config.parentPath.endsWith('/M_Char_Face'));
  assert.deepEqual(Object.keys(material.textures),['Scatter']);
+});
+
+test('eye color normal and emissive use VT while POM height preserves ordinary sampling', async t => {
+ const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'eye-vt-')); t.after(() => fs.rm(dir,{recursive:true,force:true}));
+ const files = ['SM_F01_Face001.fbx', ...['D','N','E','Height'].map(channel => `T_F01_Face001_Eye_${channel}.png`)].map(name=>({normalizedName:name,storedPath:name,role:name.startsWith('SM')?'staticMesh':'texture'}));
+ for (const file of files) await fs.writeFile(path.join(dir,file.storedPath),file.storedPath);
+ const out = await buildSuitExport({id:'eye-vt',assetType:'suit',path:dir,meta:{character:fields,characterManifest:{files}}},{includeStaticMeshes:true},async()=>({meshKind:'staticMesh',materialNames:['Eye']}));
+ for(const texture of out.entries.filter(entry=>entry.kind==='texture')) assert.equal(texture.config.virtualTexture,texture.channel!=='Height');
+ const material=out.entries.find(entry=>entry.config?.materialRole==='hero_eye');
+ assert.ok(material.config.parentPath.endsWith('/M_Char_Eye_CustomIris_VT'));
+ assert.equal(material.config.virtualTexture,true);
+ assert.deepEqual(Object.keys(material.textures).sort(),['D','E','Height','N']);
 });
 
 for(const variant of ['Face','Hair','Medium']) for(const kind of ['staticMesh','skeletalMesh']) test(`${variant} ${kind}: one UE model, additions update fingerprint`, async t=>{

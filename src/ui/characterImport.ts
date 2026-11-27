@@ -477,7 +477,8 @@ export function previewFamilyFileName(family: string, assetName: string, filePat
   }
   const suffix = family === 'weapon' ? weaponFileSuffix(stem, role, subject)
     : characterMaterialSuffix(stem, role, [monsterName, assetName, subject]);
-  const expected = `${prefix}_${subject}${suffix}${targetForm !== null ? targetForm : variant ? `_${variant}` : ""}${role === "physicsAsset" ? "_Physics" : ""}${map ? `_${map}` : ""}`;
+  const formSuffix = targetForm !== null ? targetForm : variant ? `_${variant}` : '';
+  const expected = `${prefix}_${subject}${family === 'monster' ? formSuffix + suffix : suffix + formSuffix}${role === "physicsAsset" ? "_Physics" : ""}${map ? `_${map}` : ""}`;
   const valid = stem.toLowerCase() === expected.toLowerCase()
     || (role === "material" && stem.toLowerCase().startsWith(`${expected.toLowerCase()}_`))
     || (role === "texture" && stem.toLowerCase().startsWith(`${expected.replace(/_(ORM|D|N|A)$/i, "").toLowerCase()}_`) && /_(ORM|D|N|A)$/i.test(stem))

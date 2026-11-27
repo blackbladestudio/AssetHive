@@ -7,9 +7,11 @@ export function CharacterLodReview({ files, t, confirmed, onConfirm, onReveal, d
 }) {
   const groups = characterLodReview(files);
   const levels = [...new Set(groups.flatMap(group => group.files.map(file => file.index)))].sort((a, b) => a - b);
+  const bindingHint = t('绑定只需下载 SM LOD0，上传绑好的 SK LOD0；无需手工制作 SK LOD1。配套 SM LOD1 到位后，发送 UE 时自动生成非布料 LOD。', 'For rigging, download SM LOD0 and upload the rigged SK LOD0; no manual SK LOD1 is required. Once matching SM LOD1 is available, sending to UE generates non-cloth LODs.');
   if (!groups.length && !showEmpty) return null;
   if (compact) return <details className="character-file-section character-lod-files">
     <summary>{t('模型 LOD 文件', 'Model LOD files')}</summary>
+    <p>{bindingHint}</p>
     <div className="character-lod-file-groups">{levels.map(level => {
       const entries = groups.flatMap(group => group.files.filter(file => file.index === level).map(file => ({ file, group })));
       return <details className="character-lod-file-group" key={level} open>
@@ -31,6 +33,7 @@ export function CharacterLodReview({ files, t, confirmed, onConfirm, onReveal, d
     {!groups.length && <div className="character-lod-empty" role="status">{t('请先选择资产文件夹并完成检查。这里会按部件列出 LOD 等级、来源文件和入库名称，再勾选确认。', 'Select and inspect an asset folder first. Review each component, LOD level, source file and import name here before confirming.')}</div>}
     {groups.length > 0 && <>
     <p>{t('核对每个模型的 LOD 文件，再勾选下方确认。', 'Check each model’s LOD files, then confirm below.')}</p>
+    <p>{bindingHint}</p>
     <div className="character-lod-groups">{groups.map(group => <div className="character-lod-group" key={group.key}>
       <div className="character-lod-model-heading"><strong title={group.name}>{group.name}</strong><small>{group.key.startsWith('skeletalMesh:') ? t('骨骼', 'Skeletal') : t('静态', 'Static')}</small></div>
       {group.files.map((file, index) => <div className="character-lod-file-line" key={`${file.index}:${index}`}>
@@ -45,14 +48,16 @@ export function CharacterLodReview({ files, t, confirmed, onConfirm, onReveal, d
           <tbody>{group.files.map((file, index) => <tr key={`${file.index}:${index}`}><td>LOD{file.index}</td><td>{file.sourcePath?.split(/[\\/]/).pop() || file.name}</td><td>{file.name}</td></tr>)}</tbody>
         </table>
       </details>
-      {!!group.automatic.length && <small>{group.files.some(file => file.index === 1)
+      {!!group.automatic.length && <small>{group.key.startsWith('skeletalMesh:') && !group.files.some(file => file.index === 1)
+        ? t('使用同部件 SM LOD1 与 SK LOD0 自动生成：', 'Generated using matching SM LOD1 and SK LOD0: ')
+        : group.files.some(file => file.index === 1)
         ? t('LOD1 导入后自动减面：', 'Generated after importing LOD1: ')
         : t('补充 LOD1 后自动生成 LOD2–5；当前缺少：', 'Add LOD1 to generate LOD2–5; currently missing: ')}{group.automatic.map(index => `LOD${index}`).join('、')}</small>}
       {group.missingBase && <small role="alert" className="error">{t('缺少 LOD0 主模型', 'Missing LOD0 base model')}</small>}
       {group.duplicate && <small role="alert" className="error">{t('同一等级有多个文件，请整理后重试', 'Multiple files for the same level. Resolve before continuing.')}</small>}
     </div>)}</div>
     <details className="character-lod-rules"><summary>{t('LOD 规则说明', 'LOD rules')}</summary>
-      <p>{t('可先只提供 LOD0。替换 LOD0 后，对应 SM/SK 的旧 LOD1 及后续等级移出当前版本，并在发送 UE 时清理。新 LOD1 到位后再生成后续等级；已有 SK LOD0 可继承骨骼和蒙皮生成同部件的 SK LOD1–5。减面优先保护造型，实际面数可能高于目标比例。', 'Start with LOD0 if needed. Replacing LOD0 invalidates the paired SM/SK LOD1 and later levels in the active version and clears them when sent to UE. A new LOD1 enables generation again; an existing SK LOD0 supplies bones and skin weights for the paired SK LOD1–5. Shape preservation takes priority over target triangle ratios.')}</p>
+      <p>{t('SM LOD1 与 SK LOD0 可以先后上传，齐全后再次发送 UE 即可生成。替换 LOD0 后会重新核对配套关系：更新 SM LOD0 会清理旧 SM/SK 后续等级；只更新 SK LOD0 会保留有效的 SM LOD1，并重建 SK 后续等级。减面优先保护造型，实际面数可能高于目标比例。布料 LOD 另行确定。', 'SM LOD1 and SK LOD0 can arrive in either order; send to UE again once both are available. Replacing LOD0 rechecks the pairing: updating SM LOD0 clears old later SM/SK levels; updating only SK LOD0 retains valid SM LOD1 and rebuilds later SK levels. Shape preservation takes priority over target triangle ratios. Cloth LOD rules are pending.')}</p>
       <p>{t('不带后缀或 _LOD0 为主模型；各等级共用贴图，无需另建 LOD 文件夹。名称或文件变化后需重新确认。', 'No suffix or _LOD0 is the base. Levels share textures; no extra LOD folder is needed. Review again after names or files change.')}</p>
     </details>
     </>}

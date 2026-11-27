@@ -215,6 +215,7 @@ async function prepareComponentReplacement({ root: rootValue, asset, slot, sourc
   for (const file of previous.values()) changes.push({ name: file.normalizedName, status: "retained" });
   require('../../shared/characterLods.cjs').validate([...planned, ...previous.values()]);
   const plan = { parentId: parent.id, slot, componentRole: part.role, sharedAcrossForms: part.sharedAcrossForms, formId: part.sharedAcrossForms ? "" : parent.meta.character?.formIds?.[0] || "", expectedRevision: part.currentRevision, parentRevision: parent.meta.characterComponents?.contentRevision || "initial", sourceFolder, sourcePaths, name: modelName, files: planned, excludedFiles, retainedFiles: [...previous.values()], changes, unchanged: changes.every(item => ["unchanged", "retained"].includes(item.status)) };
+  plan.sharedChanges = await require('./characterSharedUpdates').prepareSharedFileUpdates(rootValue, parent, planned, changes);
   return { ...plan, token: digest(plan) };
 }
 
@@ -287,7 +288,8 @@ async function replaceCharacterComponent(options) {
       meta.updatedAt = new Date().toISOString();
       return meta;
     });
-    return { ok: true, parentId: parent.id, message: "部件已替换，旧版本保留；主体预览需要更新" };
+    const affectedAssetIds = await require('./characterSharedUpdates').applySharedFileUpdates(root, parent, plan.sharedChanges, note);
+    return { ok: true, parentId: parent.id, affectedAssetIds: [...new Set([parent.id, ...affectedAssetIds])], message: "部件已替换，旧版本保留；主体预览需要更新" };
   }));
 }
 

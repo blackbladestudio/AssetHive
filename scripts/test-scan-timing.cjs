@@ -38,43 +38,78 @@ test("change polls stay near four seconds and vary by client and by round", () =
   }
 });
 
-test("production periodic timer rearms with jitter and stops when no windows remain", async () => {
+test("production scan timer serializes startup, adapts to focus and stops when no windows remain", async () => {
   const source = await fs.readFile(path.join(__dirname, "../electron/main.js"), "utf8");
-  const start = source.indexOf("function startPeriodicScan(window) {");
+  const start = source.indexOf("function startPeriodicScan(");
   const end = source.indexOf("\nfunction startWatching(", start);
   assert.ok(start >= 0 && end > start);
   const timers = new Set();
   const scans = [];
-  const declaration = source.match(/^const PERIODIC_SCAN_INTERVAL_MS = .*;$/m)?.[0];
-  assert.ok(declaration);
+  const declarations = source.match(/^const (?:PERIODIC_SCAN_INTERVAL_MS|BACKGROUND_SCAN_INTERVAL_MS) = .*;$/gm);
+  assert.equal(declarations.length, 2);
   let destroyed = false;
   const win = { isDestroyed: () => destroyed };
+  const foregroundWindows = new Set([win]);
+  let releaseScan;
+  let now = 10000;
   const context = vm.createContext({
     process: { env: {} }, CHANGE_CHECK_INTERVAL_MS, ENABLE_PERIODIC_SCAN: true,
+    Date: { now: () => now },
+    startupScanDelay, foregroundWindows, index: [{ id: "cached" }],
     periodicScanDelay: (client, interval) => periodicScanDelay(client, interval, () => 0.5),
     getScanClientId: () => "alice",
+    getLibraryRootPath: () => "library",
+    maintainLibraryChangeJournals: async () => null,
     BrowserWindow: { getAllWindows: () => [] },
-    performScan: (_win, options) => scans.push(options.reason),
+    performScan: (_win, options) => {
+      scans.push(options.reason);
+      return new Promise(resolve => { releaseScan = resolve; });
+    },
+    writeLog: () => {},
     globalThis: {
       setTimeout: (callback, delay) => { const timer = { callback, delay, unref() {} }; timers.add(timer); return timer; },
       clearTimeout: timer => timers.delete(timer)
     }
   });
-  vm.runInContext(`${declaration}\nlet periodicScanTimer = null; ${source.slice(start, end)}`, context);
-  context.startPeriodicScan(win);
+  vm.runInContext(`${declarations.join("\n")}\nlet periodicScanTimer = null, startupScanPending = false, automaticScanRunning = false, lastAutomaticScanAt = 0;
+    ${source.slice(start, end)}`, context);
+  const fire = () => {
+    assert.equal(timers.size, 1);
+    const [timer] = timers;
+    timers.delete(timer);
+    return timer.callback();
+  };
+  context.startPeriodicScan(win, { startup: true });
   assert.equal(scans.length, 0);
-  const first = [...timers][0];
-  assert.ok(first.delay >= 3600 && first.delay <= 4400);
-  timers.delete(first); first.callback();
-  assert.deepEqual(scans, ["periodic"]);
-  assert.equal(timers.size, 1);
+  const [startup] = timers;
+  assert.equal(startup.delay, startupScanDelay("alice", true));
+  context.startPeriodicScan(win, { immediate: true });
+  assert.equal([...timers][0], startup, "focus must preserve the startup delay");
+  const first = fire();
+  assert.deepEqual(scans, ["startup"]);
+  context.startPeriodicScan(win, { immediate: true });
+  assert.equal(timers.size, 0, "a pending scan must not overlap a focus-triggered check");
+  releaseScan();
+  await first;
+  assert.ok([...timers][0].delay >= 3600 && [...timers][0].delay <= 4400);
+  foregroundWindows.clear();
   context.startPeriodicScan(win);
-  assert.equal(timers.size, 1, "restarting polling must cancel the previous timer");
+  assert.equal(timers.size, 1);
+  assert.ok([...timers][0].delay >= 27000 && [...timers][0].delay <= 33000);
+  foregroundWindows.add(win);
+  context.startPeriodicScan(win, { immediate: true });
+  assert.equal([...timers][0].delay, CHANGE_CHECK_INTERVAL_MS, "rapid focus changes must not add more share traffic");
+  now += 10000;
+  context.startPeriodicScan(win, { immediate: true });
+  assert.equal([...timers][0].delay, 0);
+  const catchup = fire();
+  assert.deepEqual(scans, ["startup", "periodic"]);
+  releaseScan();
+  await catchup;
   destroyed = true;
-  const last = [...timers][0];
-  timers.delete(last); last.callback();
+  await fire();
   assert.equal(timers.size, 0);
-  assert.equal(scans.length, 1);
+  assert.equal(scans.length, 2);
 });
 
 test("clearing this client's cache removes the local memo and never the old shared indexes", async () => {

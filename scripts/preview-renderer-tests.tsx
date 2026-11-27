@@ -34,6 +34,10 @@ window.runPreviewTests = async () => {
   const passed = [];
   const diagnostics = [];
   try {
+    if (window.animationBackgroundOnly) {
+      await testAnimationBackground(passed);
+      return { ok: true, passed, diagnostics };
+    }
     if (window.normalBatchOnly) {
       let format = null;
       const changes = [];
@@ -335,8 +339,63 @@ window.runPreviewTests = async () => {
     await until(() => document.querySelectorAll(".thumb img.loaded").length === 12, "rapid virtual scrolling left unloaded images");
     await delay(240);
     passed.push("Rapid virtual unmount/remount settles all 12 cards without mouse input");
+    await testAnimationBackground(passed);
     return { ok: true, passed, diagnostics };
   } catch (error) {
     return { ok: false, passed, diagnostics, error: String(error) };
   }
 };
+
+async function testAnimationBackground(passed) {
+  let foreground = true;
+  let foregroundListener;
+  const setForeground = value => {
+    foreground = value;
+    foregroundListener?.(value);
+  };
+  window.arkhive = { onWindowForegroundChange: listener => {
+    foregroundListener = listener;
+    listener(foreground);
+    return () => { foregroundListener = undefined; };
+  } };
+  const motion = document.createElement("div");
+  const recordings = [];
+  const onCapture = async capture => { recordings.push(await capture()); };
+  const renderAnimation = (src = "") => root.render(<>
+    <AnimationPreview filePath={animationFixture} motionDetailsHost={motion} onMotionCapture={onCapture}
+      emptyLabel="" playLabel="Play" pauseLabel="Pause" failedLabel="Preview failed" missingMeshLabel="" />
+    {src && <AnimationPreviewVideo src={src} />}
+  </>);
+  const time = () => Number(motion.querySelector("input[type=range]")?.value || 0);
+  renderAnimation();
+  await until(() => time() > 0 && document.querySelector('body > canvas'), "animated FBX did not play and start recording");
+  setForeground(false);
+  await until(() => recordings.length === 1 && !document.querySelector('body > canvas'), "background did not discard the partial recording");
+  const backgroundTime = time();
+  assert(recordings[0] === null, "partial recording returned a usable blob");
+  await delay(350);
+  assert(time() === backgroundTime && recordings.length === 1, "animation or recording advanced in the background");
+  setForeground(true);
+  await until(() => time() > backgroundTime, "animation preview did not resume");
+  assert(time() - backgroundTime < 0.35, "resuming skipped over the time spent in the background");
+  await until(() => recordings[1]?.size > 32, "interrupted recording did not restart successfully", 8000);
+  passed.push("Background stops 3D playback and discards encoding, then resumes playback and records a complete WebM");
+
+  const clipUrl = URL.createObjectURL(recordings[1]);
+  renderAnimation(clipUrl);
+  await until(() => document.querySelector("video")?.currentTime > 0.05, "animated thumbnail did not play");
+  document.querySelector(".animation-preview-toggle").click();
+  await until(() => document.querySelector(".animation-preview-toggle")?.title === "Play", "manual pause did not apply");
+  await delay(150);
+  setForeground(false);
+  const video = document.querySelector("video");
+  const videoTime = video.currentTime;
+  const manualPauseTime = time();
+  await delay(250);
+  assert(video.paused && Math.abs(video.currentTime - videoTime) < 0.05, "thumbnail kept playing in the background");
+  setForeground(true);
+  await until(() => !video.paused && video.currentTime > videoTime + 0.05, "thumbnail did not resume from its position");
+  assert(time() === manualPauseTime, "returning to the foreground overrode the user's manual pause");
+  URL.revokeObjectURL(clipUrl);
+  passed.push("Animated thumbnails pause and resume, and foregrounding preserves manual 3D pause");
+}

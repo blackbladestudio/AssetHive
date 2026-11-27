@@ -23,6 +23,7 @@ const { execFile } = require("node:child_process");
 const { app, BrowserWindow, crashReporter, ipcMain, dialog, shell, clipboard, nativeImage, powerMonitor } = require("electron");
 const { createScanSchedule, CHANGE_CHECK_INTERVAL_MS } = require("./services/scanSchedule");
 const { recordLibraryChanges } = require("./services/libraryChanges");
+const { createLibraryChangeMaintenance } = require("./services/libraryChangeRetention");
 const { boundedMap } = require('./services/boundedMap');
 const { startupScanDelay, periodicScanDelay } = require("./services/scanTiming");
 const { toAssetListRecord, toAssetIndexRecord } = require("./services/assetListRecord");
@@ -432,6 +433,7 @@ const ENABLE_STARTUP_AUTO_SCAN = process.env.ASSETHIVE_AUTO_SCAN_ON_STARTUP !== 
 const ENABLE_WATCH_AUTO_SCAN = process.env.ASSETHIVE_WATCH_AUTO_SCAN !== "0";
 const ENABLE_PERIODIC_SCAN = process.env.ASSETHIVE_PERIODIC_SCAN !== "0";
 const PERIODIC_SCAN_INTERVAL_MS = Number(process.env.ASSETHIVE_PERIODIC_SCAN_INTERVAL_MS) || CHANGE_CHECK_INTERVAL_MS;
+const BACKGROUND_SCAN_INTERVAL_MS = 30 * 1000;
 let scanInProgress = false;
 // 索引是否已由库扫描产出（权威数据）。后台恢复缓存时据此避免用旧缓存覆盖扫描结果。
 let scanIndexAuthoritative = false;
@@ -451,7 +453,11 @@ let lastWatcherScanAt = 0;
 let suppressWatcherScanUntil = 0;
 let runtimeCacheMonitorTimer = null;
 let periodicScanTimer = null;
+let startupScanPending = false;
+let automaticScanRunning = false;
+let lastAutomaticScanAt = 0;
 const libraryScanSchedules = new Map();
+const maintainLibraryChangeJournals = createLibraryChangeMaintenance();
 let lastScanSnapshotRoot = "";
 let pendingIndexSaveTimer = 0;
 
@@ -952,6 +958,7 @@ function getThumbCacheDir() {
 
 let sharedDerivedCache = null;
 let sharedDerivedCacheRoot = "";
+const foregroundWindows = new Set();
 const previewThumbnailTasks = new Map();
 const deletingCharacterCachePaths = new Set();
 function getSharedDerivedCache() {
@@ -5396,9 +5403,23 @@ async function importCustomAsset(payload, sender) {
     saveImage: (source, name) => compressPreviewImage(source, previewDir, name),
     onProgress: (done, total) => characterProgress(75 + done / total * 20, `正在保存部件预览 ${done}/${total}`) });
   characterProgress(96, '正在完成入库');
+  const writeCharacterWithSharedResources = async () => {
+    const root = settings.customLibraryPath;
+    return require('./services/libraryRecycle').withRecycleLock(root, () => withFileTransaction({ root, owner: 'character-import', key: destinationDir }, async () => {
+      const saved = await writeAssetMetadata(destinationDir, meta, { now, fileName: metadataFileName });
+      const asset = { id: uniqueId, name: assetName, path: destinationDir, metaPath: saved.metaPath, assetType, meta: saved.meta };
+      const manifest = await require('./services/characterSuitExport').buildSuitExport(asset, { includeStaticMeshes: true });
+      const shared = require('./services/characterSharedResources');
+      const state = await require('./services/characterSharedLifecycle').registerManifestResources(root, await shared.readRegistry(root), [asset], [manifest]);
+      await shared.writeRegistryInTransaction(root, state);
+      return saved;
+    }));
+  };
   const metadataWrite = isAnimationImport
     ? { meta, metaPath: copiedModelEntries[0]?.path || "" }
-    : await writeAssetMetadata(destinationDir, meta, { now, fileName: metadataFileName });
+    : isCharacterImport && meta.characterImportGroupId
+      ? await writeCharacterWithSharedResources()
+      : await writeAssetMetadata(destinationDir, meta, { now, fileName: metadataFileName });
   const savedMeta = metadataWrite.meta;
   const jsonPath = metadataWrite.metaPath;
   if (isAnimationImport && copiedModelEntries[0]?.path) {
@@ -7581,6 +7602,7 @@ function restoreSelectedLibraryCache() {
   sharedDerivedCache?.dispose();
   sharedDerivedCache = null;
   scanIndexAuthoritative = false;
+  lastScanSnapshotRoot = "";
   sharedIndexComplete = false;
   sharedSnapshotVersion++;
   sharedPublishedVersion = -1;
@@ -7608,6 +7630,9 @@ async function restoreLibraryIndexCache() {
     // A corrupt local file must not disable a usable shared startup cache.
     let cached = await loadLibrarySqlCache(sqlPath);
     if (!current()) return;
+    // If both snapshots exist, a failed SQLite save may have advanced the
+    // journal cursor using the JSON fallback. Reconcile before trusting it.
+    const localSnapshotRestored = cached !== null && !(await statOrNull(jsonPath));
     if (cached === null) cached = await loadLibraryJsonCache(jsonPath);
     let fromShared = false;
     if (cached === null && current()) {
@@ -7625,6 +7650,7 @@ async function restoreLibraryIndexCache() {
       return;
     }
     index = cached;
+    if (localSnapshotRestored) lastScanSnapshotRoot = normalizeComparePath(restoreRoot);
     getSharedDerivedCache().warmAssets?.(index, { replace: true });
     writeLog("INFO", "library cache restored", { count: index.length, fromShared, durationMs: Date.now() - startedAt });
     for (const win of BrowserWindow.getAllWindows()) {
@@ -7725,11 +7751,17 @@ async function performScan(window, options = {}) {
     }
     scanSchedule = libraryScanSchedules.get(schedulePath);
     const schedule = await scanSchedule.plan({
-      root: scanRoot, libraryRoot: unavailableSourcesToPreserve.has("custom") ? "" : settings.customLibraryPath, reason, hasCache: previousIndex.length > 0,
+      root: scanRoot, libraryRoot: unavailableSourcesToPreserve.has("custom") ? "" : settings.customLibraryPath,
+      reason, hasCache: Boolean(scanRoot && lastScanSnapshotRoot === scanRoot),
       idle: !hasActiveBackgroundImport() && powerMonitor.getSystemIdleTime() >= 60
     });
     if (!current()) return index;
     if (schedule.skip && (schedule.throttled || unavailableSourcesToPreserve.size === 0)) {
+      if (schedule.acknowledgePrunedCursor) {
+        await scanSchedule.complete(scanRoot, true, true, schedule.changeCursor, true)
+          .catch(error => writeLog("WARN", "scan schedule save failed", { message: error?.message || String(error) }));
+        if (!current()) return index;
+      }
       sharedIndexComplete = previousSharedIndexComplete;
       if (previousSharedIndexComplete) publishSharedIndexSnapshot();
       return index;
@@ -7937,6 +7969,7 @@ async function performScan(window, options = {}) {
 async function clearAssetCaches() {
   librarySelectionGeneration++;
   sharedIndexComplete = false;
+  lastScanSnapshotRoot = "";
   libraryCacheRestorePromise = null;
   sharedDerivedCache?.dispose();
   sharedDerivedCache = null;
@@ -8098,28 +8131,47 @@ async function refreshAssetById(assetId) {
   return refreshed;
 }
 
-// 定期增量扫描：网络共享库的 fs.watch 收不到远程同事上传的变更，
-// 靠这个定时器周期性 reconcile，把别人新增的资产补进本地缓存。
-function startPeriodicScan(window) {
-  if (!ENABLE_PERIODIC_SCAN) {
-    return;
-  }
+// The first automatic scan and periodic checks share a timer and never overlap.
+function startPeriodicScan(window, { startup = false, immediate = false } = {}) {
+  if (startup) startupScanPending = true;
+  if (automaticScanRunning || (!startup && startupScanPending && periodicScanTimer)) return;
+  if (!startupScanPending && !ENABLE_PERIODIC_SCAN) return;
   if (periodicScanTimer) {
     globalThis.clearTimeout(periodicScanTimer);
   }
-  const scheduleNext = () => {
-    periodicScanTimer = globalThis.setTimeout(() => {
-      periodicScanTimer = null;
-      const win = (window && !window.isDestroyed())
-        ? window
-        : BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
-      if (!win) return;
-      scheduleNext();
-      void performScan(win, { reason: "periodic", force: true });
-    }, periodicScanDelay(getScanClientId(), PERIODIC_SCAN_INTERVAL_MS));
-    periodicScanTimer.unref?.();
-  };
-  scheduleNext();
+  const findWindow = () => window && !window.isDestroyed()
+    ? window
+    : BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed());
+  if (!findWindow()) return;
+  const clientId = getScanClientId();
+  const interval = foregroundWindows.size ? PERIODIC_SCAN_INTERVAL_MS
+    : Math.max(PERIODIC_SCAN_INTERVAL_MS, BACKGROUND_SCAN_INTERVAL_MS);
+  const sinceLastCheck = Math.max(0, Date.now() - lastAutomaticScanAt);
+  const delay = startupScanPending ? startupScanDelay(clientId, index.length > 0)
+    : immediate ? Math.max(0, PERIODIC_SCAN_INTERVAL_MS - sinceLastCheck) : periodicScanDelay(clientId, interval);
+  periodicScanTimer = globalThis.setTimeout(async () => {
+    periodicScanTimer = null;
+    const win = findWindow();
+    const reason = startupScanPending ? "startup" : "periodic";
+    startupScanPending = false;
+    if (!win) return;
+    automaticScanRunning = true;
+    lastAutomaticScanAt = Date.now();
+    try {
+      await performScan(win, { reason, force: true });
+    } catch (error) {
+      writeLog("WARN", "automatic scan failed", { reason, message: error?.message });
+    } finally {
+      automaticScanRunning = false;
+      startPeriodicScan(win);
+      void maintainLibraryChangeJournals(getLibraryRootPath()).then(result => {
+        if (result && (result.archived || result.deleted || result.skipped)) {
+          writeLog("INFO", "shared change journal maintenance", result);
+        }
+      }).catch(error => writeLog("WARN", "shared change journal maintenance failed", { message: error?.message }));
+    }
+  }, delay);
+  periodicScanTimer.unref?.();
 }
 function startWatching(window) {
   const customRoot = String(settings.customLibraryPath || "").trim();
@@ -8316,6 +8368,25 @@ function createWindow() {
     windowOptions.icon = appIconPath;
   }
   const win = new BrowserWindow(windowOptions);
+  const publishForegroundState = () => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+    const hadForeground = foregroundWindows.size > 0;
+    const foreground = win.isVisible() && !win.isMinimized() && win.isFocused();
+    if (foreground) foregroundWindows.add(win);
+    else foregroundWindows.delete(win);
+    const hasForeground = foregroundWindows.size > 0;
+    if (periodicScanTimer && hadForeground !== hasForeground) {
+      startPeriodicScan(win, { immediate: hasForeground });
+    }
+    win.webContents.send("window:foregroundChanged", foreground);
+  };
+  for (const event of ["show", "hide", "minimize", "restore", "focus", "blur"]) {
+    win.on(event, publishForegroundState);
+  }
+  win.webContents.ipc.on("window:requestForeground", publishForegroundState);
+  win.once("closed", () => {
+    foregroundWindows.delete(win);
+  });
   const diagnostics = createRendererDiagnostics({
     app, webContents: win.webContents, crashReporting: localCrashReporting, writeLog,
     getActivity: () => ({
@@ -8395,22 +8466,9 @@ function createWindow() {
     writeLog("INFO", "window ready-to-show", { durationMs: Date.now() - rendererLoadStartedAt });
     showWindow();
     startWatching(win);
-    startPeriodicScan(win);
-    if (shouldAutoScanOnStartup()) {
-      writeLog("INFO", "startup auto scan scheduled");
-      globalThis.setTimeout(() => {
-        if (win.isDestroyed()) {
-          return;
-        }
-        // 等索引缓存恢复后再扫描，避免缓存未就绪时退化成全量扫描；
-        // 缓存恢复卡住（网络共享不可用）时超时后照常扫描。
-        void waitForLibraryCacheRestore().then(() => {
-          if (!win.isDestroyed()) {
-            void performScan(win, { reason: "startup", force: true });
-          }
-        });
-      }, startupScanDelay(getScanClientId(), index.length > 0));
-    }
+    const startup = shouldAutoScanOnStartup();
+    if (startup) writeLog("INFO", "startup auto scan scheduled");
+    startPeriodicScan(win, { startup });
   });
 
   win.webContents.on("did-finish-load", () => {
@@ -10526,20 +10584,26 @@ app.whenReady().then(async () => {
         const result = await operation({ ...payload, root, asset, onProgress: report });
         if (!result.ok) { emitCustomSaveFailure(event.sender, result.message); return result; }
         report(85, '正在同步资产列表…');
-        const refreshed = await refreshAssetById(asset.id);
+        const affectedIds = [...new Set([asset.id, ...(result.affectedAssetIds || [])])];
+        const refreshedAssets = [];
+        for (const id of affectedIds) {
+          const changed = await refreshAssetById(id);
+          if (changed) refreshedAssets.push(changed);
+        }
+        const refreshed = refreshedAssets.find(item => item.id === asset.id);
         let indexPending = false;
         try {
-          if (!refreshed || normalizeComparePath(settings.customLibraryPath) !== normalizeComparePath(root)) throw new Error("资源库已切换或索引刷新失败");
-          await applyLibrarySqlCacheChanges({ upsertAssets: [refreshed], deleteIds: [] });
+          if (refreshedAssets.length !== affectedIds.length || normalizeComparePath(settings.customLibraryPath) !== normalizeComparePath(root)) throw new Error("资源库已切换或索引刷新失败");
+          await applyLibrarySqlCacheChanges({ upsertAssets: refreshedAssets, deleteIds: [] });
           // The single changed character is already durable in SQLite. Avoid
           // serializing every environment/animation record twice per preview/status edit.
           if (!getLibraryDb() && !await saveIndexSnapshot(index)) throw new Error("索引保存失败");
           sharedSnapshotVersion++;
           if (sharedIndexComplete && !scanInProgress) publishSharedIndexSnapshot();
         } catch (error) { indexPending = true; writeLog("ERROR", "character update index pending", { assetId: asset.id, message: error.message }); }
-        const changedRecord = refreshed && toAssetListRecord(refreshed);
+        const changedRecords = refreshedAssets.map(toAssetListRecord);
         for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send("assets:change",
-          changedRecord ? { incremental: true, records: [changedRecord] } : undefined);
+          changedRecords.length ? { incremental: true, records: changedRecords } : undefined);
         report(100, '更新完成');
         return { ...result, indexPending, asset: refreshed || null };
       } catch (error) {

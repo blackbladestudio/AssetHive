@@ -330,7 +330,7 @@ test('monster clothing or skin choice survives send and reopening without exposi
 
 test('rename reminder clears only after a complete successful send of the current name revision', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'character-rename-sync-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }));
   await fs.writeFile(path.join(root, 'color.tga'), 'texture');
   const meta = { id: 'rename', name: 'Executioner', assetType: 'monster', category: '3_Elite',
     character: { family: 'monster', name: 'Executioner', ueNameSyncPending: 'rename-1' },
@@ -405,14 +405,14 @@ test('fresh Monster and NPC layouts use only explicit variants for Mesh subfolde
       const byName=new Map(result.entries.map(entry=>[entry.name,entry]));
       for(const form of ['01','02']) {
         const mesh=byName.get(`SK_${stem}_${form}`);
-        assert.equal(mesh.targetPath,`${bodyRoot}/SK_${stem}_${form}`);
-        assert.equal(mesh.skeletonPath,`${bodyRoot}/SKEL_${stem}_${form}`);
-        assert.equal(mesh.config.physicsAssetPath,`${bodyRoot}/SK_${stem}_${form}_Physics`);
+        assert.equal(mesh.targetPath,`${bodyRoot}/SkeletalMesh/SK_${stem}_${form}`);
+        assert.equal(mesh.skeletonPath,`${bodyRoot}/SkeletalMesh/SKEL_${stem}_${form}`);
+        assert.equal(mesh.config.physicsAssetPath,`${bodyRoot}/SkeletalMesh/SK_${stem}_${form}_Physics`);
         assert.equal(byName.get(`SM_${stem}_${form}`).targetPath,`${bodyRoot}/StaticMesh/SM_${stem}_${form}`);
         assert.equal(byName.get(`MI_${stem}_${form}`).targetPath,`${bodyRoot}/Material/MI_${stem}_${form}`);
         assert.equal(byName.get(`T_${stem}_${form}_D`).targetPath,`${bodyRoot}/Texture/T_${stem}_${form}_D`);
       }
-      assert.equal(byName.get(`SK_WP_${stem}_Axe`).targetPath,`${bodyRoot}/Weapon/SK_WP_${stem}_Axe`);
+      assert.equal(byName.get(`SK_WP_${stem}_Axe`).targetPath,`${bodyRoot}/Weapon/SkeletalMesh/SK_WP_${stem}_Axe`);
       assert.equal(byName.get(`SM_WP_${stem}_Axe`).targetPath,`${bodyRoot}/Weapon/StaticMesh/SM_WP_${stem}_Axe`);
       assert.equal(byName.get(`MI_${stem}_Axe`).targetPath,`${bodyRoot}/Weapon/Material/MI_${stem}_Axe`);
       assert.equal(byName.get(`T_${stem}_Axe_D`).targetPath,`${bodyRoot}/Weapon/Texture/T_${stem}_Axe_D`);
@@ -472,9 +472,10 @@ test('Monster forms and owned weapons export together with independent skeletons
   assert.equal(weaponMaterial.targetPath,manifest.targetRoot+'/Mesh/Weapon/Material/MI_Executioner_GreatSword');
   assert(manifest.entries.filter(e=>e.kind==='material' && e!==weaponMaterial).every(e=>e.config.materialRole==='monsterCloth' && e.config.parentPath==='/Game/MaterialLibrary/Character/Common/M_Char_Monster_ComplexShading'));
   const weaponMesh = meshes.find(e=>e.name==='SK_WP_Executioner_GreatSword');
-  assert.equal(weaponMesh.targetPath,manifest.targetRoot+'/Mesh/Weapon/SK_WP_Executioner_GreatSword');
+  assert.equal(weaponMesh.targetPath,manifest.targetRoot+'/Mesh/Weapon/SkeletalMesh/SK_WP_Executioner_GreatSword');
   assert.equal(weaponMesh.materials.MI_Executioner_01_WP_GreatSword,weaponMaterial.key);
-  assert(manifest.entries.filter(e=>e.kind==='texture' && e.groupName==='GreatSword').every(e=>e.targetPath.includes('/Weapon/Texture/') && e.config.virtualTexture===false));
+  assert(manifest.entries.filter(e=>e.kind==='texture' && e.groupName==='GreatSword').every(e=>e.targetPath.includes('/Weapon/Texture/') && e.config.virtualTexture===true));
+  assert.equal(weaponMaterial.config.virtualTexture, true);
   const emissiveTextures = manifest.entries.filter(e=>e.kind==='texture' && e.channel==='E');
   assert.equal(emissiveTextures.length,3);
   assert.ok(emissiveTextures.every(e=>e.name.endsWith('_E') && e.targetPath.endsWith('_E')));
@@ -741,4 +742,34 @@ test('Observed UE deletion is recorded once and preserves source update time', (
   recordUEPresenceChanges(meta, receipt, [{key:'head',present:true,path:'/Game/Test/SM_Head'}], 'D:/Zion.uproject');
   assert.equal(meta.characterUpdateHistory[1].label, '检测到 UE 资源恢复');
   assert.equal(meta.characterManifest.contentUpdatedAt, 'source-time');
+});
+
+
+test('layout revision preserves linked monster mesh, rig and intentionally absent physics', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'monster-layout-receipt-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'mesh.fbx'), 'existing monster');
+  const asset = { id: 'layout', name: 'Beast', assetType: 'monster', path: dir, meta: {
+    category: '1_Boss', character: { name: 'Beast' }, characterManifest: { files: [
+      { role: 'skeletalMesh', normalizedName: 'SK_Beast_01.fbx', originalName: 'SK_LegacyBeast.fbx', storedPath: 'mesh.fbx' }
+    ] }
+  } };
+  const analyze = async () => ({ meshKind: 'skeletalMesh', hasSkin: true, skinnedMeshCount: 1, materialNames: [] });
+  const fresh = await buildSuitExport(asset, {}, analyze);
+  const association = await buildSuitExport(asset, { associationSync: true }, analyze);
+  assert.ok(association.entries.find(e => e.kind === 'skeletalMesh').associationNames.includes('SK_LegacyBeast.fbx'));
+  const mesh = fresh.entries.find(e => e.kind === 'skeletalMesh');
+  assert.ok(mesh.targetPath.endsWith('/SkeletalMesh/SK_Beast_01'));
+  const oldPath = fresh.targetRoot + '/Mesh/SK_Beast_01';
+  const receipt = { entries: { [mesh.key]: { kind: 'skeletalMesh', lastSuccessPath: oldPath,
+    skeletonPath: fresh.targetRoot + '/Mesh/SKEL_Beast_01', physicsAssetPath: '' } } };
+  const options = { destinationReceipt: receipt };
+  const linked = await buildSuitExport(asset, options, analyze);
+  const result = linked.entries.find(e => e.key === mesh.key);
+  assert.equal(result.targetPath, oldPath);
+  assert.equal(result.skeletonPath, receipt.entries[mesh.key].skeletonPath);
+  assert.equal(result.config.physicsAssetPath, '');
+  assert.equal((await buildSuitExport(asset, options, analyze)).manifestHash, linked.manifestHash);
+  receipt.entries[mesh.key].lastSuccessPath = '/Game/AnotherProject/Old';
+  assert.equal((await buildSuitExport(asset, options, analyze)).entries.find(e => e.key === mesh.key).targetPath, mesh.targetPath);
 });

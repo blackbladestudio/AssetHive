@@ -115,6 +115,15 @@ async function buildSuitExport(asset, options = {}, analyze = analyzeFbxInWorker
     return sources.get(relative);
   };
   const result = await buildSuitExportBase(asset, options, analyze, hasAlpha, resolveSource);
+  if (options.associationSync) {
+    const files = activeCharacterFiles(asset);
+    const inspected = await Promise.allSettled(files.map(async file => ({ file, source: await sources.get(file.storedPath) })));
+    for (const entry of result.entries) {
+      const source = entry.sourcePath && inspected.find(item => item.status === 'fulfilled'
+        && item.value.source && normalize(item.value.source.sourcePath) === normalize(entry.sourcePath))?.value.file;
+      entry.associationNames = [...new Set([entry.name, source?.originalName, source?.normalizedName].filter(Boolean))];
+    }
+  }
   const outputWeaponName = value => weaponPackageOutput(value, result.name);
   result.entries = result.entries.map(entry => {
     if (asset.assetType === 'weapon' && outputWeaponName(entry.name) !== entry.name) {
@@ -131,7 +140,28 @@ async function buildSuitExport(asset, options = {}, analyze = analyzeFbxInWorker
       skeletonPath: next.skeletonPath, materials: next.materials, externalMaterials: next.externalMaterials,
       textures: next.textures, heroSharedRoles: next.heroSharedRoles }) };
   });
-  await require('./characterLodExport').attachCharacterLods(result, asset, options, analyze, resolveSource);
+  // A layout revision applies to new resources only. Use the receipt belonging
+  // to the connected project, never another colleague's local project path.
+  for (const entry of result.entries) {
+    const previous = options.destinationReceipt?.entries?.[entry.key];
+    const previousPath = previous?.lastSuccessPath;
+    if (previousPath?.startsWith(result.targetRoot + '/') && previous.kind === entry.kind) {
+      entry.targetPath = previousPath.split('.')[0];
+      entry.name = entry.targetPath.slice(entry.targetPath.lastIndexOf('/') + 1);
+      const choice = options.skeletonOverrides?.[entry.key] || options.skeletonSelection;
+      if (entry.kind === 'skeletalMesh' && entry.config.ownSkeleton && (!choice || choice.mode === 'auto')) {
+        const oldDirectory = entry.targetPath.slice(0, entry.targetPath.lastIndexOf('/'));
+        entry.skeletonPath = previous.skeletonPath?.startsWith('/Game/')
+          ? previous.skeletonPath.split('.')[0]
+          : `${oldDirectory}/${entry.skeletonPath.slice(entry.skeletonPath.lastIndexOf('/') + 1)}`;
+        entry.config = { ...entry.config, ...(previous.physicsAssetPath === '' ? { createPhysicsAsset: false } : {}), physicsAssetPath: previous.physicsAssetPath?.startsWith('/Game/')
+          ? previous.physicsAssetPath.split('.')[0] : previous.physicsAssetPath === '' ? '' : `${oldDirectory}/${entry.name}_Physics` };
+        entry.fingerprint = hash({ sourceHash: entry.sourceHash, config: entry.config,
+          skeletonPath: entry.skeletonPath, materials: entry.materials, externalMaterials: entry.externalMaterials,
+          textures: entry.textures, heroSharedRoles: entry.heroSharedRoles });
+      }
+    }
+  }
   // An adopted UE object can have a historical filename/location. Keep that
   // destination until the owner is actually renamed; editing bytes is not a move.
   const intake = asset.meta?.characterUEIntake;
@@ -157,6 +187,17 @@ async function buildSuitExport(asset, options = {}, analyze = analyzeFbxInWorker
       }
     }
   }
+  // Handoff must follow the same preserved destination as its paired SM.
+  for (const entry of result.entries.filter(item => item.materialHandoff)) {
+    const pairedKey = entry.key.replace(':skeletalMesh:', ':staticMesh:');
+    const paired = result.entries.find(item => item.key === pairedKey);
+    const receipt = options.destinationReceipt?.entries?.[pairedKey];
+    const adopted = intake?.assetName === result.name ? intake.resources?.[pairedKey] : null;
+    const pairedPath = paired?.targetPath || (receipt?.kind === 'staticMesh' ? receipt.lastSuccessPath : '')
+      || (adopted?.kind === 'staticMesh' && adopted.path?.startsWith(intake.enginePath + '/') ? adopted.path : '');
+    if (pairedPath?.startsWith(result.targetRoot + '/')) entry.materialHandoff.staticTargetPath = pairedPath.split('.')[0];
+  }
+  await require('./characterLodExport').attachCharacterLods(result, asset, options, analyze, resolveSource);
   result.manifestHash = hash(result.entries);
   if (asset.assetType === 'weapon') result.materialRequests = result.materialRequests.map(request => ({ ...request, meshName: outputWeaponName(request.meshName) }));
   return result;
@@ -276,7 +317,7 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
       const resourceRoot = monster ? `${monsterMeshRoot}${weaponSubject ? '/Weapon' : ''}` : weaponSubject ? `${targetRoot}/Weapon` : targetRoot;
       const componentFolder = weapon && selectedParts.length > 1 && outputSubject ? '/' + safeName(outputSubject) : '';
       const meshDirectory = monster ? resourceRoot : `${resourceRoot}/Mesh`;
-      const skeletalDirectory = monster ? meshDirectory : `${meshDirectory}/SkeletalMesh${componentFolder}`;
+      const skeletalDirectory = `${meshDirectory}/SkeletalMesh${componentFolder}`;
       const meshName = safeName(`${kind === 'skeletalMesh' ? 'SK' : 'SM'}_${weaponSubject ? 'WP_' : ''}${outputName}${outputSubject ? '_' + outputSubject : ''}`);
       const meshKey = `${assetId}:${kind}:${token(subject) || 'main'}`;
       const materials = {};
@@ -374,7 +415,9 @@ async function buildSuitExportBase(asset, options = {}, analyze = analyzeFbxInWo
     const resourceRoot = monster ? `${monsterMeshRoot}${group.monsterWeapon ? '/Weapon' : ''}` : group.monsterWeapon ? `${targetRoot}/Weapon` : targetRoot;
     const groupOutputName = group.monsterWeapon ? group.name : outputSuffix(group.name);
     const textureKeys = {};
-    const groupUsesVT = item || !(weapon || group.monsterWeapon) || group.files.some(file => file.channel === 'ShadingMask');
+    // All character textures, including owned weapons and auxiliary maps, use VT.
+    // Keep the material's sampler switch in sync with the texture import setting.
+    const groupUsesVT = true;
     for (const { file, channel } of group.files) {
       const textureName = safeName(`T_${group.monsterWeapon && !monster ? 'WP_' : ''}${outputName}${groupOutputName ? '_' + groupOutputName : ''}_${channel}`);
       const key = `${assetId}:texture:${groupKey}:${channel}`;
@@ -461,6 +504,9 @@ async function deletedSuitOwners(root, assets) {
 async function sendSuitJob(assets, options, onProgress, client) {
   if (options.suitOptions?.linkOnly) return require('./characterLinkOnly').sendCharacterLinkJob(assets, options, onProgress, client);
   const editor = await client.getEditorInfo();
+  if (options.suitOptions?.associationSync && !await require('./characterPluginCapabilities').hasCharacterCapability(client, editor, 'characterAssociationSyncV1')) {
+    throw new Error('请更新 UE 插件并重启，以使用按 AssetHive 最新版本关联并同步的流程');
+  }
   if (!editor?.capabilities?.includes('characterSuitV1')) throw new Error('请编译并加载支持套装导入的 AssetHive 插件');
   if (options.unrealProjectPath && normalize(options.unrealProjectPath) !== normalize(editor.projectPath)) throw new Error('连接的 UE 工程与所选目标不一致');
   const suits = [];
@@ -470,6 +516,7 @@ async function sendSuitJob(assets, options, onProgress, client) {
   for (const [assetIndex, asset] of uniqueAssets.entries()) {
     const saved = projectIdentity.projectReceipt(asset.meta, editor)?.options || {};
     const selected = mergeSuitExportOptions(saved, options.suitOptions);
+    selected.associationSync = Boolean(options.suitOptions?.associationSync);
     if (selected.materialMode === 'blockout'
       && !await require('./characterPluginCapabilities').hasCharacterCapability(client, editor, 'characterBlockoutInstancesV2')) {
       throw new Error('请更新 AssetHive UE 插件，以保留 Blockout 的多材质槽和基础颜色。');
@@ -483,7 +530,7 @@ async function sendSuitJob(assets, options, onProgress, client) {
     const startedAt = Date.now();
     const reportPreparation = (fraction, message) => onProgress?.({ percent: (assetIndex + fraction) / uniqueAssets.length * 25, message });
     reportPreparation(0, `正在检查 ${asset.name} 的模型与贴图…`);
-    suits.push(await buildSuitExport(asset, { ...selected, ...(selected.inspectAllMeshes ? { includeStaticMeshes: true } : {}), onPreparationProgress: reportPreparation }));
+    suits.push(await buildSuitExport(asset, { ...selected, destinationReceipt: projectIdentity.projectReceipt(asset.meta, editor), ...(selected.inspectAllMeshes ? { includeStaticMeshes: true } : {}), onPreparationProgress: reportPreparation }));
     reportPreparation(1, '文件检查完成');
     console.info(`[SuitExport] manifest ${asset.id}: ${Date.now() - startedAt}ms`);
   }
@@ -503,6 +550,7 @@ async function sendSuitJob(assets, options, onProgress, client) {
     }
   }
   const mergedSuits = [...uniqueSuits.values()];
+  require('./characterLodCapabilities').requireCharacterLodCapabilities(mergedSuits, editor.capabilities);
   if (mergedSuits.some(suit => suit.entries.some(entry => entry.materialHandoff))
     && !await require('./characterPluginCapabilities').hasCharacterCapability(client, editor, 'characterMaterialHandoffV1')) {
     throw new Error('请更新 AssetHive UE 插件：当前插件尚不支持 SM/SK 独立发送及已发送材质复用，未发送模型。');
@@ -516,25 +564,36 @@ async function sendSuitJob(assets, options, onProgress, client) {
     throw new Error('请更新 AssetHive UE 插件并重启编辑器：当前插件不支持 SM/SK LOD 导入验证与 LOD1 自动减面。');
   }
   for (const suit of mergedSuits) suit.entries.sort((a, b) => ['texture', 'material', 'staticMesh', 'skeletalMesh'].indexOf(a.kind) - ['texture', 'material', 'staticMesh', 'skeletalMesh'].indexOf(b.kind));
+  const sharedLifecycle = require('./characterSharedLifecycle');
+  const explicitSharedKeys = new Set(Object.keys(options.suitOptions?.monsterMaterialTypes || {}));
+  if (options.suitOptions?.normalFormat) for (const suit of mergedSuits) for (const entry of suit.entries) if (entry.kind === 'texture') explicitSharedKeys.add(entry.key);
+  const sharedPlan = await sharedLifecycle.prepareSharedExport(options.customLibraryPath, uniqueAssets, mergedSuits, explicitSharedKeys);
+  const manifestHash = hash(Object.keys(sharedPlan.aliases).length ? { local: mergedSuits, shared: sharedPlan.suits } : mergedSuits);
   const phase = options.suitPhase === 'apply' ? 'apply' : 'inspect';
-  if (phase === 'apply' && options.suitManifestHash !== hash(mergedSuits)) throw new Error('资源在检查后已变化，请重新检查');
+  if (phase === 'apply' && options.suitManifestHash !== manifestHash) throw new Error('资源在检查后已变化，请重新检查');
   onProgress?.({ percent: 25, message: phase === 'inspect' ? '正在核对 UE 中的整套资源…' : '正在发送整套中新增或变化的资源…' });
   const ueStartedAt = Date.now();
   const deletedOwnerIds = await deletedSuitOwners(options.customLibraryPath, assets);
-  const reply = await client.importAssets({ characterSuit: { version: VERSION, phase, suits: mergedSuits,
-    deletedOwnerIds, decisions: options.suitDecisions || {}, inspectToken: options.suitInspectToken || '' } }, { projectPath: editor.projectPath,
+  const reply = await client.importAssets({ characterSuit: { version: VERSION, phase, suits: sharedPlan.suits,
+    associationSync: Boolean(options.suitOptions?.associationSync),
+    deletedOwnerIds, decisions: require('./characterSharedResources').projectSharedDecisions(options.suitDecisions || {}, sharedPlan.aliases), inspectToken: options.suitInspectToken || '' } }, { projectPath: editor.projectPath,
       onProgress: progress => onProgress?.({ ...progress, percent: 25 + Math.max(0, Math.min(100, Number(progress.percent) || 0)) * 0.7 }) });
   console.info(`[SuitExport] UE ${phase}: ${Date.now() - ueStartedAt}ms`);
   const result = reply.suitResult;
   if (result?.error) throw new Error(result.error);
   if (!result || !Array.isArray(result.entries)) throw new Error('插件没有返回套装逐项结果');
+  const changedSharedKeys = new Set(result.entries.filter(row => !['unchanged', 'retained'].includes(row.action)).map(row => row.key));
+  const sharedAffectedIds = new Set((sharedPlan.sharedResources || []).filter(resource => changedSharedKeys.has(resource.key)).flatMap(resource => resource.assetIds));
+  result.sharedAffectedAssets = (sharedPlan.affectedAssets || []).filter(asset => sharedAffectedIds.has(asset.assetId));
+  result.entries = sharedLifecycle.localizeSharedRows(result.entries, sharedPlan.aliases);
   const manifestEntries = new Map(mergedSuits.flatMap(suit => suit.entries).map(entry => [entry.key, entry]));
   if (phase === 'apply') result.entries = result.entries.map(row =>
     require('./characterLodReceipt').verifyCharacterLodReceipt(manifestEntries.get(row.key), row));
   result.entries = result.entries.map(row => ({ ...row,
     ...(row.kind === 'skeletalMesh' ? { skeletonSelection: effectiveOptions.get(row.assetId)?.skeletonOverrides?.[row.key]
       || effectiveOptions.get(row.assetId)?.skeletonSelection || { mode: 'auto' },
-      skeletonPath: row.skeletonPath || manifestEntries.get(row.key)?.skeletonPath } : {}),
+      skeletonPath: row.skeletonPath || manifestEntries.get(row.key)?.skeletonPath,
+      physicsAssetPath: row.physicsAssetPath ?? manifestEntries.get(row.key)?.config?.physicsAssetPath } : {}),
     dependencies: row.effectiveDependencies || Object.values(manifestEntries.get(row.key)?.materials || manifestEntries.get(row.key)?.textures || {}),
     groupName: manifestEntries.get(row.key)?.groupName,
     partSlot: manifestEntries.get(row.key)?.partSlot || row.partSlot }));
@@ -585,7 +644,7 @@ async function sendSuitJob(assets, options, onProgress, client) {
   }
   const monsterMaterialGroups = mergedSuits.flatMap(suit => suit.entries.filter(entry => entry.kind === 'material'
     && ['monsterCloth', 'monsterSkin'].includes(entry.config.materialRole)).map(entry => ({
-      key: entry.key, name: entry.groupName || suit.name, assetName: suit.name, type: entry.materialType || ''
+      key: entry.key, name: entry.groupName || suit.name, assetName: suit.name, type: sharedPlan.materialTypes?.[entry.key] || entry.materialType || ''
     })));
   onProgress?.({ percent: 100, message: phase === 'inspect' ? '检查完成' : '发送完成' });
   const resultRows = new Map(result.entries.map(row => [row.key, row]));
@@ -606,7 +665,7 @@ async function sendSuitJob(assets, options, onProgress, client) {
       }
     }
   }
-  return { ok: true, suitResult: { ...result, materialMode: [...effectiveOptions.values()].every(value => value.materialMode === 'blockout') ? 'blockout' : 'formal', monsterMaterialGroups, materialRequests, projectPath: editor.projectPath, manifestHash: hash(mergedSuits), phase },
+  return { ok: true, suitResult: { ...result, materialMode: [...effectiveOptions.values()].every(value => value.materialMode === 'blockout') ? 'blockout' : 'formal', monsterMaterialGroups, materialRequests, projectPath: editor.projectPath, manifestHash, phase },
     message: phase === 'inspect' ? '套装检查完成' : '套装逐项处理完成' };
 }
 
@@ -626,10 +685,11 @@ async function refreshSuitStatus(asset, options, client) {
   const plan = savedReceipt && Object.keys(savedReceipt.entries || {}).length ? null : await buildSuitExport(asset, { includeStaticMeshes: true });
   const current = savedReceipt?.entries && Object.keys(savedReceipt.entries).length ? savedReceipt.entries : Object.fromEntries((plan?.entries || []).map(entry => [entry.key,
     { key: entry.key, kind: entry.kind, name: entry.name, partSlot: entry.partSlot, targetPath: entry.targetPath }]));
-  const expected = Object.entries(current).filter(([, row]) => row.action !== 'retained').map(([key, row]) => ({ key, path: row.livePath || row.path || row.lastSuccessPath || row.targetPath, kind: row.kind }));
-  const reply = await client.importAssets({ characterSuit: { version: VERSION, phase: 'status', suits: [{ assetId: asset.id, entries: expected }] } }, { projectPath: editor.projectPath });
+  const expected = Object.entries(current).filter(([, row]) => row.action !== 'retained').map(([key, row]) => ({ key, assetId: asset.id, sharedEntryKey: row.sharedEntryKey, path: row.livePath || row.path || row.lastSuccessPath || row.targetPath, kind: row.kind }));
+  const sharedStatus = require('./characterSharedLifecycle').projectStatusEntries(expected);
+  const reply = await client.importAssets({ characterSuit: { version: VERSION, phase: 'status', suits: [{ assetId: asset.id, entries: sharedStatus.entries }] } }, { projectPath: editor.projectPath });
   if (reply.suitResult?.error || !Array.isArray(reply.suitResult?.entries)) throw new Error(reply.suitResult?.error || 'UE 未返回资源状态');
-  const updates = reply.suitResult.entries.filter(row => row.assetId === asset.id && typeof row.present === 'boolean');
+  const updates = require('./characterSharedLifecycle').localizeSharedRows(reply.suitResult.entries, sharedStatus.aliases).filter(row => row.assetId === asset.id && typeof row.present === 'boolean');
   if (expected.some(row => !updates.some(update => update.key === row.key))) throw new Error('UE 状态回执不完整，未改动已有路径记录');
   if (savedReceipt?.projectId === projectIdentity.projectId(editor) && !updates.some(row => current[row.key] && (current[row.key].missingInUE !== !row.present || current[row.key].livePath !== row.path || Boolean(current[row.key].associationPending) !== Boolean(row.associationPending)))) return false;
   await updateAssetMetadataFile(asset.metaPath, meta => {

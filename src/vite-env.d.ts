@@ -86,6 +86,7 @@ declare global {
       windowMinimize?: () => Promise<{ ok: boolean }>;
       windowToggleMaximize?: () => Promise<{ ok: boolean; maximized?: boolean }>;
       windowClose?: () => Promise<{ ok: boolean }>;
+      onWindowForegroundChange?: (callback: (foreground: boolean) => void) => () => void;
       setImportQueueActive?: (active: boolean) => Promise<{ ok: boolean }>;
       shouldCloseAfterCurrentImport?: () => Promise<boolean>;
       setTaskbarProgress?: (value: number) => Promise<{ ok: boolean }>;

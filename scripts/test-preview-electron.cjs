@@ -10,7 +10,7 @@ async function runElectron() {
   app.commandLine.appendSwitch("disable-background-timer-throttling");
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 1200, height: 900,
-    webPreferences: { offscreen: true, backgroundThrottling: false, contextIsolation: true, nodeIntegration: false }
+    webPreferences: { offscreen: true, backgroundThrottling: false, contextIsolation: true, nodeIntegration: false, webSecurity: false }
   });
   try {
     await window.loadFile(path.join(directory, "index.html"));
@@ -33,6 +33,15 @@ async function launch() {
   const root = path.resolve(__dirname, "..");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "assethive-preview-test-"));
   const fixture = path.join(directory, "素材 #1 100%.png");
+  const animationFixture = path.join(directory, "animation.fbx");
+  const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AnimationClip, VectorKeyframeTrack } = await import("three");
+  const { FBXExporter } = await import("@comfyorg/fbx-exporter-three");
+  const scene = new Scene();
+  const mesh = new Mesh(new BoxGeometry(1, 1, 1), new MeshStandardMaterial());
+  mesh.name = "MovingBox";
+  scene.add(mesh);
+  const clip = new AnimationClip("Slide", 3, [new VectorKeyframeTrack("MovingBox.position", [0, 3], [0, 0, 0, 1, 0, 0])]);
+  fs.writeFileSync(animationFixture, new FBXExporter().parseSync(scene, { animations: [clip] }));
   const importThumbnailsOnly = process.argv.includes("--import-thumbnails-only");
   await sharp({ create: { width: importThumbnailsOnly ? 4096 : 320, height: importThumbnailsOnly ? 2048 : 160, channels: 4, background: "#58ad86" } }).png().toFile(fixture);
   await sharp({ create: { width: 160, height: 80, channels: 3, background: "#387da8" } }).png().toFile(fixture + ".thumb.png");
@@ -53,6 +62,8 @@ async function launch() {
     contents: `import { memo, useState, useRef, useEffect, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { AssetThumbnail } from "./src/ui/AssetThumbnail";
+import { AnimationPreview } from "./src/ui/AnimationPreview";
+import { AnimationPreviewVideo } from "./src/ui/AnimationPreviewVideo";
 import { ImportPreviewThumbnail } from "./src/ui/ImportPreviewThumbnail";
 import { DetailPreview } from "./src/ui/DetailPreview";
 import { PreviewLoader } from "./src/ui/previewLoader";
@@ -68,10 +79,12 @@ ${motionPath}
 ${previewSlot}
 ${legacy}
 const fixture = ${JSON.stringify(fixture)};
+const animationFixture = ${JSON.stringify(animationFixture)};
 ${renderer}`,
     resolveDir: root, loader: "tsx"
-  }, bundle: true, outfile: path.join(directory, "renderer.js"), jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' }, logLevel: "silent" });
-  fs.writeFileSync(path.join(directory, "index.html"), `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="renderer.css"><div id="root"></div><script>window.previewClipboardOnly = ${process.argv.includes("--clipboard-only")}; window.importThumbnailsOnly = ${importThumbnailsOnly}; window.normalBatchOnly = ${process.argv.includes("--normal-batch-only")};</script><script src="renderer.js"></script>`);
+  }, bundle: true, outfile: path.join(directory, "renderer.js"), jsx: "automatic", loader: { ".otf": "file" },
+  define: { "process.env.NODE_ENV": '"production"' }, logLevel: "silent" });
+  fs.writeFileSync(path.join(directory, "index.html"), `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="renderer.css"><div id="root"></div><script>window.previewClipboardOnly = ${process.argv.includes("--clipboard-only")}; window.importThumbnailsOnly = ${importThumbnailsOnly}; window.normalBatchOnly = ${process.argv.includes("--normal-batch-only")}; window.animationBackgroundOnly = ${process.argv.includes("--animation-background-only")};</script><script src="renderer.js"></script>`);
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   const child = spawn(require("electron"), [path.join(__dirname, "test-preview-electron.cjs"), directory], { env, windowsHide: true, stdio: "inherit" });

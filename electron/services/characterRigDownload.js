@@ -17,8 +17,10 @@ async function downloadCharacterRigFiles({ root, asset, slot, destination, onPro
     const part = slot ? listCharacterComponents(parent).find(item => item.slot === slot) : null;
     if (slot && !part) throw new Error('目标部件不存在，请刷新');
     const files = (part ? part.files : activeCharacterFiles(parent))
-      .filter(file => ['model', 'staticMesh', 'skeletalMesh'].includes(file.role));
-    if (!files.length) throw new Error('当前没有可下载的模型');
+      .filter(file => ['model', 'staticMesh'].includes(file.role)
+        && !/^SK_/i.test(path.basename(file.normalizedName || file.storedPath))
+        && require('../../shared/characterLods.cjs').level(file.normalizedName || file.storedPath) === 0);
+    if (!files.length) throw new Error('当前没有可供绑定的 SM LOD0，请先上传美术基础模型');
     const names = new Set();
     const plan = [];
     for (const file of files) {
@@ -49,8 +51,9 @@ async function downloadCharacterRigFiles({ root, asset, slot, destination, onPro
       }
       await fs.writeFile(path.join(output, '绑定说明.txt'), [
         `资产：${parent.meta.name || parent.name}`, `范围：${part ? part.name : '当前资产'}`,
-        'Models：当前版本模型，不含贴图。这里是独立工作副本，可以用于外部绑定。',
-        '完成绑定后导出带骨骼与蒙皮的 FBX。',
+        'Models：当前有效版本的 SM LOD0 文件集，不含独立 LOD1–5、SK 或贴图。这里是用于外部绑定的独立工作副本。',
+        '只绑定 LOD0，完成后导出带骨骼与蒙皮的 SK LOD0 FBX。无需手工制作 SK LOD1。',
+        '配套 SM LOD1 可先后上传；文件齐全后，从 AssetHive 发送 UE 自动生成非布料后续 LOD。',
         '回到 AssetHive 的同一资产或部件，点击“上传绑定”，选择 FBX，检查后填写备注并确认更新。',
         '这会新增或更新骨骼模型，保留静态模型。'
       ].join('\r\n'), 'utf8');

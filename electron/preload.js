@@ -25,6 +25,12 @@ contextBridge.exposeInMainWorld("arkhive", {
   windowMinimize: () => ipcRenderer.invoke("window:minimize"),
   windowToggleMaximize: () => ipcRenderer.invoke("window:toggleMaximize"),
   windowClose: () => ipcRenderer.invoke("window:close"),
+  onWindowForegroundChange: (callback) => {
+    const subscription = (_event, foreground) => callback(foreground);
+    ipcRenderer.on("window:foregroundChanged", subscription);
+    ipcRenderer.send("window:requestForeground");
+    return () => ipcRenderer.removeListener("window:foregroundChanged", subscription);
+  },
   setImportQueueActive: (active) => ipcRenderer.invoke("window:setImportQueueActive", active),
   shouldCloseAfterCurrentImport: () => ipcRenderer.invoke("window:shouldCloseAfterCurrentImport"),
   setTaskbarProgress: (value) => ipcRenderer.invoke("window:setTaskbarProgress", value),

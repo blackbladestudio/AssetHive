@@ -544,6 +544,13 @@ test('character inspection accepts background polling and mutation waits for exi
 
 test('rigging downloads copy the current whole suit or selected part without changing library files', async t => {
   const f = await fixture(t, true);
+  for (const file of f.asset.meta.characterManifest.files.filter(file => file.role === 'model')) {
+    const oldPath = path.join(f.asset.path, file.storedPath);
+    file.normalizedName = file.normalizedName.replace(/^SK_/, 'SM_');
+    file.storedPath = file.storedPath.replace('/SK_', '/SM_');
+    await fs.rename(oldPath, path.join(f.asset.path, file.storedPath));
+  }
+  await fs.writeFile(f.asset.metaPath, JSON.stringify(f.asset.meta));
   const { downloadCharacterRigFiles } = require('../electron/services/characterRigDownload');
   const [part] = listCharacterComponents(f.asset);
   const before = await fs.readFile(f.asset.metaPath, 'utf8');
@@ -569,10 +576,10 @@ test('rigging downloads copy the current whole suit or selected part without cha
   await assert.rejects(downloadCharacterRigFiles({ ...f, destination: f.asset.path }), /资源库以外/);
 });
 
-test('weapon rig download restores package English names for legacy L/R and keeps SM/SK and LOD identity', async t => {
+test('weapon rig download restores package English names and always excludes SK and later LOD files', async t => {
   const f = await fixture(t);
   const name = 'PairedSwords001_CanCiJian';
-  const names = ['SM_PairedSwords001_L.fbx', 'SK_PairedSwords001_R.fbx', 'SK_PairedSwords001_R_LOD1.fbx'];
+  const names = ['SM_PairedSwords001_L.fbx', 'SM_PairedSwords001_R_LOD0.fbx', 'SM_PairedSwords001_L_LOD1.fbx', 'SK_PairedSwords001_R.fbx', 'SK_PairedSwords001_R_LOD1.fbx'];
   const files = names.map(normalizedName => ({ normalizedName, storedPath: 'Mesh/' + normalizedName,
     role: normalizedName.startsWith('SK_') ? 'skeletalMesh' : 'staticMesh' }));
   for (const file of files) await fs.writeFile(path.join(f.asset.path, file.storedPath), file.normalizedName);
@@ -581,11 +588,11 @@ test('weapon rig download restores package English names for legacy L/R and keep
   await fs.writeFile(f.asset.metaPath, JSON.stringify(f.asset.meta));
   const before = await fs.readFile(f.asset.metaPath, 'utf8');
   const result = await require('../electron/services/characterRigDownload').downloadCharacterRigFiles({ ...f, destination: f.temp });
-  assert.equal(result.count, 3);
-  const expected = names.map(value => value.replace('PairedSwords001', name));
+  assert.equal(result.count, 2);
+  const expected = names.slice(0, 2).map(value => value.replace('PairedSwords001', name));
   assert.deepEqual((await fs.readdir(path.join(result.path, 'Models'))).sort(), expected.sort());
   for (const file of files) {
-    assert.equal(await fs.readFile(path.join(result.path, 'Models', file.normalizedName.replace('PairedSwords001', name)), 'utf8'), file.normalizedName);
+    if (names.indexOf(file.normalizedName) < 2) assert.equal(await fs.readFile(path.join(result.path, 'Models', file.normalizedName.replace('PairedSwords001', name)), 'utf8'), file.normalizedName);
     assert.equal(await fs.readFile(path.join(f.asset.path, file.storedPath), 'utf8'), file.normalizedName);
   }
   assert.equal(await fs.readFile(f.asset.metaPath, 'utf8'), before);
@@ -1759,4 +1766,30 @@ test('first rig upload accepts LOD0 and LOD1 together while preserving the stati
   assert.equal(part.meshKinds.staticMesh,true);
   assert.equal(part.meshKinds.skeletalMesh,true);
   assert.equal(part.files.filter(row=>row.role==='skeletalMesh').length,2);
+});
+
+test('weapon update adds optional ShadingMask then replaces the same texture', async t => {
+  const f = await fixture(t);
+  f.asset.assetType = f.asset.meta.assetType = 'weapon';
+  f.asset.name = f.asset.meta.name = 'Jade002_Hushengfu';
+  f.asset.meta.character = { weaponType: 'Jade', serial: '002', name: 'Hushengfu', confirmed: true };
+  const name = 'T_Jade002_Hushengfu_D.tga';
+  f.asset.meta.characterManifest.files = [{role:'texture', normalizedName:name, originalName:'T_Jade_02_D.tga', storedPath:'Texture/'+name}];
+  await fs.writeFile(path.join(f.asset.path,'Texture',name),'original diffuse');
+  await fs.writeFile(f.asset.metaPath,JSON.stringify(f.asset.meta));
+  const { inspectCharacterUpdateInput } = require('../electron/services/characterPackageUpdates');
+  const sourceFolder = await f.makeSource([{normalizedName:'T_Jade_02_ShadingMask.tga'}]);
+  const inspected = await inspectCharacterUpdateInput({...f,sourceFolder});
+  assert.deepEqual(inspected.unmatchedFiles, []);
+  assert.equal(inspected.replacements.length, 1);
+  assert.match(inspected.replacements[0].storedPath, /^__new_character_texture__:T_Jade002_Hushengfu_ShadingMask.tga$/);
+  const options = {...f,sourceFolder,replacements:inspected.replacements};
+  const plan = await prepareCharacterPackageUpdate(options);
+  await updateCharacterPackage({...options,token:plan.token,confirmWholePackage:true});
+  const updated = await f.reload();
+  const again = await inspectCharacterUpdateInput({...f,asset:updated,sourceFolder});
+  assert.deepEqual(again.unmatchedFiles, []);
+  assert.equal(again.replacements.length,1);
+  assert.ok(again.replacements[0].storedPath.endsWith('/Texture/T_Jade002_Hushengfu_ShadingMask.tga'));
+  assert.equal(await fs.readFile(path.join(f.asset.path,'Texture',name),'utf8'),'original diffuse');
 });

@@ -133,7 +133,7 @@ function buildScope(files, options = {}) {
     isModelAssetImportType: type => ['suit','monster','npc','weapon','3d','3dplant'].includes(type),
     getTopCategoryForImportType: () => '角色',
     ...require('../shared/characterNames.mjs'),
-    buildMonsterAssetName: require('../shared/monsterPackageAudit.mjs').buildMonsterAssetName,
+    ...require('../shared/monsterPackageAudit.mjs'),
     characterTaskWorkspace: Boolean(options.characterTaskWorkspace),
     liveImportDraftRef: { current: options.currentDraft || state.drafts[0] },
     ...require('../shared/weaponRules.mjs'),

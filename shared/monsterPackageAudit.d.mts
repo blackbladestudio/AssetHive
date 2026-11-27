@@ -5,4 +5,5 @@ export function normalizeMonsterSourceStem(value: string): string;
 export function buildMonsterAssetName(name: string, formIds?: string[]): string;
 export function displayMonsterFormNumbers(formIds?: string[]): string;
 export function classifyMonsterSource(file: string): { role: string; folder: string };
+export function splitMonsterPackage(files: string[]): { groups: { name: string; form: string; files: string[] }[]; unassigned: string[] };
 export function auditMonsterPackage(files: string[], options?: { expectedName?: string; modelAnalyses?: Record<string, MonsterModelAnalysis> | Map<string, MonsterModelAnalysis> }): MonsterAudit;

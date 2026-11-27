@@ -72,6 +72,7 @@ function newMeshTarget(targetPath, parent, slot, replacements = []) {
 }
 
 const textureMapAliases = [
+  ["ShadingMask", /(?:^|_)shadingmask(?:_|$)/i],
   ["ORM", /(?:^|_)(?:orm|ort|rma|occlusionroughnessmetallic)(?:_|$)/i],
   ["D", /(?:^|_)(?:d|diffuse|albedo|basecolor|base_color|bc)(?:_|$)/i],
   ["N", /(?:^|_)(?:n|normal|normalgl|normaldx|nrm)(?:_|$)/i],
@@ -118,7 +119,7 @@ function characterTextureGroups(parent, slot) {
   const parts = listCharacterComponents(parent).filter(part => !slot || part.slot === slot);
   const files = slot ? parts.flatMap(part => part.files) : activeCharacterFiles(parent);
   return [...new Set([
-    ...files.filter(file => file.role === 'texture').map(file => file.normalizedName.replace(/\.[^.]+$/, '').replace(/_(?:ORM|D|N|A|Emissive|Emission|E|OpacityMask|Opacity)$/i, '')),
+    ...files.filter(file => file.role === 'texture').map(file => file.normalizedName.replace(/\.[^.]+$/, '').replace(/_(?:ShadingMask|ORM|D|N|A|Emissive|Emission|E|OpacityMask|Opacity)$/i, '')),
     ...parts.map(part => part.name.replace(/^(?:SM|SK)_/i, 'T_'))
   ])];
 }
@@ -135,7 +136,7 @@ function newSuitTextureName(parent, sourcePath, slot) {
 function newTextureTarget(targetPath, parent, slot, sourcePath) {
   if (!targetPath.startsWith('__new_character_texture__:')) return '';
   const name = decodeURIComponent(targetPath.slice('__new_character_texture__:'.length));
-  const group = name.replace(/\.[^.]+$/, '').replace(/_(?:ORM|D|N|A|E)$/i, '');
+  const group = name.replace(/\.[^.]+$/, '').replace(/_(?:ShadingMask|ORM|D|N|A|E)$/i, '');
   if (path.basename(name) !== name || !isAllowedCharacterTextureFile(name) || (!characterTextureGroups(parent, slot).includes(group) && name !== newSuitTextureName(parent, sourcePath, slot))
     || activeCharacterFiles(parent).some(file => file.normalizedName.toLowerCase() === name.toLowerCase())) throw new Error('新增贴图目标无效或已经存在，请重新检查');
   return name;
@@ -228,17 +229,27 @@ async function inspectCharacterUpdateInput(options) {
         .map(file => ({ storedPath: file.storedPath, name: file.normalizedName, score: textureMatchScore(source.sourcePath, file, parent.assetType === 'suit') }))
         .sort((a, b) => b.score - a.score);
       const map = textureMatchSignature(source.sourcePath).map;
-      if (['D', 'N', 'ORM', 'A', 'E'].includes(map)) {
+      if (['D', 'N', 'ORM', 'A', 'E', 'ShadingMask'].includes(map)) {
         for (const group of characterTextureGroups(parent, options.slot)) {
           const name = `${group}_${map}${ext}`;
           if (targets.some(file => file.normalizedName.toLowerCase() === name.toLowerCase())) continue;
           const storedPath = `__new_character_texture__:${encodeURIComponent(name)}`;
-          ranked.push({ storedPath, name, score: textureMatchScore(source.sourcePath, { normalizedName: name, storedPath }, parent.assetType === 'suit') });
+          const sourceGroupMatch = targets.some(file => file.role === 'texture'
+            && file.normalizedName.replace(/\.[^.]+$/, '').replace(/_(?:ShadingMask|ORM|D|N|A|Emissive|Emission|E|OpacityMask|Opacity)$/i, '') === group
+            && [file.originalName, file.originalPath].some(original => {
+              if (!original) return false;
+              const originalStem = path.basename(original, path.extname(original));
+              const pattern = textureMapAliases.find(([, regex]) => regex.test(originalStem))?.[1];
+              if (!pattern) return false;
+              const originalGroup = originalStem.replace(new RegExp(pattern.source.replace('(?:_|$)', '$'), 'i'), '');
+              return `${originalGroup}_${map}${ext}`.toLowerCase() === path.basename(source.sourcePath).toLowerCase();
+            }));
+          ranked.push({ storedPath, name, score: sourceGroupMatch ? 10000 : textureMatchScore(source.sourcePath, { normalizedName: name, storedPath }, parent.assetType === 'suit') });
         }
         ranked.sort((a, b) => b.score - a.score);
       }
       const newName = newSuitTextureName(parent, source.sourcePath, options.slot);
-      const newGroup = newName.replace(/\.[^.]+$/, '').replace(/_(?:ORM|D|N|A|E)$/i, '');
+      const newGroup = newName.replace(/\.[^.]+$/, '').replace(/_(?:ShadingMask|ORM|D|N|A|E)$/i, '');
       const sourceHasSuitIdentity = /^T_[MF]\d{2}_(?:Light|Medium|Heavy)\d{3}_[^_]+_/i.test(path.basename(source.sourcePath));
       const isNewGroup = newName && !characterTextureGroups(parent, options.slot).some(group => group.toLowerCase() === newGroup.toLowerCase())
         && !targets.some(file => file.normalizedName.toLowerCase() === newName.toLowerCase());
@@ -452,6 +463,7 @@ async function prepareCharacterPackageUpdate({ root, asset, slot, sourceFolder, 
   const plan = { parentId: parent.id, mode: "package", sourceFolder, sourcePaths, parentRevision: parent.meta.characterComponents?.contentRevision || "initial",
     resourceState: packageResourceState(parent), files, excludedFiles, retainedFiles: [...old.values()], changes, unchanged: changes.every(item => ["unchanged", "retained"].includes(item.status)),
     replacedComponentCount: listCharacterComponents(parent).filter(part => part.currentRevision !== part.revisions[0].id).length };
+  plan.sharedChanges = await require('./characterSharedUpdates').prepareSharedFileUpdates(root, parent, files, changes);
   return { ...plan, token: hash(plan) };
 }
 
@@ -533,18 +545,26 @@ async function updateCharacterPackage(options) {
       meta.updatedAt = new Date().toISOString();
       return meta;
     });
-    return { ok: true, parentId: parent.id, message: "整套已更新，资产 ID 不变，旧版本及文件已保留" };
+    const affectedAssetIds = await require('./characterSharedUpdates').applySharedFileUpdates(root, parent, plan.sharedChanges, note);
+    return { ok: true, parentId: parent.id, affectedAssetIds: [...new Set([parent.id, ...affectedAssetIds])], message: "整套已更新，资产 ID 不变，旧版本及文件已保留" };
   }));
 }
 
 async function restoreCharacterPackageVersion(options) {
   const { root, parent } = await loadParent(options.root, options.asset, ["suit", "monster", "npc", "weapon", "item"]);
-  return withRecycleLock(root, async () => {
+  return withRecycleLock(root, () => withFileTransaction({ root, owner: 'character-package-restore', key: parent.metaPath }, async () => {
     const historical = (parent.meta.characterPackageHistory || []).find(item => item.id === options.revisionId);
     if (!historical) throw new Error("整套历史版本不存在");
+    const restoredFiles = [];
     for (const file of activeCharacterFiles({ ...parent, meta: { ...parent.meta, ...historical.snapshot } })) {
-      await safePath(root, path.resolve(parent.path, file.storedPath));
+      const sourcePath = await safePath(root, path.resolve(parent.path, file.storedPath));
+      restoredFiles.push({ ...file, sourcePath, sha256: await fileHash(sourcePath) });
     }
+    const sharedUpdates = require('./characterSharedUpdates');
+    const sharedChanges = await sharedUpdates.prepareSharedFileUpdates(root, parent, restoredFiles,
+      [...restoredFiles.filter(file => file.role === 'texture').map(file => ({ name: file.normalizedName, status: 'changed' })),
+        ...activeCharacterFiles(parent).filter(file => file.role === 'texture' && !restoredFiles.some(restored => restored.normalizedName.toLowerCase() === file.normalizedName.toLowerCase()))
+          .map(file => ({ name: file.normalizedName, status: 'removed' }))]);
     await updateAssetMetadataFile(parent.metaPath, async meta => {
       if ((meta.characterComponents?.contentRevision || "initial") !== options.expectedRevision) throw new Error("当前整套版本已变化，请刷新");
       const snapshot = Object.fromEntries(snapshotKeys.map(key => [key, meta[key]]));
@@ -559,7 +579,8 @@ async function restoreCharacterPackageVersion(options) {
       meta.updatedAt = at;
       return meta;
     });
-    return { ok: true, parentId: parent.id, message: "已切换到整套历史版本，所有文件仍保留" };
-  });
+    const affectedAssetIds = await sharedUpdates.applySharedFileUpdates(root, parent, sharedChanges, '恢复共享资源历史版本');
+    return { ok: true, parentId: parent.id, affectedAssetIds: [...new Set([parent.id, ...affectedAssetIds])], message: "已切换到整套历史版本，共享贴图同步恢复，所有文件仍保留" };
+  }));
 }
 module.exports = { inspectCharacterUpdateInput, matchCharacterTextureReplacements, prepareCharacterPackageUpdate, updateCharacterPackage, restoreCharacterPackageVersion, fileHash };

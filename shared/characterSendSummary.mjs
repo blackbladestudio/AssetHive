@@ -2,6 +2,7 @@ export function characterSendSummary(rows, decisions = {}, done = false) {
   const selected = rows.filter(row => {
     if (['unchanged', 'retained'].includes(row.action)) return false;
     if (done) return row.status === 'success';
+    if (decisions[row.key] === 'skip') return false;
     if (row.status === 'missing' || row.status === 'ready') return true;
     return row.status === 'conflict' && ['adopt', 'keepUE', 'applyMapping'].includes(decisions[row.key]);
   });

@@ -6,6 +6,7 @@ const test = require("node:test");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { recordLibraryChanges, readLibraryChanges, changedDirectories } = require("../electron/services/libraryChanges");
+const { createLibraryChangeMaintenance } = require("../electron/services/libraryChangeRetention");
 const { createScanSchedule, RECONCILE_INTERVAL_MS, CHANGE_CHECK_INTERVAL_MS, DISCOVERY_INTERVAL_MS } = require("../electron/services/scanSchedule");
 const { scanLibrary, scanLibraryInWorker } = require("../electron/services/assetScanner");
 
@@ -40,6 +41,45 @@ test("journal reads only appended changes, merges overlapping paths, and support
   assert.deepEqual(changedDirectories(f.root, ["A", "A-other", "A/Child"]), [path.join(f.root, "A"), path.join(f.root, "A-other")]);
 });
 
+test("quiet polls inspect log metadata without opening already consumed files", async t => {
+  const f = await fixture(t);
+  const journalDir = path.join(f.root, ".assethive");
+  for (const suffix of ["a", "b", "c"]) {
+    await fs.writeFile(path.join(journalDir, `changes.${suffix}.jsonl`), "");
+  }
+  const baseline = await readLibraryChanges(f.root);
+  const originalOpen = fs.open;
+  const opened = [];
+  fs.open = async (file, flags, ...args) => {
+    if (flags === "r" && path.dirname(file) === journalDir) opened.push(path.basename(file));
+    return originalOpen(file, flags, ...args);
+  };
+  try {
+    assert.deepEqual((await readLibraryChanges(f.root, baseline.cursor)).directories, []);
+    assert.deepEqual(opened, []);
+    await fs.appendFile(path.join(journalDir, "changes.b.jsonl"), '{"version":1,"directories":["Changed"]}\n');
+    assert.deepEqual((await readLibraryChanges(f.root, baseline.cursor)).directories, [path.join(f.root, "Changed")]);
+    assert.deepEqual(opened, ["changes.b.jsonl"]);
+  } finally {
+    fs.open = originalOpen;
+  }
+});
+
+test("a continuously running writer rotates its journal across weeks", async t => {
+  const f = await fixture(t);
+  const weekMs = 7 * 24 * 60 * 60 * 1000;
+  let now = 2600 * weekMs;
+  t.mock.method(Date, "now", () => now);
+  await recordLibraryChanges(f.root, ["First"]);
+  const baseline = await readLibraryChanges(f.root);
+  now += weekMs;
+  await recordLibraryChanges(f.root, ["Second"]);
+  await recordLibraryChanges(f.root, ["Third"]);
+  const delta = await readLibraryChanges(f.root, baseline.cursor);
+  assert.equal(Object.keys(delta.cursor.journals).length, 3, "one legacy file and two weekly segments");
+  assert.deepEqual(delta.directories, ["Second", "Third"].map(name => path.join(f.root, name)));
+});
+
 test("quiet polls persist across restart; failed and in-flight changes are never acknowledged early", async t => {
   const f = await fixture(t);
   const baseline = await f.schedule.plan(f.options);
@@ -47,11 +87,13 @@ test("quiet polls persist across restart; failed and in-flight changes are never
   await f.schedule.complete(f.root, false, true, baseline.changeCursor);
   const restarted = createScanSchedule(f.file, f.now);
   assert.equal((await restarted.plan(f.options)).skip, true);
+  assert.equal((await restarted.plan({ ...f.options, reason: "startup" })).skip, true);
   await recordLibraryChanges(f.root, ["A"]);
-  const first = await f.schedule.plan(f.options);
+  const first = await restarted.plan({ ...f.options, reason: "startup" });
   assert.deepEqual(first.changedDirectories, [path.join(f.root, "A")]);
   await f.schedule.complete(f.root, true, false, first.changeCursor);
-  assert.deepEqual((await f.schedule.plan(f.options)).changedDirectories, first.changedDirectories);
+  assert.equal((await f.schedule.plan(f.options)).throttled, true);
+  assert.deepEqual((await createScanSchedule(f.file, f.now).plan(f.options)).changedDirectories, first.changedDirectories);
   await recordLibraryChanges(f.root, ["B"]);
   await f.schedule.complete(f.root, true, true, first.changeCursor);
   assert.deepEqual((await f.schedule.plan(f.options)).changedDirectories, [path.join(f.root, "B")]);
@@ -84,6 +126,68 @@ test("an offline or removed library is never recreated by journal probing", asyn
   await fs.rm(f.root, { recursive: true });
   assert.equal((await readLibraryChanges(f.root)).cursor, null);
   await assert.rejects(fs.stat(f.root), { code: "ENOENT" });
+});
+
+test("daily retention archives inactive logs, skips open writers, and removes only expired archives", {
+  skip: process.platform !== "win32"
+}, async t => {
+  const f = await fixture(t);
+  const metadata = path.join(f.root, ".assethive");
+  const archive = path.join(metadata, "change-log-archive");
+  const oldFile = path.join(metadata, "changes.abcd.jsonl");
+  const recentFile = path.join(metadata, "changes.bcde.jsonl");
+  const busyFile = path.join(metadata, "changes.cdef.jsonl");
+  const legacyFile = path.join(metadata, "changes.jsonl");
+  const dayMs = 24 * 60 * 60 * 1000;
+  const line = directory => JSON.stringify({ version: 1, directories: [directory] }) + "\n";
+  const stale = new Date(f.now() - 31 * dayMs);
+  const recent = new Date(f.now() - dayMs);
+  for (const file of [oldFile, busyFile, recentFile, legacyFile]) {
+    await fs.writeFile(file, line("Before"));
+    await fs.utimes(file, recent, recent);
+  }
+  const behind = await readLibraryChanges(f.root);
+  await fs.appendFile(oldFile, line("Missed"));
+  for (const file of [oldFile, busyFile, legacyFile]) await fs.utimes(file, stale, stale);
+  const upToDate = await readLibraryChanges(f.root);
+  await f.schedule.complete(f.root, false, true, upToDate.cursor);
+  const busyWriter = await fs.open(busyFile, "a");
+  try {
+    const results = await Promise.all([
+      createLibraryChangeMaintenance(f.now)(f.root),
+      createLibraryChangeMaintenance(f.now)(f.root)
+    ]);
+    assert.deepEqual(results.filter(Boolean), [{ archived: 2, deleted: 0, skipped: 1 }]);
+  } finally { await busyWriter.close(); }
+  assert.deepEqual((await fs.readdir(metadata)).sort(),
+    ["change-log-archive", path.basename(recentFile), path.basename(busyFile)].sort());
+  const files = await fs.readdir(archive);
+  const originalArchive = files.find(name => name.startsWith("changes.abcd.jsonl."));
+  assert.ok(originalArchive);
+  const active = await f.schedule.plan({ ...f.options, reason: "startup" });
+  assert.equal(active.skip, true);
+  assert.equal(active.acknowledgePrunedCursor, true);
+  await f.schedule.complete(f.root, true, true, active.changeCursor, true);
+  const cleaned = await f.schedule.plan(f.options);
+  assert.equal(cleaned.acknowledgePrunedCursor, false);
+  assert.deepEqual(Object.keys(cleaned.changeCursor.journals), [path.basename(recentFile), path.basename(busyFile)]);
+  assert.equal((await readLibraryChanges(f.root, behind.cursor)).directories, null);
+  await fs.writeFile(oldFile, line("Resumed"));
+  await fs.utimes(oldFile, recent, recent);
+  assert.deepEqual((await readLibraryChanges(f.root, upToDate.cursor)).directories,
+    [path.join(f.root, "Resumed")]);
+
+  const unrelated = path.join(archive, "notes.txt");
+  await fs.writeFile(unrelated, "retain");
+  await fs.utimes(unrelated, stale, stale);
+  f.advance(30 * dayMs);
+  await createLibraryChangeMaintenance(f.now)(f.root);
+  assert.equal((await fs.stat(path.join(archive, originalArchive))).isFile(), true);
+  f.advance(dayMs);
+  const expired = await createLibraryChangeMaintenance(f.now)(f.root);
+  assert.equal(expired.deleted, 2);
+  await assert.rejects(fs.stat(path.join(archive, originalArchive)), { code: "ENOENT" });
+  assert.equal(await fs.readFile(unrelated, "utf8"), "retain");
 });
 
 test("targeted scans discover imports, edits, renames and deletions without visiting unchanged assets", async t => {
@@ -173,7 +277,8 @@ test("failed memo publication cannot consume changes and let a later scan restor
     assert.equal(warnings[0]?.operation, "scan-memo-write");
     await f.schedule.complete(f.root, true, warnings.length === 0, plan.changeCursor);
   } finally { fs.rename = original; }
-  assert.deepEqual((await f.schedule.plan(f.options)).changedDirectories, [directory]);
+  assert.equal((await f.schedule.plan(f.options)).throttled, true);
+  assert.deepEqual((await createScanSchedule(f.file, f.now).plan(f.options)).changedDirectories, [directory]);
 });
 
 test("independent clients publish separate journals without losing simultaneous changes", async t => {

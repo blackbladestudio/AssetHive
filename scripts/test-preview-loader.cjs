@@ -20,7 +20,7 @@ function load(file, globals = {}) {
 const { PreviewLoader } = load("previewLoader.ts");
 const { getPreviewUrl } = load("previewUrl.ts");
 
-test("visible animation cards generate a missing cover one at a time without opening details", async () => {
+test("visible animation cards generate one cover at a time and restart cancelled work after foregrounding", async () => {
   let reportVisibility;
   const { AnimationCoverQueue } = load("animationCoverQueue.ts", { IntersectionObserver: class {
     constructor(callback) { reportVisibility = callback; }
@@ -45,8 +45,18 @@ test("visible animation cards generate a missing cover one at a time without ope
     assert.equal(first.skeletonPath, "default-rig.fbx");
     assert.equal(loader.get("cached.fbx"), "cached.webm");
     assert.equal(loader.get("offscreen.fbx"), "");
-    loader.setResolved("first.fbx", "first.webm");
+    queue.setEnabled(false);
+    await delay(200);
+    assert.equal(queue.getSnapshot(), null);
+    queue.setEnabled(true);
+    await delay(200);
+    const restarted = queue.getSnapshot();
+    assert.deepEqual(restarted, first);
+    assert.notEqual(restarted, first);
     queue.finish(first);
+    assert.equal(queue.getSnapshot(), restarted);
+    loader.setResolved("first.fbx", "first.webm");
+    queue.finish(restarted);
     await delay(200);
     const second = queue.getSnapshot();
     assert.equal(second.assetId, "second");

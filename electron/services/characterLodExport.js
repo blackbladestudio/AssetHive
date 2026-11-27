@@ -22,8 +22,9 @@ const pairedIdentity = file => meshIdentity(file).slice(3);
 
 async function attachCharacterLods(result, asset, options, analyze, managedFile) {
   for (const entry of result.entries.filter(item => ['staticMesh', 'skeletalMesh'].includes(item.kind))) {
-    entry.config = { ...entry.config, lodPolicy: 'lod1-reduction-v2' };
-    entry.fingerprint = crypto.createHash('sha256').update(JSON.stringify({ previous: entry.fingerprint, lodPolicy: entry.config.lodPolicy })).digest('hex');
+    entry.config = { ...entry.config, lodPolicy: 'lod1-reduction-v2', lodReductionProfile: 'targets-40-15-10-2' };
+    entry.fingerprint = crypto.createHash('sha256').update(JSON.stringify({ previous: entry.fingerprint, lodPolicy: entry.config.lodPolicy,
+      lodReductionProfile: entry.config.lodReductionProfile })).digest('hex');
   }
   const files = activeCharacterFiles(asset).filter(model);
   const bases = files.filter(file => !lod.level(file.normalizedName || file.storedPath));

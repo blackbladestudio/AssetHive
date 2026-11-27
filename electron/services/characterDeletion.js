@@ -95,6 +95,13 @@ async function deleteCharacterPermanently({ root: value, asset, records, token, 
     log.state = "deleted";
     let indexPending = false;
     try { await writeFileAtomic(logPath, JSON.stringify(log)); } catch { indexPending = true; }
+    try {
+      const shared = require('./characterSharedResources');
+      const before = await shared.readRegistry(root);
+      const next = shared.removeOwnerReferences(before, asset.id);
+      if (next !== before) await require('./assetFileTransaction').withFileTransaction({ root, owner: 'character-shared-delete', key: asset.metaPath },
+        () => shared.writeRegistryInTransaction(root, next));
+    } catch { indexPending = true; }
     try { await onIndexChange?.("delete", asset); } catch { indexPending = true; }
     onProgress?.(100, '库内文件删除完成');
     return { ok: true, assetId: asset.id, indexPending, message: indexPending ? "库内文件已永久删除，但索引同步失败，请刷新资产库" : "整套及所属部件已永久删除" };

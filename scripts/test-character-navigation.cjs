@@ -194,7 +194,7 @@ test("Monster UE name composes name and detected form without requiring a catego
   assert.equal(buildCharacterAssetName("monster", fields, "3_Elite"), "SK_Executioner_01");
   assert.deepEqual(getMonsterFieldIssues(fields, ""), { category: true, name: false, form: false });
   assert.deepEqual(getMonsterFieldIssues({ name: "", formIds: [] }, "3_Elite"), { category: false, name: true, form: true });
-  assert.equal(buildMonsterAssetName("Executioner", ["base"]), "SK_Executioner");
+  assert.equal(buildMonsterAssetName("Executioner", ["base"]), "SK_Executioner_01");
   assert.equal(buildMonsterAssetName("Executioner", ["01", "02"]), "");
   assert.equal(previewFamilyFileName("monster", "SK_Executioner_01", "T_Executioner_01_Body_D.tga", "Executioner"), "T_Executioner_01_Body_D.tga");
   const plan = require("../electron/services/characterFamilyRules").buildFamilyPackagePlan("monster", "", ["SK_Executioner_01.fbx", "SK_Executioner_01_WP_Axe.fbx"], {

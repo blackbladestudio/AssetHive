@@ -39,16 +39,15 @@ function createScanSchedule(filePath, now = Date.now) {
     const canReuse = current.lastReconciledAt > 0 && hasCache;
     const due = now() - current.lastReconciledAt >= RECONCILE_INTERVAL_MS;
     let incremental = automatic && canReuse && (!due || !idle);
-    const changes = libraryRoot ? await readLibraryChanges(libraryRoot, current.changeCursor) : null;
-    // A new/replaced journal needs a complete baseline before acknowledging it.
-    // Startup discovers external edits made while this client was closed.
-    if (changes?.cursor && (changes.directories === null || reason === "startup")) incremental = false;
-    const discoveryDue = !lastDiscovery || lastDiscovery.root !== root
-      || now() < lastDiscovery.at || now() - lastDiscovery.at >= DISCOVERY_INTERVAL_MS;
-    const indexed = reason === "periodic" && incremental && !discoveryDue
-      && changes?.cursor && changes.directories !== null;
     const retrying = reason === "periodic" && failedAttempt?.root === root
       && now() >= failedAttempt.at && now() - failedAttempt.at < DISCOVERY_INTERVAL_MS;
+    const changes = libraryRoot && !retrying ? await readLibraryChanges(libraryRoot, current.changeCursor) : null;
+    // A new/replaced journal needs a complete baseline before acknowledging it.
+    if (changes?.cursor && changes.directories === null) incremental = false;
+    const discoveryDue = !lastDiscovery || lastDiscovery.root !== root
+      || now() < lastDiscovery.at || now() - lastDiscovery.at >= DISCOVERY_INTERVAL_MS;
+    const indexed = incremental && (reason === "startup" || !discoveryDue)
+      && changes?.cursor && changes.directories !== null;
     const throttled = retrying || reason === "periodic" && !indexed && !discoveryDue
       && !(!incremental && canReuse && due);
     if (!indexed && !throttled) lastDiscovery = { root, at: now() };
@@ -59,6 +58,7 @@ function createScanSchedule(filePath, now = Date.now) {
       changedDirectories: indexed ? changes.directories : null,
       skip: Boolean(throttled || indexed && changes.directories.length === 0),
       throttled,
+      acknowledgePrunedCursor: Boolean(indexed && changes.pruned && changes.directories.length === 0),
       // Directory discovery checks only one shard: retain unprocessed deltas
       // unless a full scan will validate all of them.
       changeCursor: !incremental || indexed ? changes?.cursor : current.changeCursor

@@ -438,6 +438,7 @@ async function restoreFixture(overrides = {}) {
   let shares = 0;
   const context = vm.createContext({ Date, clearTimeout: () => {},
     settings: { customLibraryPath: "Library" }, getLibraryRootPath: () => "Library",
+    normalizeComparePath: value => value.toLowerCase(),
     getLibrarySqlCachePath: () => "local.sqlite", getLibraryJsonCachePath: () => "local.json", statOrNull: async () => null,
     loadLibrarySqlCache: async () => null, loadLibraryJsonCache: async () => null,
     getSharedDerivedCache: () => ({ readSnapshot: async () => { shares++; return [{ id: "shared" }]; } }),
@@ -451,7 +452,7 @@ async function restoreFixture(overrides = {}) {
   vm.runInContext(`let index = [], scanInProgress = false, scanIndexAuthoritative = false;
     let sharedIndexComplete = false, sharedSnapshotVersion = 0, sharedPublishedVersion = -1;
     let librarySelectionGeneration = 0, activeScanGeneration = 0, pendingScanRequest = null;
-    let pendingIndexSaveTimer = 0, sharedDerivedCache = null, libraryCacheRestorePromise = null;
+    let pendingIndexSaveTimer = 0, sharedDerivedCache = null, libraryCacheRestorePromise = null, lastScanSnapshotRoot = "";
     ${source.slice(start, end)}`, context);
   return { context, events, shares: () => shares };
 }
@@ -461,6 +462,7 @@ test("cold startup restores shared cards before any network metadata probes", as
   await f.context.restoreLibraryIndexCache();
   assert.equal(vm.runInContext("index[0].id", f.context), "shared");
   assert.equal(vm.runInContext("index[0].favorite", f.context), true);
+  assert.equal(vm.runInContext("lastScanSnapshotRoot", f.context), "", "a shared snapshot does not validate a local cursor");
   assert.deepEqual(f.events, ["cards"]);
 });
 
@@ -468,6 +470,7 @@ test("local snapshots appear without repeating network probes and corrupt local 
   const local = await restoreFixture({ loadLibrarySqlCache: async () => [{ id: "local" }] });
   await local.context.restoreLibraryIndexCache();
   assert.equal(local.shares(), 0);
+  assert.equal(vm.runInContext("lastScanSnapshotRoot", local.context), "library");
   assert.deepEqual(local.events, ["cards"]);
   const corrupt = await restoreFixture({ statOrNull: async () => ({ isFile: () => true }) });
   await corrupt.context.restoreLibraryIndexCache();
@@ -496,6 +499,17 @@ test("an existing empty JSON fallback also takes precedence over shared snapshot
   await f.context.restoreLibraryIndexCache();
   assert.equal(f.shares(), 0);
   assert.equal(vm.runInContext("index.length", f.context), 0);
+  assert.equal(vm.runInContext("lastScanSnapshotRoot", f.context), "");
+});
+
+test("coexisting local snapshots require a new baseline before reusing the journal cursor", async () => {
+  const f = await restoreFixture({
+    loadLibrarySqlCache: async () => [{ id: "sqlite" }],
+    statOrNull: async () => ({ isFile: () => true })
+  });
+  await f.context.restoreLibraryIndexCache();
+  assert.equal(vm.runInContext("index[0].id", f.context), "sqlite");
+  assert.equal(vm.runInContext("lastScanSnapshotRoot", f.context), "");
 });
 
 test("a late shared response cannot overwrite a scan or a changed library", async () => {

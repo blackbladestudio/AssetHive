@@ -16,7 +16,7 @@ export function buildMonsterAssetName(name, formIds = []) {
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(subject) || formIds.length !== 1) return "";
   const form = formIds[0];
   if (form !== "base" && !/^\d{2}$/.test(form)) return "";
-  return `SK_${subject}${form === "base" ? "" : `_${form}`}`;
+  return `SK_${subject}_${form === "base" ? "01" : form}`;
 }
 
 // Revision words are comparison hints, never an instruction to discard a file.
@@ -58,6 +58,27 @@ export function classifyMonsterSource(file) {
     if (ext !== "uasset" || /^SK_/i.test(stem) || folders.includes("skeletalmesh")) return { role: "skeletalMesh", folder: "Mesh/SkeletalMesh" };
   }
   return { role: "other", folder: "OtherFiles" };
+}
+
+// Split only explicit numbered bodies. Unnumbered appearances belong to the
+// subject and remain available to every form; ambiguous models are never copied.
+export function splitMonsterPackage(files) {
+  const rows = [...new Set(files)].map(inspectFile);
+  const bodies = rows.filter(row => row.mesh && !row.weapon && row.match);
+  const identities = new Map(bodies.map(row => [`${row.owner.toLowerCase()}:${row.form}`, { name: row.owner, form: row.form, files: [] }]));
+  const unassigned = [];
+  for (const row of rows) {
+    const matches = [...identities.values()].filter(group => {
+      if (row.match) return row.owner.toLowerCase() === group.name.toLowerCase() && row.form === group.form;
+      if (row.parent) return row.parent[1].toLowerCase() === group.name.toLowerCase() && row.parent[2] === group.form;
+      if (row.mesh && !row.weapon) return false;
+      const stem = row.stem.replace(/^(SKEL|SK|SM|MI|T|ABP|BP)_(?:WP_)?/i, '').toLowerCase();
+      return stem === group.name.toLowerCase() || stem.startsWith(group.name.toLowerCase() + '_');
+    });
+    if (!matches.length) unassigned.push(row.path);
+    for (const group of matches) group.files.push(row.path);
+  }
+  return { groups: [...identities.values()].sort((a, b) => a.name.localeCompare(b.name) || a.form.localeCompare(b.form)), unassigned };
 }
 
 function inspectFile(file) {

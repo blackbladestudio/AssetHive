@@ -5,6 +5,7 @@ import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { getPreviewUrl } from "./previewUrl";
 import { AnimationMotionPanel } from "./AnimationMotionPanel";
+import { isAnimationPreviewActive, subscribeToAnimationPreviewActivity } from "./animationPreviewActivity";
 import { analyzeRootMotion, findRootMotionBone, rootMotionAt, type RootMotionAnalysis } from "./animationRootMotion";
 
 type AnimationPreviewProps = {
@@ -52,8 +53,13 @@ function recordCanvasToWebm(canvas: HTMLCanvasElement, durationMs: number, signa
     const timer = window.setTimeout(stop, Math.max(700, durationMs));
     const cleanup = () => {
       window.clearTimeout(timer);
-      signal.removeEventListener("abort", stop);
+      signal.removeEventListener("abort", abortRecording);
       stream.getTracks().forEach(track => track.stop());
+    };
+    const abortRecording = () => {
+      stop();
+      cleanup();
+      reject(signal.reason);
     };
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
@@ -68,7 +74,7 @@ function recordCanvasToWebm(canvas: HTMLCanvasElement, durationMs: number, signa
     };
     try {
       recorder.start(120);
-      signal.addEventListener("abort", stop, { once: true });
+      signal.addEventListener("abort", abortRecording, { once: true });
     } catch (error) {
       cleanup();
       reject(error);
@@ -369,7 +375,6 @@ export function AnimationPreview({
     let cancelled = false;
     const abort = new AbortController();
     let disposeLoaded: (() => void) | null = null;
-    let stopCaptureRef: (() => void) | null = null;
     setStatus("loading");
     setPlaying(true);
     playingRef.current = true;
@@ -510,19 +515,19 @@ export function AnimationPreview({
         const focus = new THREE.Vector3();
         const followTarget = new THREE.Vector3();
         const followDelta = new THREE.Vector3();
-        const clock = new THREE.Clock();
         const rootDelta = new THREE.Vector3();
         let lastMotionUpdate = 0;
-        let frameId = 0;
+        let frameId: number | undefined;
+        let lastFrameTime: number | undefined;
+        let recording: AbortController | null = null;
         let captureAfterFrames = meshCount > 0 && onMotionCaptureRef.current ? 8 : 0;
         const captureDurationMs = Math.min(4000, Math.max(900, (clipDuration || 1.2) * 1000));
         // Card previews are recorded in place on a separate canvas, so the
         // detail view keeps its root motion without flicker.
-        let capture: { renderer: THREE.WebGLRenderer; camera: THREE.PerspectiveCamera } | null = null;
+        let capture: { renderer: THREE.WebGLRenderer; camera: THREE.PerspectiveCamera; time: number } | null = null;
         const startCapture = () => {
           const captureCanvas = document.createElement("canvas");
           Object.assign(captureCanvas.style, { position: "fixed", left: "-10000px", top: "0", pointerEvents: "none" });
-          document.body.appendChild(captureCanvas);
           const captureRenderer = new THREE.WebGLRenderer({ canvas: captureCanvas, antialias: true, alpha: false, preserveDrawingBuffer: true });
           captureRenderer.setPixelRatio(1);
           captureRenderer.setSize(CAPTURE_WIDTH, CAPTURE_HEIGHT, false);
@@ -531,16 +536,18 @@ export function AnimationPreview({
           captureRenderer.shadowMap.type = THREE.PCFShadowMap;
           const captureCamera = new THREE.PerspectiveCamera(30, CAPTURE_WIDTH / CAPTURE_HEIGHT, 0.05, 200);
           fitCamera(captureCamera, bounds, 0.92);
-          if (action) action.time = 0;
-          capture = { renderer: captureRenderer, camera: captureCamera };
-          return () => {
-            capture = null;
-            captureRenderer.dispose();
-            captureCanvas.remove();
-          };
+          capture = { renderer: captureRenderer, camera: captureCamera, time: 0 };
+          document.body.appendChild(captureCanvas);
+          return captureCanvas;
         };
-        const renderCapture = () => {
+        const renderCapture = (delta: number) => {
           if (!capture) return;
+          const detailTime = action?.time ?? 0;
+          if (mixer && action && clipDuration > 0) {
+            action.time = capture.time;
+            mixer.update(0);
+            capture.time = (capture.time + delta) % clipDuration;
+          }
           const detailStage = stage.position.clone();
           const offset = boneOffset();
           stage.position.set(-offset.x, 0, -offset.z);
@@ -552,10 +559,14 @@ export function AnimationPreview({
           scene.background = new THREE.Color(DETAIL_BACKGROUND);
           floor.visible = true;
           stage.position.copy(detailStage);
+          if (mixer && action) {
+            action.time = detailTime;
+            mixer.update(0);
+          }
           stage.updateMatrixWorld(true);
         };
         const resize = () => {
-          if (!host.isConnected) return;
+          if (!host.isConnected || !isAnimationPreviewActive()) return;
           const nextWidth = Math.max(1, host.clientWidth);
           const nextHeight = Math.max(1, host.clientHeight);
           camera.aspect = nextWidth / nextHeight;
@@ -563,9 +574,11 @@ export function AnimationPreview({
           renderer.setSize(nextWidth, nextHeight, false);
         };
         const observer = new ResizeObserver(resize);
-        const tick = () => {
-          if (cancelled) return;
-          const delta = clock.getDelta();
+        const tick = (now: number) => {
+          frameId = undefined;
+          if (cancelled || !isAnimationPreviewActive()) return;
+          const delta = lastFrameTime === undefined ? 0 : (now - lastFrameTime) / 1000;
+          lastFrameTime = now;
           if (mixer && playingRef.current) {
             mixer.update(delta);
           }
@@ -576,7 +589,6 @@ export function AnimationPreview({
             if (!rootMotionEnabledRef.current) stage.position.sub(rootDelta);
             stage.updateMatrixWorld(true);
           }
-          const now = performance.now();
           if (motionDetailsRef.current && now - lastMotionUpdate >= 100) {
             setMotionTime(action?.time || 0);
             lastMotionUpdate = now;
@@ -587,38 +599,64 @@ export function AnimationPreview({
           controls.target.add(followDelta);
           camera.position.add(followDelta);
           controls.update();
-          renderCapture();
+          renderCapture(delta);
           placeLight(focus.set(followTarget.x, groundY, followTarget.z));
           renderer.render(scene, camera);
-          if (captureAfterFrames > 0) {
+          if (captureAfterFrames > 0 && !recording) {
             captureAfterFrames -= 1;
             if (captureAfterFrames === 0 && onMotionCaptureRef.current) {
               const notify = onMotionCaptureRef.current;
+              const controller = new AbortController();
               void notify(async () => {
-                if (cancelled) return null;
-                const stopCapture = startCapture();
-                stopCaptureRef = stopCapture;
+                if (cancelled || !isAnimationPreviewActive()) return null;
+                recording = controller;
+                let canvas: HTMLCanvasElement | undefined;
                 try {
-                  const blob = await recordCanvasToWebm(capture!.renderer.domElement, captureDurationMs, abort.signal);
-                  return !cancelled && blob.size > 0 ? blob : null;
+                  canvas = startCapture();
+                  const blob = await recordCanvasToWebm(canvas, captureDurationMs, controller.signal);
+                  return !cancelled && !controller.signal.aborted && blob.size > 0 ? blob : null;
+                } catch (error) {
+                  if (controller.signal.aborted) return null;
+                  throw error;
                 } finally {
-                  stopCapture();
-                  if (stopCaptureRef === stopCapture) stopCaptureRef = null;
+                  capture?.renderer.dispose();
+                  capture?.renderer.forceContextLoss();
+                  capture = null;
+                  canvas?.remove();
+                  recording = null;
                 }
               }).catch(() => void 0).finally(() => {
-                if (!cancelled && captureOnly) onCaptureFinishedRef.current?.();
+                if (!cancelled && !controller.signal.aborted && captureOnly) onCaptureFinishedRef.current?.();
               });
             }
           }
           frameId = window.requestAnimationFrame(tick);
         };
 
+        const syncActivity = () => {
+          if (isAnimationPreviewActive()) {
+            if (frameId === undefined) {
+              resize();
+              lastFrameTime = undefined;
+              frameId = window.requestAnimationFrame(tick);
+            }
+          } else {
+            if (frameId !== undefined) window.cancelAnimationFrame(frameId);
+            frameId = undefined;
+            if (recording) {
+              recording.abort();
+              captureAfterFrames = 8;
+            }
+          }
+        };
         observer.observe(host);
-        frameId = window.requestAnimationFrame(tick);
+        const unsubscribeActivity = subscribeToAnimationPreviewActivity(syncActivity);
+        syncActivity();
         setStatus("ready");
 
         disposeLoaded = () => {
-          stopCaptureRef?.();
+          unsubscribeActivity();
+          recording?.abort();
           seekRef.current = null;
           observer.disconnect();
           floor.geometry.dispose();
@@ -626,7 +664,7 @@ export function AnimationPreview({
           shadowPlane.geometry.dispose();
           shadowPlane.material.dispose();
           key.shadow.map?.dispose();
-          window.cancelAnimationFrame(frameId);
+          if (frameId !== undefined) window.cancelAnimationFrame(frameId);
           mixer?.stopAllAction();
           mixer?.uncacheRoot(visual);
           controls.dispose();

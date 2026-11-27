@@ -136,7 +136,7 @@ function expectedFamilyStem(family, packageInfo, role, sourceStem) {
   }
   const monsterIdentity = family === "monster" || numberedNpc ? sourceStem.match(MONSTER_IDENTITY) : null;
   const confirmedForm = (family === 'monster' || numberedNpc) && packageInfo.formIds?.length === 1 ? packageInfo.formIds[0] : null;
-  const formSuffix = confirmedForm === 'base' ? '' : confirmedForm ? `_${confirmedForm}` : '';
+  const formSuffix = confirmedForm === 'base' ? '_01' : confirmedForm ? `_${confirmedForm}` : '';
   if (family === "monster" && !monsterIdentity && /_WP_/i.test(sourceStem)) {
     return `${prefix}_${subject}${formSuffix}${sourceStem.slice(sourceStem.toUpperCase().indexOf("_WP_"))}`;
   }
@@ -164,10 +164,12 @@ function expectedFamilyStem(family, packageInfo, role, sourceStem) {
     if (role === 'texture') return `${base}_${map}`;
     return base;
   }
-  const variant = family === "monster" || numberedNpc ? (confirmedForm !== null ? (confirmedForm === 'base' ? '' : confirmedForm) : sourceStem.match(/_(\d{2})(?:_(?:ORM|D|N|A|Physics))?$/i)?.[1] || "") : "";
+  const variant = family === "monster" || numberedNpc ? (confirmedForm !== null ? (confirmedForm === 'base' ? '01' : confirmedForm) : sourceStem.match(/_(\d{2})(?:_(?:ORM|D|N|A|Physics))?$/i)?.[1] || "") : "";
   const suffix = family === 'weapon' ? weaponFileSuffix(sourceStem, role, packageInfo.sourcePackageName || packageInfo.packageName)
     : characterMaterialSuffix(sourceStem, role, [packageInfo.sourcePackageName, packageInfo.sourceName, packageInfo.packageName, subject]);
-  const rawBase = `${prefix}_${subject}${suffix}${variant ? `_${variant}` : ""}`;
+  const rawBase = family === 'monster'
+    ? `${prefix}_${subject}${variant ? `_${variant}` : ''}${suffix}`
+    : `${prefix}_${subject}${suffix}${variant ? `_${variant}` : ""}`;
   const base = family === 'weapon' ? weaponPackageOutput(weaponSideOutput(rawBase), subject) : rawBase;
   if (role === "physicsAsset") return `${base}_Physics`;
   if (role === "texture") return `${base}_${map}`;

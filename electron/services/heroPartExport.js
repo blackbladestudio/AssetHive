@@ -4,7 +4,7 @@ const { heroTextureChannel, heroMaterialRole, heroTextureGroup, heroMaterialGrou
 const { inspectCharacterModel } = require('./characterFileInspection');
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const ROOT = '/Game/Characters/Hero/Asset_PJZ';
-const parents = { face: 'M_Char_Face', hair: 'M_Char_Hair', eyebrow: 'M_Char_EyeBrow', eye: 'M_Char_Eye_CustomIris' };
+const parents = { face: 'M_Char_Face', hair: 'M_Char_Hair', eyebrow: 'M_Char_EyeBrow', eye: 'M_Char_Eye_CustomIris_VT' };
 
 async function buildHeroPartExport(asset, options, analyze, managedFile) {
   const fields = asset.meta.character;
@@ -32,7 +32,9 @@ async function buildHeroPartExport(asset, options, analyze, managedFile) {
     if (!['SRMF', 'Mask'].includes(channel)) groups.get(group.key).textures[channel] = key;
     entries.push({ key, kind: 'texture', name: textureName, groupName: group.part || role, channel: channel === 'Opacity' ? 'A' : channel,
       targetPath: `${cardRoot}/Material/${name}/Texture/${textureName}`, ...await managedFile(asset, file.storedPath),
-      config: { version: 1, family: 'suit', heroPart: fields.variant, virtualTexture: role !== 'eye', normalFormat: options.normalFormat || 'directx' } });
+      // Iris POM uses a Texture2D SampleGrad loop. Keep its height input ordinary;
+      // the VT eye parent supports the remaining sampled channels.
+      config: { version: 1, family: 'suit', heroPart: fields.variant, virtualTexture: !(role === 'eye' && channel === 'Height'), normalFormat: options.normalFormat || 'directx' } });
   }
   const mainRole = fields.variant === 'Hair' ? 'hair' : 'face';
   if (hasCards && !blockout && ![...groups.values()].some(group => group.role === mainRole)) groups.set(mainRole, { key: mainRole, role: mainRole, part: '', textures: {} });
@@ -43,7 +45,7 @@ async function buildHeroPartExport(asset, options, analyze, managedFile) {
       targetPath: `${cardRoot}/Material/${name}/${materialName}`, textures,
       config: { version: 1, family: 'suit', heroPart: fields.variant, materialRole: 'hero_' + role,
         ...(role === 'hair' ? { hairDefaultsVersion: 1 } : {}),
-        virtualTexture: role !== 'eye', parentPath: '/Game/MaterialLibrary/Character/Common/' + parents[role] } });
+        virtualTexture: true, parentPath: '/Game/MaterialLibrary/Character/Common/' + parents[role] } });
   }
   for (const file of models) {
     const source = await managedFile(asset, file.storedPath);

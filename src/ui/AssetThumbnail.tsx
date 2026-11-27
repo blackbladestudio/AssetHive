@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import type { PreviewLoader } from "./previewLoader";
+import { AnimationPreviewVideo } from "./AnimationPreviewVideo";
 
 // Key this component by sourcePath so an edited/replaced preview starts cleanly.
 export function AssetThumbnail({ sourcePath, originalPath = sourcePath, loader, toUrl, name, cover, fallback, onOriginalError }: {
@@ -40,14 +41,10 @@ export function AssetThumbnail({ sourcePath, originalPath = sourcePath, loader, 
   const isMotionPreview = /\.(webm|mp4)$/i.test(path);
   return <>
     {!loaded && <div className="card-thumb-shimmer" />}
-    {src && isMotionPreview && <video
+    {src && isMotionPreview && <AnimationPreviewVideo
       key={src}
       className={loaded ? "loaded" : ""}
       src={src}
-      autoPlay
-      loop
-      muted
-      playsInline
       disablePictureInPicture
       style={cover ? { objectFit: "cover" } : undefined}
       onLoadedData={() => setLoadedSource(src)}

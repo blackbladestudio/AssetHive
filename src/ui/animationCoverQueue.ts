@@ -85,7 +85,7 @@ export class AnimationCoverQueue {
       if (this.current && visible.some(target => target.modelPath === this.current?.modelPath)) return;
       const next = visible.find(({ modelPath }) => this.loader.get(modelPath) === modelPath
         && (this.retryAfter.get(modelPath) || 0) <= Date.now());
-      this.setCurrent(next || null);
+      this.setCurrent(next ? { ...next } : null);
     }, 160);
   };
 

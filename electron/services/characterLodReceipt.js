@@ -3,6 +3,9 @@ function verifyCharacterLodReceipt(entry, row) {
   if (entry?.config?.lodPolicy !== 'lod1-reduction-v2'
     || !['success', 'unchanged'].includes(row.status) || row.action === 'retained') return row;
   const report = row.lodReport;
+  if (entry.config.lodReductionProfile && report?.reductionProfile !== entry.config.lodReductionProfile) {
+    return { ...row, status: 'failed', message: '引擎还没有按本次减面设置完成处理，请更新插件后重新检查发送。' };
+  }
   const levels = new Map((report?.levels || []).map(level => [level.index, level]));
   if (entry.config.lodReset && entry.config.lodResetBaseCount === 1
     && !entry.config.lodSources?.length && !entry.config.skinLodSource
