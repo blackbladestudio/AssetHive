@@ -6617,6 +6617,13 @@ select {
   bottom: calc(100% + 6px);
 }
 
+.detail-plant-export-menu {
+  min-width: 220px;
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
 .detail-export-split {
   position: relative;
   display: flex;

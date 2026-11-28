@@ -109,6 +109,9 @@ test("reconciliation removes deleted work and late results cannot lose replaceme
 });
 
 test("publication failures retry without a tight loop and can recover", async t => {
+  // 固定业务时钟，避免高负载时 20ms 的等待跨过真实的重试期限。
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
   let calls = 0;
   const queue = createThumbnailWarmup({ initialDelayMs: 0, delayMs: 1, retryMs: 50,
     ensure: async () => ++calls === 1 ? { status: "failed" } : { status: "published" } });
@@ -117,6 +120,7 @@ test("publication failures retry without a tight loop and can recover", async t 
   await until(() => calls === 1);
   await delay(20);
   assert.equal(calls, 1);
+  now += 50;
   await until(() => queue.status().published === 1);
   assert.equal(calls, 2);
   assert.equal(queue.status().failed, 1);

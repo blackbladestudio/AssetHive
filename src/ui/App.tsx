@@ -909,7 +909,7 @@ const DECAL_EXPORT_MODE_OPTIONS = [
 const PLANT_EXPORT_MODE_OPTIONS = [
   { value: "opaque", zh: "OPAQUE 版本（不带 LOD）", en: "OPAQUE (No LOD)" },
   { value: "lod", zh: "LOD 版本（Masked + LOD）", en: "Masked + LOD" },
-  { value: "naniteFoliage", zh: "Nanite Foliage（USDA + Wind）", en: "Nanite Foliage (USDA + Wind)" },
+  { value: "naniteFoliage", zh: "Nanite Foliage 版本", en: "Nanite Foliage" },
   { value: "naniteMasked", zh: "Nanite Masked（仅 LOD0）", en: "Nanite Masked (LOD0 only)" }
 ] as const;
 
@@ -5140,9 +5140,9 @@ export function App() {
     ["3d", "3dplant"].includes(allAssets.find(asset => asset.id === id)?.assetType || ""));
   const showDecalExportModeSelect = showUnrealExportOptions && detailExportAssetIds.length > 0
     && detailExportAssetIds.every((id) => allAssets.find((asset) => asset.id === id)?.assetType === "decal");
-  const exportPlants = detailExportAssetIds.map((id) => allAssets.find((asset) => asset.id === id))
-    .filter((asset) => asset?.assetType === "3dplant" && (supportsPlantExportMode(asset) || isNaniteFoliageAsset(asset)));
-  const showPlantExportModeSelect = showUnrealExportOptions && exportPlants.length > 0;
+  const exportPlants = detailExportAssetIds.map((id) => selectedAsset?.id === id ? selectedAsset : allAssets.find((asset) => asset.id === id))
+    .filter((asset) => asset?.assetType === "3dplant");
+  const showPlantExportModeSelect = showUnrealExportOptions && exportPlants.some(asset => supportsPlantExportMode(asset) || isNaniteFoliageAsset(asset));
   const canSelectOpaqueMode = exportPlants.some(canSelectPlantExportMode);
   const allNaniteFoliage = exportPlants.length > 0 && exportPlants.every(isNaniteFoliageAsset);
   const allNaniteOnly = allNaniteFoliage && exportPlants.every(asset => !plantBranches(asset).standard);
@@ -6201,7 +6201,7 @@ export function App() {
           meshOverwritePolicy,
           blenderDecimationRatio: currentBlenderDecimationRatio,
           decalExportMode: currentDecalExportMode,
-          plantExportMode: resolvePlantModeForAssets(assetIds.map(id => allAssets.find(asset => asset.id === id)), currentPlantExportMode),
+          plantExportMode: resolvePlantModeForAssets(assetIds.map(id => selectedAsset?.id === id ? selectedAsset : allAssets.find(asset => asset.id === id)), currentPlantExportMode),
           plantSyntheticWind: currentPlantSyntheticWind
         }
       });
@@ -16497,10 +16497,6 @@ export function App() {
                     ) : null}
                   </div>
 
-                  {selectedAsset.assetType === "3dplant" && selectedAsset.meta?.naniteFoliage && <details className="asset-form-card">
-                    <summary>{t("Nanite Foliage 分支版本", "Nanite Foliage branch")}</summary>
-                    <NaniteFoliageSummary manifest={selectedAsset.meta.naniteFoliage as Record<string, unknown>} english={t("zh", "en") === "en"} />
-                  </details>}
                   <div className="detail-breadcrumbs">
                     <button
                       className="detail-crumb"
@@ -17118,7 +17114,7 @@ export function App() {
                         hideChevron
                         triggerContent={<Icon name="leaf" />}
                         className="detail-export-dark-select"
-                        menuClassName="detail-export-menu"
+                        menuClassName="detail-export-menu detail-plant-export-menu"
                         itemClassName="detail-export-menu-item"
                         onChange={(nextValue) => {
                           void changePlantExportMode(nextValue);

@@ -1,5 +1,6 @@
 // USDA/Wind is an alternate representation of the same library asset.
 export function plantBranches(asset, metadata = asset?.meta || {}) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) metadata = {};
   const files = new Set();
   const add = value => {
     const file = typeof value === "string" ? value : value?.file || value?.uri || value?.path || "";
@@ -9,10 +10,12 @@ export function plantBranches(asset, metadata = asset?.meta || {}) {
     if (Array.isArray(source)) source.forEach(add);
   }
   Object.values(metadata.modelSlots || {}).forEach(add);
-  for (const component of metadata.components || []) if (component.type === "model") add(component);
+  if (Array.isArray(metadata.components)) {
+    for (const component of metadata.components) if (component?.type === "model") add(component);
+  }
   return {
-    standard: [...files].some(file => /\.(fbx|st9|obj|abc|gltf|glb|ztl)$/i.test(file)),
-    naniteFoliage: Boolean(metadata.naniteFoliage?.variants?.length) || [...files].some(file => /\.usda$/i.test(file))
+    standard: metadata.plantBranches?.standard === true || [...files].some(file => /\.(fbx|st9|obj|abc|gltf|glb|ztl)$/i.test(file)),
+    naniteFoliage: metadata.plantBranches?.naniteFoliage === true || Boolean(metadata.naniteFoliage?.variants?.length) || [...files].some(file => /\.usda$/i.test(file))
   };
 }
 

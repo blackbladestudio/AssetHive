@@ -1,3 +1,5 @@
+const { plantBranches } = require('../../shared/plantBranches.mjs');
+
 // Keep texture inventories and editing metadata out of recurring renderer updates.
 // Details are loaded separately through assets:getById before editing/exporting.
 function toAssetListRecord(asset) {
@@ -41,6 +43,8 @@ function toAssetListRecord(asset) {
     createdAt: asset.createdAt,
     favorite: asset.favorite,
     meta: {
+      // Menus and batch dispatch need branch availability, not the USDA/material manifest.
+      ...(asset.assetType === '3dplant' ? { plantBranches: plantBranches(asset) } : {}),
       // Character cards need their component inventory, not only environment tags.
       ...(["monster", "suit", "npc", "weapon", "item"].includes(asset.assetType) ? {
         character: meta.character,
