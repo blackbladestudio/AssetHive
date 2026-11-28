@@ -4,19 +4,30 @@ function createThumbnailWarmup({ ensure, canRun = () => true, onProgress = () =>
   const entries = new Map();
   const urgent = new Map();
   const priorityStack = [];
+  const discovered = new Map();
   const normal = new Map();
   const active = new Set();
   const stats = { checked: 0, cached: 0, published: 0, failed: 0 };
   let timer;
   let disposed = false;
+  let normalPaused = false;
   let notBefore = Date.now() + initialDelayMs;
   let failuresInRow = 0;
 
-  function status() { return { ...stats, queued: urgent.size + normal.size, active: active.size }; }
+  function status() { return { ...stats, queued: urgent.size + discovered.size + normal.size, active: active.size }; }
   function schedule(wait = delayMs) {
-    if (disposed || timer || (!urgent.size && !normal.size) || active.size) return;
+    if (disposed || timer || active.size || (!urgent.size && (normalPaused || (!discovered.size && !normal.size)))) return;
     timer = globalThis.setTimeout(() => { timer = null; void pump(); }, wait);
     timer.unref?.();
+  }
+
+  function prioritize(entry) {
+    normal.delete(entry.path);
+    if (entry.backgroundPriority) {
+      discovered.delete(entry.path);
+      urgent.set(entry.path, entry);
+      priorityStack.push(entry);
+    } else discovered.set(entry.path, entry);
   }
   async function pump() {
     if (disposed || active.size) return;
@@ -31,7 +42,11 @@ function createThumbnailWarmup({ ensure, canRun = () => true, onProgress = () =>
       entry = candidate;
       break;
     }
-    if (!entry) {
+    if (!entry && !normalPaused) {
+      entry = discovered.values().next().value;
+      if (entry) discovered.delete(entry.path);
+    }
+    if (!entry && !normalPaused) {
       for (const candidate of normal.values()) {
         if (candidate.dueAt <= Date.now()) { entry = candidate; normal.delete(candidate.path); break; }
         nextDue = Math.min(nextDue, candidate.dueAt);
@@ -48,13 +63,16 @@ function createThumbnailWarmup({ ensure, canRun = () => true, onProgress = () =>
     if (failed) { stats.failed++; failuresInRow++; }
     else { failuresInRow = 0; if (result.status in stats) stats[result.status]++; }
     if (entries.get(entry.path) === entry) {
-      if (revision !== entry.revision) { urgent.set(entry.path, entry); priorityStack.push(entry); }
-      else if (failed) { entry.dueAt = Date.now() + retryMs; normal.set(entry.path, entry); }
-      else entry.checkedAt = Date.now();
+      if (revision !== entry.revision) prioritize(entry);
+      else {
+        entry.backgroundPriority = false;
+        if (failed) { entry.dueAt = Date.now() + retryMs; normal.set(entry.path, entry); }
+        else entry.checkedAt = Date.now();
+      }
     } else {
       const replacement = entries.get(entry.path);
-      if (replacement && !urgent.has(entry.path) && !normal.has(entry.path)) {
-        urgent.set(entry.path, replacement); priorityStack.push(replacement);
+      if (replacement && !urgent.has(entry.path) && !discovered.has(entry.path) && !normal.has(entry.path)) {
+        prioritize(replacement);
       }
     }
     if (failuresInRow >= 3) notBefore = Date.now() + retryMs;
@@ -63,29 +81,37 @@ function createThumbnailWarmup({ ensure, canRun = () => true, onProgress = () =>
   }
 
   return {
-    enqueue(paths, { replace = false, priority = false } = {}) {
+    enqueue(paths, { replace = false, priority = false, foregroundOnly = false } = {}) {
       if (disposed) return;
       const wanted = new Set(paths.filter(Boolean));
       if (replace) for (const sourcePath of entries.keys()) {
-        if (!wanted.has(sourcePath)) { entries.delete(sourcePath); urgent.delete(sourcePath); normal.delete(sourcePath); }
+        if (!wanted.has(sourcePath)) { entries.delete(sourcePath); urgent.delete(sourcePath); discovered.delete(sourcePath); normal.delete(sourcePath); }
       }
       for (const sourcePath of wanted) {
         let entry = entries.get(sourcePath);
-        if (!entry) { entry = { path: sourcePath, revision: 0, checkedAt: 0, dueAt: 0 }; entries.set(sourcePath, entry); }
+        if (!entry) { entry = { path: sourcePath, revision: 0, checkedAt: 0, dueAt: 0, backgroundPriority: false }; entries.set(sourcePath, entry); }
         if (priority) {
           entry.revision++; entry.checkedAt = 0; entry.dueAt = 0;
-          normal.delete(sourcePath);
-          if (!active.has(sourcePath)) { urgent.set(sourcePath, entry); priorityStack.push(entry); }
-        } else if (!active.has(sourcePath) && !urgent.has(sourcePath) && !normal.has(sourcePath)
+          if (!foregroundOnly) entry.backgroundPriority = true;
+          if (!active.has(sourcePath)) prioritize(entry);
+        } else if (!active.has(sourcePath) && !urgent.has(sourcePath) && !discovered.has(sourcePath) && !normal.has(sourcePath)
           && Date.now() - entry.checkedAt >= checkIntervalMs) normal.set(sourcePath, entry);
       }
-      if (priority && failuresInRow < 3) notBefore = 0;
+      const canPrioritize = priority && (!foregroundOnly || !normalPaused);
+      if (canPrioritize && failuresInRow < 3) notBefore = 0;
       // A new edit must not wait behind a timer armed for an old failed item.
-      if (priority && timer) { globalThis.clearTimeout(timer); timer = null; }
+      if (canPrioritize && timer) { globalThis.clearTimeout(timer); timer = null; }
+      schedule();
+    },
+    setNormalPaused(paused) {
+      if (normalPaused === paused) return;
+      normalPaused = paused;
+      if (!paused && discovered.size && failuresInRow < 3) notBefore = 0;
+      if (timer) { globalThis.clearTimeout(timer); timer = null; }
       schedule();
     },
     status,
-    dispose() { disposed = true; globalThis.clearTimeout(timer); entries.clear(); urgent.clear(); priorityStack.length = 0; normal.clear(); }
+    dispose() { disposed = true; globalThis.clearTimeout(timer); entries.clear(); urgent.clear(); priorityStack.length = 0; discovered.clear(); normal.clear(); }
   };
 }
 

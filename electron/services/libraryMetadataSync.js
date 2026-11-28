@@ -1,10 +1,11 @@
+const { isMaskAsset } = require("../../shared/maskMaterials.mjs");
 const path = require("node:path");
 const { normalizeAssetTag, normalizeStandardAssetTag } = require("./assetTags");
 
 const METADATA_UPDATE_VERSION = 2;
 const ENVIRONMENT_ASSET_TYPES = new Set(["3d", "3dplant", "surface", "decal", "atlas", "imperfection", "displacement", "hdri"]);
 const STANDARD_ASSET_TAGS_BY_TYPE = {
-  "3d": ["Props", "Destructible", "Dressing", "ThirdParty", "Kits", "MEGA"],
+  "3d": ["Props", "Destructible", "Dressing", "ThirdParty", "Kits"],
   "3dplant": ["Tree", "Bush", "Grass", "Micro", "HeroFoliage", "ThirdParty"],
   surface: ["ThirdParty"],
   decal: ["ThirdParty"],
@@ -27,7 +28,6 @@ const CANONICAL_STANDARD_TAG_BY_KEY = new Map([
   ["tile", "Tile"],
   ["kit", "Kits"],
   ["kits", "Kits"],
-  ["mega", "MEGA"],
   ["tree", "Tree"],
   ["bush", "Bush"],
   ["grass", "Grass"],
@@ -172,7 +172,7 @@ function buildSyncedAssetMetadataFields(input = {}) {
     zionTags
   });
   const tags = normalizeTagList([
-    ...regularTags,
+    ...regularTags.filter(tag => assetType !== "3d" || !/^(mega|mask)$/i.test(tag)),
     ...[...(meta.standardAssetTags || []), ...(asset.standardAssetTags || []), meta.subType]
       .filter((tag) => /^(megascans|pbrmax)$/i.test(String(tag || ""))),
     assetType,
@@ -204,6 +204,7 @@ function buildSyncedAssetMetadataFields(input = {}) {
     source: "custom",
     assetType,
     asset_type: assetType,
+    textureGroupMode: assetType === "3d" ? (isMaskAsset({ ...asset, ...meta, assetType }) ? "channel" : "texture") : undefined,
     topCategory,
     standardAssetTags,
     category,

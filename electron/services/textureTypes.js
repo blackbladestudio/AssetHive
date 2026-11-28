@@ -22,6 +22,7 @@ const TEXTURE_TYPES = Object.freeze([
   "OpacityMaskRoughnessTranslucency",
   "Translucency",
   "AO",
+  "UV2AO",
   "Brush",
   "Bump",
   "Cavity",
@@ -52,6 +53,7 @@ const TEXTURE_TYPE_ABBREVIATIONS = Object.freeze({
   SubsurfaceColor: "SSC",
   DetailPack: "DP",
   Mask: "Mask",
+  UV2AO: "UV2AO",
   BasecolorRoughness: "BCR",
   OpacityMaskRoughnessTranslucency: "ORT",
   Translucency: "T"
@@ -119,6 +121,7 @@ const TEXTURE_TYPE_COMPACT_ALIASES = Object.freeze({
   detailpack: "DetailPack",
   detail: "DetailPack",
   mask: "Mask",
+  uv2ao: "UV2AO",
   basecolorroughness: "BasecolorRoughness",
   basecolourroughness: "BasecolorRoughness",
   bcr: "BasecolorRoughness",

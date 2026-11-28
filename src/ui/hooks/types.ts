@@ -119,6 +119,8 @@ export type ImportFormState = {
   enabledModelTypes: string[];
   textureEntries: TextureEntry[];
   materialNames?: Record<string, string>;
+  maskGroups?: import("../../../shared/maskMaterials.mjs").MaskGroups;
+  textureGroupMode?: "texture" | "channel";
   baseTiling: string;
   normalMapFormat: "dx" | "opengl";
   normalMapFormats: Record<number, "dx" | "opengl">;
@@ -152,6 +154,8 @@ export type ImportFormState = {
   sourceSemanticTags?: Record<string, unknown>;
   sourceClassification?: Record<string, unknown>;
   sourceArchivePath?: string;
+  plantAssetType?: "standard" | "naniteFoliage";
+  naniteFoliage?: Record<string, unknown>;
   nativePlantWind?: Record<string, unknown>;
   nativePlantWindWarnings?: string[];
   foliageOpaque: boolean;
@@ -179,6 +183,8 @@ export type ImportFormState = {
 };
 
 export type EditFormState = {
+  plantAssetType?: "standard" | "naniteFoliage";
+  naniteFoliage?: Record<string, unknown>;
   assetId: string;
   hasEmptySlots?: boolean;
   assetPath?: string;
@@ -191,6 +197,8 @@ export type EditFormState = {
   enabledModelTypes: string[];
   textureEntries: TextureEntry[];
   materialNames?: Record<string, string>;
+  maskGroups?: import("../../../shared/maskMaterials.mjs").MaskGroups;
+  textureGroupMode?: "texture" | "channel";
   baseTiling: string;
   normalMapFormat: "dx" | "opengl";
   normalMapFormats: Record<number, "dx" | "opengl">;

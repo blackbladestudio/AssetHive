@@ -5,7 +5,7 @@ import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { getPreviewUrl } from "./previewUrl";
 import { AnimationMotionPanel } from "./AnimationMotionPanel";
-import { isAnimationPreviewActive, subscribeToAnimationPreviewActivity } from "./animationPreviewActivity";
+import { isWindowForeground, subscribeToWindowForeground } from "./windowForeground";
 import { analyzeRootMotion, findRootMotionBone, rootMotionAt, type RootMotionAnalysis } from "./animationRootMotion";
 
 type AnimationPreviewProps = {
@@ -566,7 +566,7 @@ export function AnimationPreview({
           stage.updateMatrixWorld(true);
         };
         const resize = () => {
-          if (!host.isConnected || !isAnimationPreviewActive()) return;
+          if (!host.isConnected || !isWindowForeground()) return;
           const nextWidth = Math.max(1, host.clientWidth);
           const nextHeight = Math.max(1, host.clientHeight);
           camera.aspect = nextWidth / nextHeight;
@@ -576,7 +576,7 @@ export function AnimationPreview({
         const observer = new ResizeObserver(resize);
         const tick = (now: number) => {
           frameId = undefined;
-          if (cancelled || !isAnimationPreviewActive()) return;
+          if (cancelled || !isWindowForeground()) return;
           const delta = lastFrameTime === undefined ? 0 : (now - lastFrameTime) / 1000;
           lastFrameTime = now;
           if (mixer && playingRef.current) {
@@ -608,7 +608,7 @@ export function AnimationPreview({
               const notify = onMotionCaptureRef.current;
               const controller = new AbortController();
               void notify(async () => {
-                if (cancelled || !isAnimationPreviewActive()) return null;
+                if (cancelled || !isWindowForeground()) return null;
                 recording = controller;
                 let canvas: HTMLCanvasElement | undefined;
                 try {
@@ -634,7 +634,7 @@ export function AnimationPreview({
         };
 
         const syncActivity = () => {
-          if (isAnimationPreviewActive()) {
+          if (isWindowForeground()) {
             if (frameId === undefined) {
               resize();
               lastFrameTime = undefined;
@@ -650,7 +650,7 @@ export function AnimationPreview({
           }
         };
         observer.observe(host);
-        const unsubscribeActivity = subscribeToAnimationPreviewActivity(syncActivity);
+        const unsubscribeActivity = subscribeToWindowForeground(syncActivity);
         syncActivity();
         setStatus("ready");
 

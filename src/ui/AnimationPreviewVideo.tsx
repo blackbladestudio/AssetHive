@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, type ComponentPropsWithoutRef } from "react";
-import { isAnimationPreviewActive, subscribeToAnimationPreviewActivity } from "./animationPreviewActivity";
+import { isWindowForeground, subscribeToWindowForeground } from "./windowForeground";
 
 export function AnimationPreviewVideo({ src, ...props }: ComponentPropsWithoutRef<"video">) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -7,10 +7,10 @@ export function AnimationPreviewVideo({ src, ...props }: ComponentPropsWithoutRe
     const video = videoRef.current;
     if (!video || !src) return;
     const syncPlayback = () => {
-      if (isAnimationPreviewActive()) void video.play().catch(() => {});
+      if (isWindowForeground()) void video.play().catch(() => {});
       else video.pause();
     };
-    const unsubscribe = subscribeToAnimationPreviewActivity(syncPlayback);
+    const unsubscribe = subscribeToWindowForeground(syncPlayback);
     syncPlayback();
     return unsubscribe;
   }, [src]);

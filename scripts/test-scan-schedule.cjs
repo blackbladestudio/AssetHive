@@ -107,6 +107,7 @@ test("production scan routing uses the persisted deadline and defers full work d
     getLibraryRootPath: () => "library-a", waitForLibraryCacheRestore: async () => {},
     normalizeComparePath: (value) => value, getLibrarySqlCachePath: () => f.file.replace(/\.scan.json$/, ".sqlite"),
     createScanSchedule: (file) => createScanSchedule(file, f.now),
+    scheduleUnrealWorkspaceCheck: () => {},
     hasActiveBackgroundImport: () => importing, powerMonitor: { getSystemIdleTime: () => 120 },
     ensureLibraryEditsRecovered: async () => { recoveries++; },
     statOrNull: async () => ({ isDirectory: () => true }),
@@ -158,15 +159,17 @@ async function scanPublicationFixture(initial, worker, schedulePlan) {
   const start = source.indexOf("async function performScan(");
   const end = source.indexOf("\nasync function clearAssetCaches(", start);
   const events = [], snapshots = [], publications = [];
+  const foregroundWindows = new Set();
   let clock = 10000;
   const context = vm.createContext({
-    path, process, index: initial, settings: { customLibraryPath: "library-a" },
+    path, process, foregroundWindows, index: initial, settings: { customLibraryPath: "library-a" },
     recycleInProgress: false, activeExportCalls: 0,
     Date: { now: () => clock },
     getLibraryRootPath: () => context.settings.customLibraryPath,
     waitForLibraryCacheRestore: async () => {}, ensureLibraryEditsRecovered: async () => {},
     normalizeComparePath: value => value, getLibrarySqlCachePath: () => "local/library.sqlite",
     createScanSchedule: () => ({ plan: async () => schedulePlan || ({ incremental: true, pollShard: 0 }), complete: async () => {} }),
+    scheduleUnrealWorkspaceCheck: () => {},
     hasActiveBackgroundImport: () => false, powerMonitor: { getSystemIdleTime: () => 120 },
     statOrNull: async () => ({ isDirectory: () => true }),
     loadFavoriteIds: async () => new Set(), loadFavoriteMetaTokens: async () => new Set(), applyFavoriteIds: () => {},
@@ -184,7 +187,9 @@ async function scanPublicationFixture(initial, worker, schedulePlan) {
     const libraryScanSchedules = new Map(), WATCH_SCAN_COOLDOWN_MS = 1000;
     ${source.slice(start, end)}`, context);
   const window = { isDestroyed: () => false, webContents: { send: (channel, payload) => events.push({ channel, payload }) } };
-  return { context, events, snapshots, publications, run: () => context.performScan(window, { reason: "periodic" }) };
+  foregroundWindows.add(window);
+  return { context, events, snapshots, publications, background: () => foregroundWindows.delete(window),
+    run: () => context.performScan(window, { reason: "periodic" }) };
 }
 
 test('automatic polling yields to deletion and UE export, then resumes on the next tick', async () => {
@@ -216,6 +221,43 @@ test("imports completed during scan survive every partial publication, final IDs
   assert.deepEqual(f.snapshots.at(-1).map(asset => asset.id).sort(), ["A", "B", "C", "existing"]);
   const completion = f.events.find(event => event.payload.complete).payload;
   assert.deepEqual(Array.from(completion.ids).sort(), ["A", "B", "C", "existing"]);
+});
+
+test("a background scan persists the full index and sends only lightweight refresh notices", async () => {
+  const old = { id: "old" };
+  const added = { id: "added" };
+  const f = await scanPublicationFixture([old], ({ options }) => {
+    options.onRecord(added);
+    return [old, added];
+  });
+  f.background();
+  await f.run();
+  assert.deepEqual(Array.from(f.context.index, value => value.id), ["old", "added"]);
+  assert.deepEqual(f.snapshots[0].map(value => value.id), ["old", "added"]);
+  const changes = f.events.filter(event => event.channel === "assets:change");
+  assert.ok(changes.length > 0);
+  assert.ok(changes.every(({ payload }) => !payload.records && !payload.ids && payload.count === 2));
+  assert.ok(f.events.some(({ channel, payload }) => channel === "assets:scanProgress" && payload.phase === "done"));
+});
+
+test("an unchanged background scan does not request a full refresh on restore", async () => {
+  const asset = { id: "existing", name: "Existing", favorite: false };
+  const f = await scanPublicationFixture([asset], ({ options }) => {
+    const record = { ...asset };
+    options.onRecord(record);
+    return [record];
+  });
+  vm.runInContext("lastScanSnapshotRoot = 'library-a'", f.context);
+  f.background();
+  await f.run();
+  assert.equal(f.snapshots.length, 0);
+  assert.ok(f.events.some(({ channel, payload }) => channel === "assets:scanProgress" && payload.phase === "done"));
+  assert.ok(f.events.every(({ channel }) => channel !== "assets:change"));
+
+  f.context.loadFavoriteIds = async () => new Set([asset.id]);
+  await f.run();
+  assert.equal(f.snapshots[0][0].favorite, true);
+  assert.ok(f.events.some(({ channel }) => channel === "assets:change"));
 });
 
 test("quiet four-second polls start no worker or progress event and retain snapshot authority", async () => {

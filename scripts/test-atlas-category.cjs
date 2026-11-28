@@ -33,6 +33,10 @@ function findRendererNode(predicate) {
 
 function rendererFunction(name, scope = {}) {
   scope = { getCharacterNavigationSelection: () => null, getAnimationNavigationSelection: () => null, characterCategoryOptions: () => [], ...scope };
+  if (name === "mapNodeIdToAssetTypes") {
+    const table = findRendererNode(node => ts.isVariableDeclaration(node) && node.name.getText(rendererAst) === "NAVIGATION_ASSET_TYPES");
+    scope.NAVIGATION_ASSET_TYPES = new Function(`return ${table.initializer.getText(rendererAst)}`)();
+  }
   const node = findRendererNode(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
   const code = ts.transpileModule(node.getText(rendererAst), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   return new Function(...Object.keys(scope), `${code}; return ${name};`)(...Object.values(scope));
@@ -140,7 +144,7 @@ test("Atlas cards export to Unreal while folder-only types keep independent fold
     if (ts.isJsxAttribute(node) && ["exportDisabled", "exportDimmed", "exportTitle"].includes(node.name.text)) attributes.push(node);
     ts.forEachChild(node, visit);
   })(rendererAst);
-  assert.equal(attributes.length, 9, "all three card surfaces are covered");
+  assert.equal(attributes.length, 6, "overview and list cards are covered");
   for (const target of ["unreal", "blender", "3dcoat"]) {
     const scope = { allAssets: assets, isFolderOnlyAsset, isBlenderTarget: target === "blender", isThreeDCoatTarget: target === "3dcoat",
       supportsBlenderExport: rendererFunction("supportsBlenderExport"), supportsThreeDCoatExport: asset => asset?.assetType === "decal", canExport: true, exportUnavailableTitle: "Disconnected",

@@ -1,10 +1,11 @@
+const { hasMaskFolderLayout } = require("../../shared/maskMaterials.mjs");
 const path = require("node:path");
 const { parseModelVariantKey, stripModelVariantKey } = require("./modelVariants");
 const { buildModelLodPlan } = require("./modelLods");
 const { isThumbsFolderPath } = require("./textureMaterialRole");
 const { namedTextureMetadata } = require("./zion3dMaterials");
 
-const supportFolder = /^(tex|textures?|maps?|models?|mesh(?:es)?|source|sourcefiles|previews?|renders?|thumbs?|thumbnails?|fbx|obj|[124816]+k)$/i;
+const supportFolder = /^(tex|textures?|maps?|base|mask|models?|mesh(?:es)?|source|sourcefiles|previews?|renders?|thumbs?|thumbnails?|fbx|obj|[124816]+k)$/i;
 // Autodesk FBX keeps its referenced textures in a sibling "<model>.fbm" folder
 // (Tripo and other FBX exporters use this layout). Treat it like a support
 // subfolder so the textures stay grouped with their model instead of splitting
@@ -13,8 +14,8 @@ const fbxEmbeddedMediaFolder = /\.fbm$/i;
 const roleToken = /^(albedo|albedoopacitymasked|basecolor|basecolour|basecolorroughness|basecoloropacitymasked|base|diffuse|diffuseopacitymasked|color|col|normal|nrm|nor|roughness|rough|rgh|metalness|metallic|metal|ao|ambient|occlusion|ambientocclusion|height|displacement|disp|dis|specular|spec|opacitymasked|opacitymask|opacity|alpha|gloss|glossiness|cavity|mask|fuzz|emissive|detailpack|translucency|translucent|subsurfacecolor|subsurface|orm|ort|alo|bco|bcr|do|al|bc|dp|ss|ssc|n|d|e|h|m|o|t|hdr|preview|thumb|thumbnail|render|beauty|dx|ogl|opengl|directx|[124816]+k|\d{3,4}x\d{3,4}|1\d{3}|\d{3}|lod\d*|var\d*|mesh|fbx|obj)$/i;
 const internalModelPrefix = /^SM[_-]/i;
 const internalCompanionPrefix = /^(?:(?:8|16|32)bit[_-])?(?:T|Thumb)[_-]/i;
-const internalModelExts = new Set([".fbx", ".obj", ".abc", ".gltf", ".glb", ".st9"]);
-const internalFolderPrefix = /^(?:Props|Destructible|Dressing|Megascans|PBRMAX|Kits|MEGA|Tree|Bush|Grass|Micro(?:Foliage)?|HeroFoliage)(?:[_-]|$)/i;
+const internalModelExts = new Set([".fbx", ".obj", ".abc", ".gltf", ".glb", ".st9", ".usda"]);
+const internalFolderPrefix = /^(?:Props|Destructible|Dressing|Megascans|PBRMAX|Kits|Mask|MEGA|Tree|Bush|Grass|Micro(?:Foliage)?|HeroFoliage)(?:[_-]|$)/i;
 const zionSurfaceFolderPrefix = /^(?:Surface|Tile)(?:[_-]|$)/i;
 
 function isLodFile(file) {
@@ -125,15 +126,19 @@ function groupDroppedAssets(files, metadataGroups = [], archiveSources = []) {
     // A Zion modular kit can contain different model families that share
     // named materials. Keep Mesh + Tex in one reviewable 3D asset package.
     const namedModels = members.filter(isModelFile);
-    const zion3d = namedModels.length > 0 && (/^(?:Kit|Kits|Props|Dressing|Destructible|MEGA)_/i.test(path.basename(root)) || namedModels.some((file) =>
-      /^SM_Env_(?:Kit|Kits|Props?|Dressing|Destructible|MEGA)_/i.test(path.basename(file))))
+    const channelLayout = hasMaskFolderLayout(members)
+      && !/^(?:Tree|Bush|Grass|Micro(?:Foliage)?|HeroFoliage)[_-]/i.test(path.basename(root))
+      && !namedModels.some(file => /^SM_Env_(?:Foliage|Tree|Bush|Grass)_/i.test(path.basename(file)));
+    const zion3d = namedModels.length > 0 && (channelLayout || /^(?:Kit|Kits|Props|Dressing|Destructible|Mask|MEGA)_/i.test(path.basename(root)) || namedModels.some((file) =>
+      /^SM_Env_(?:Kit|Kits|Props?|Dressing|Destructible|Mask|MEGA)_/i.test(path.basename(file))))
       && !members.some((file) => /\.st9$/i.test(file));
     if (zion3d) {
-      const named = namedTextureMetadata(members);
-      if (Object.keys(named.materialNames).length) {
+      const isMask = channelLayout;
+      const named = isMask ? require("./maskMaterials").maskTextureMetadata(members) : namedTextureMetadata(members);
+      if (isMask || Object.keys(named.materialNames).length) {
         const primary = singleInternalAssetModel(members, root);
         result.push({ files: members, folderName: path.basename(root), preferredName: primary ? internalPreferredName(primary) : path.basename(root),
-          metadata: { assetType: "3d", ...named } });
+          metadata: { assetType: "3d", ...named, ...(isMask ? { textureGroupMode: "channel" } : {}) } });
         continue;
       }
     }
@@ -177,6 +182,9 @@ function groupDroppedAssets(files, metadataGroups = [], archiveSources = []) {
       folderName: String(folderName || "").trim()
     }));
   assets = assets.map((asset) => {
+    if (asset.metadata?.assetType === "3d" && !asset.metadata.textureGroupMode && hasMaskFolderLayout(asset.files)) {
+      asset = { ...asset, metadata: { ...asset.metadata, textureGroupMode: "channel" } };
+    }
     const existingLods = Array.isArray(asset.metadata?.modelLods) ? asset.metadata.modelLods : [];
     if (existingLods.length > 0) return asset;
     const modelFiles = (asset.files || []).filter((file) => internalModelExts.has(path.extname(file).toLowerCase()));

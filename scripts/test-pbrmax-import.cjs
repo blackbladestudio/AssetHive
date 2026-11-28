@@ -375,7 +375,7 @@ test("st9 foliage folder prefixes map to their standard asset tag (Tree_Conifer�
     const { drafts } = await buildDrafts(files);
     assert.equal(drafts.length, 1, `${folder} should import as one asset`);
     assert.equal(drafts[0].form.assetType, "3dplant", `${folder} should be a 3D plant`);
-    assert.match(drafts[0].form.tagsText, new RegExp(`(?:^|,\\s*)${tag}(?:,|$)`), `${folder} should be tagged ${tag}`);
+    assert.match(drafts[0].form.tagsText, new RegExp(`(?:^|,\\s*)${tag === "MEGA" ? "Mask" : tag}(?:,|$)`), `${folder} should be tagged ${tag}`);
     const expectedName = folder.slice(folder.indexOf("_") + 1);
     assert.equal(drafts[0].form.assetName, expectedName, `${folder} should remove its standard tag prefix from the asset name`);
   }
@@ -651,7 +651,7 @@ test("分类维度判定：分类 / Asset Type 不入标签槽，标准 Asset Ta
     assetType: "3d",
     subCategory: "Props",
     category: "Props",
-    keepTags: ["Props", "Destructible", "Dressing", "Megascans", "PBRMAX", "Kits", "MEGA"]
+    keepTags: ["Props", "Destructible", "Dressing", "Megascans", "PBRMAX", "Kits"]
   });
   assert.equal(isTaxonomyTag("Props", propsKeys), false, "Props 同时是标准 Asset Tag，必须保留");
   assert.equal(isTaxonomyTag("props", propsKeys), false);
@@ -982,7 +982,7 @@ test("Asset Type switching preserves matching texture paths per texture group", 
   assert.equal(findPath(2, "Displacement"), "");
 });
 test("all 3D standard asset tag folder prefixes map to 3D Assets and their tag", async () => {
-  for (const tag of ["Props", "Destructible", "Dressing", "PBRMAX", "Kits", "MEGA"]) {
+  for (const tag of ["Props", "Destructible", "Dressing", "PBRMAX", "Kits"]) {
     const root = path.join("D:\\ZionFiles\\3DAssets", `${tag}_Sample`);
     const files = [
       path.join(root, "Asset.fbx"),
@@ -994,7 +994,7 @@ test("all 3D standard asset tag folder prefixes map to 3D Assets and their tag",
     const { drafts } = await buildDrafts(files);
     assert.equal(drafts.length, 1, `${tag} should produce one draft`);
     assert.equal(drafts[0].form.assetType, "3d", `${tag} should map to 3D Assets`);
-    assert.match(drafts[0].form.tagsText, new RegExp(`(?:^|,\\s*)${tag}(?:,|$)`), `${tag} should be auto-filled`);
+    assert.match(drafts[0].form.tagsText, new RegExp(`(?:^|,\\s*)${tag === "MEGA" ? "Mask" : tag}(?:,|$)`), `${tag} should be auto-filled`);
   }
 });
 

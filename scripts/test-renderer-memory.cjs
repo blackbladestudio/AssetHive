@@ -142,11 +142,16 @@ test("index, rescan and search IPC replies use compact records; detail replies k
   const start = main.indexOf('  ipcMain.handle("assets:getIndex",');
   const end = main.indexOf('  const handleAssetExport =', start);
   const handlers = new Map();
+  let startupLibrary = null;
+  let deletionCheck = null;
+  let deletionChecks = 0;
   vm.runInNewContext(main.slice(start, end), {
     ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
     isCharacterAssetType: require('../electron/services/characterImport').isCharacterAssetType,
     index: [fixture, null], toAssetListRecord, searchAssets: () => [fixture], refreshAssetById: async () => fixture,
-    recycleInProgress: false, filterRecycledIndex: async () => {}, librarySelectionGeneration: 0,
+    mainWindow: { getStartupLibrary: () => startupLibrary },
+    writeLog: () => {},
+    recycleInProgress: false, filterRecycledIndex: async () => { deletionChecks++; await deletionCheck; }, librarySelectionGeneration: 0,
     BrowserWindow: { fromWebContents: () => null, getAllWindows: () => [] }, performScan: async () => {},
     hydrateIndexPreviewFields: async () => [fixture]
   });
@@ -157,6 +162,28 @@ test("index, rescan and search IPC replies use compact records; detail replies k
     assert.equal(records[0].meta.textureEntries, undefined);
   }
   assert.equal((await handlers.get("assets:getById")({}, fixture.id)).asset, fixture);
+
+  let releaseDeletionCheck;
+  deletionCheck = new Promise(resolve => { releaseDeletionCheck = resolve; });
+  let normalReplied = false;
+  const normalIndex = handlers.get("assets:getIndex")({}, {}).then(records => { normalReplied = true; return records; });
+  const checksAfterNormalRead = deletionChecks;
+  const passiveIndex = handlers.get("assets:getIndex")({}, { preferMemory: true });
+  await setImmediate();
+  assert.equal(normalReplied, false, "explicit reads still check the shared deletion journal");
+  assert.equal(deletionChecks, checksAfterNormalRead, "window recovery must bypass a blocked deletion check");
+  releaseDeletionCheck();
+  assert.equal((await passiveIndex)[0].id, fixture.id);
+  await normalIndex;
+
+  let release;
+  startupLibrary = new Promise(resolve => { release = resolve; });
+  let replied = false;
+  const initialIndex = handlers.get("assets:getIndex")({}, { preferMemory: true }).then(records => { replied = true; return records; });
+  await setImmediate();
+  assert.equal(replied, false, "the first list cannot return before the startup snapshot");
+  release();
+  assert.equal((await initialIndex)[0].id, fixture.id);
 });
 
 test("overlapping detail requests share fresh, parallel deletion checks within one library", async () => {
@@ -221,23 +248,27 @@ test("abandoned startup reads cannot leave duplicate library subscriptions", asy
   for (const stage of ["settings", "index", "version", "complete"]) {
     let release;
     const pending = new Promise(resolve => { release = resolve; });
-    let subscriptions = 0, removals = 0, reads = 0;
+    let subscriptions = 0, removals = 0, reads = 0, activitySubscriptions = 0, ready = false;
     const wait = async (name, result) => { if (stage === name) await pending; return result; };
     const scope = { bridgeAvailable: true, createAssetIndexSync: syncExports.createAssetIndexSync,
       window: { setTimeout: () => 1, clearTimeout() {} },
+      isWindowForeground: () => false,
+      subscribeToWindowForeground: () => { activitySubscriptions++; return () => { activitySubscriptions--; }; },
       defaultSettings: { exportResolution: "4k" }, normalizeExportResolutionValue: value => value, normalizeDecalExportMode: value => value, normalizePlantExportMode: value => value,
       normalizeBlenderDecimationRatio: value => value,
       bridge: { getSettings: () => wait("settings", {}), getAssetIndex: () => { reads++; return wait("index", [fixture]); },
         getAppVersion: () => wait("version", { ok: true, version: "2.1.0" }),
         onAssetChange: () => { subscriptions++; return () => { removals++; }; } },
-      setSettings() {}, setAllAssets() {}, setAssets() {}, setStatus() {}, setAppVersion() {}, setSettingsLoaded() {}
+      setSettings() {}, setAllAssets() {}, setAssets() {}, setStatus() {}, setAppVersion() {}, setSettingsLoaded(value) { ready = value; }
     };
     const run = new Function("scope", `with (scope) { ${code}; return effect; }`)(scope);
     const cleanup = run();
     await setImmediate();
+    assert.equal(ready, stage === "version" || stage === "complete", "version lookup must not gate the initial list");
     cleanup(); release(); await setImmediate();
     assert.equal(subscriptions, 1, "subscribe before settings, index and version reads");
     assert.equal(removals, subscriptions, stage);
+    assert.equal(activitySubscriptions, 0, "unmount removes the window activity listener");
     assert.equal(reads, stage === "settings" ? 0 : 1, "startup reads the index once");
   }
 });

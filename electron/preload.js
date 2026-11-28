@@ -39,7 +39,7 @@ contextBridge.exposeInMainWorld("arkhive", {
   pickProjectPath: () => ipcRenderer.invoke("settings:pickProject"),
   pickTargetPath: () => ipcRenderer.invoke("settings:pickTarget"),
   clearCaches: () => ipcRenderer.invoke("settings:clearCaches"),
-  getAssetIndex: () => ipcRenderer.invoke("assets:getIndex"),
+  getAssetIndex: (options) => ipcRenderer.invoke("assets:getIndex", options),
   getAssetById: (assetId) => ipcRenderer.invoke("assets:getById", assetId),
   renderGroomPreview: (sourcePath) => ipcRenderer.invoke("assets:renderGroomPreview", sourcePath),
   getUnrealConnectionStatus: () => ipcRenderer.invoke("unreal:getConnectionStatus"),
@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld("arkhive", {
     }
   },
   pathExists: (filePath) => ipcRenderer.invoke("assets:pathExists", filePath),
+  detectMaskChannels: (filePath) => ipcRenderer.invoke("assets:detectMaskChannels", filePath),
   analyzeCharacterModels: (filePaths) => ipcRenderer.invoke("assets:analyzeCharacterModels", filePaths),
   getPreviewThumbnail: (filePath, options) => ipcRenderer.invoke("assets:getPreviewThumbnail", filePath, options),
   importCustomAsset: (payload) => ipcRenderer.invoke("assets:importCustom", payload),

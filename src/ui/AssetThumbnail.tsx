@@ -40,7 +40,7 @@ export function AssetThumbnail({ sourcePath, originalPath = sourcePath, loader, 
   if (!sourcePath || (originalFailed && path === originalPath) || (thumbnail && !path)) return <>{fallback}</>;
   const isMotionPreview = /\.(webm|mp4)$/i.test(path);
   return <>
-    {!loaded && <div className="card-thumb-shimmer" />}
+    {!loaded && <span className="card-thumb-shimmer" />}
     {src && isMotionPreview && <AnimationPreviewVideo
       key={src}
       className={loaded ? "loaded" : ""}

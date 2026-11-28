@@ -56,7 +56,7 @@ try {
 }
 
 const JSON_EXTENSIONS = new Set([".json", ".jason"]);
-const MODEL_EXTENSIONS = new Set([".fbx", ".st9", ".obj", ".abc", ".gltf", ".glb"]);
+const MODEL_EXTENSIONS = new Set([".fbx", ".st9", ".usda", ".obj", ".abc", ".gltf", ".glb"]);
 const TEXTURE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr", ".hdr", ".tga", ".webp", ".bmp"]);
 const PREVIEW_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".tif", ".tiff", ".tga", ".webp", ".bmp", ".webm", ".mp4", ".gif"]);
 const NESTED_FILE_PROPAGATION_MAX_DEPTH = 3;
@@ -1706,6 +1706,8 @@ function buildLightMeta(meta) {
   const light = {};
   if (typeof meta.createdAt === "string") light.createdAt = meta.createdAt;
   if (typeof meta.updatedAt === "string") light.updatedAt = meta.updatedAt;
+  if (meta.maskGroups) light.maskGroups = meta.maskGroups;
+  if (meta.textureGroupMode) light.textureGroupMode = meta.textureGroupMode;
   if (meta.materialNames && typeof meta.materialNames === "object" && !Array.isArray(meta.materialNames)) light.materialNames = meta.materialNames;
   if (typeof meta.name === "string") light.name = meta.name;
   if (typeof meta.assetName === "string") light.assetName = meta.assetName;
@@ -1716,6 +1718,7 @@ function buildLightMeta(meta) {
   if (typeof meta.asset_type === "string") light.asset_type = meta.asset_type;
   if (Array.isArray(meta.standardAssetTags)) light.standardAssetTags = meta.standardAssetTags.filter((tag) => typeof tag === "string" && tag.trim());
   if (Array.isArray(meta.zionTags)) light.zionTags = meta.zionTags.filter((tag) => typeof tag === "string" && tag.trim());
+  if (meta.naniteFoliage) { light.naniteFoliage = meta.naniteFoliage; light.plantAssetType = meta.plantAssetType || "standard"; }
   if (meta.nativePlantWind && typeof meta.nativePlantWind === "object") light.nativePlantWind = meta.nativePlantWind;
   if (Number.isFinite(Number(meta.baseTiling)) && Number(meta.baseTiling) > 0) light.baseTiling = Number(meta.baseTiling);
   const textureAnalysis = normalizeTextureAnalysis(meta.textureAnalysis);

@@ -1,4 +1,5 @@
 import React, { Component, ErrorInfo, ReactNode } from "react";
+import { StartupTiming } from "./StartupTiming";
 const appBrandIconPath = new URL("../../images/Icon_V2_256.png", import.meta.url).href;
 
 interface Props {
@@ -37,6 +38,7 @@ export class ErrorBoundary extends Component<Props, State> {
       const en = isEnglishUi();
       return (
         <div style={{ position: "relative", height: "100vh", background: "#121212", color: "#fff" }}>
+          <StartupTiming />
           <button
             onClick={() => {
               const bridge = (window as unknown as { arkhive?: { windowClose?: () => void } }).arkhive;

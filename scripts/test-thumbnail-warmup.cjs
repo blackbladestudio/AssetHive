@@ -40,6 +40,31 @@ test("new/edited assets precede the remaining full-library backlog", async t => 
   assert.deepEqual(calls, ["a", "c", "b"]);
 });
 
+test("backgrounding drains in-flight thumbnails and keeps only import/edit priority eligible", async t => {
+  const calls = [];
+  let finishFirst;
+  const queue = createThumbnailWarmup({ initialDelayMs: 0, delayMs: 1,
+    ensure: file => {
+      calls.push(file);
+      return file === "active" ? new Promise(resolve => { finishFirst = resolve; }) : { status: "cached" };
+    }
+  });
+  t.after(() => queue.dispose());
+  queue.enqueue(["active", "backlog"]);
+  await until(() => finishFirst);
+  queue.enqueue(["scan", "edited"], { priority: true, foregroundOnly: true });
+  queue.setNormalPaused(true);
+  queue.enqueue(["edited"], { priority: true });
+  finishFirst({ status: "cached" });
+  await until(() => queue.status().checked === 2);
+  await delay(20);
+  assert.deepEqual(calls, ["active", "edited"]);
+  assert.equal(queue.status().queued, 2);
+  queue.setNormalPaused(false);
+  await until(() => queue.status().checked === 4);
+  assert.deepEqual(calls, ["active", "edited", "scan", "backlog"]);
+});
+
 test("a fresh edit overtakes older scan updates without duplicating an existing urgent entry", async t => {
   let allowed = false;
   const calls = [];

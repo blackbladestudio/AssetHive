@@ -1,0 +1,10 @@
+export type MaskChannel = "R" | "G" | "B" | "A";
+export type MaskLayer = { uvSet: number; bcr: string; normal: string; metallicEnabled: boolean; metallic: string };
+export type MaskGroup = { baseUvSet: number; maskUvSet: number; channels: Record<MaskChannel, MaskLayer> };
+export type MaskGroups = Record<string, MaskGroup>;
+export const MASK_CHANNELS: readonly MaskChannel[];
+export function isMaskAsset(tags: unknown): boolean;
+export function hasMaskFolderLayout(files: readonly string[]): boolean;
+export function maskParentSuffix(channels: readonly string[]): string;
+export function defaultMaskGroup(): MaskGroup;
+export function normalizeMaskGroups(value: unknown): MaskGroups;

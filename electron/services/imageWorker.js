@@ -791,7 +791,24 @@ async function cropPreviewSelection(sourcePath, outputPath, selection) {
   return { ok: true, path: outputPath, message: "已裁剪选区，可继续抠图或撤销" };
 }
 
-const operations = { imageSize, glossToRoughness, hdrPreview, exrToPng, resizeTexture, resizeHdr, resizeExr, packTextures, packOrmTexture, packBcrTexture, unpackPackedTextureChannel, hasOpacityAlpha, opacityFromAlpha, convertTextureToTga, mergeAlbedo, autoPreviewCutout, smartCutout, cropPreviewSelection };
+async function detectMaskChannels(filePath) {
+  const image = await imageInput(filePath);
+  const metadata = await image.metadata();
+  let hasAlpha = metadata.hasAlpha;
+  if (path.extname(filePath).toLowerCase() === ".tga") {
+    const header = await fs.readFile(filePath);
+    hasAlpha = header[16] === 32 || (header[1] === 1 && header[7] === 32);
+  }
+  const stats = await image.stats();
+  const gray = metadata.channels < 3;
+  const channels = ["R", "G", "B", "A"].filter((channel, index) => {
+    if (channel === "A") return hasAlpha && (stats.channels[gray ? 1 : 3]?.max || 0) > 0;
+    return (!gray || index === 0) && (stats.channels[index]?.max || 0) > 0;
+  });
+  return { channels, width: metadata.width, height: metadata.height };
+}
+
+const operations = { detectMaskChannels, imageSize, glossToRoughness, hdrPreview, exrToPng, resizeTexture, resizeHdr, resizeExr, packTextures, packOrmTexture, packBcrTexture, unpackPackedTextureChannel, hasOpacityAlpha, opacityFromAlpha, convertTextureToTga, mergeAlbedo, autoPreviewCutout, smartCutout, cropPreviewSelection };
 if (parentPort) {
   (async () => {
     try {

@@ -14,7 +14,9 @@ async function runElectron() {
   } });
   try {
     const started = Date.now();
-    await window.loadFile(path.join(__dirname, "../dist/index.html"));
+    const backgroundOnly = process.argv.includes('--background-only');
+    const rendererDirectory = process.env.ASSETHIVE_TEST_RENDERER_DIR || path.join(__dirname, "../dist");
+    await window.loadFile(path.join(rendererDirectory, "index.html"));
     const report = await window.webContents.executeJavaScript(`(async () => {
       const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
       const count = () => Number((document.querySelector('.root-count')?.textContent || '').replace(/[^0-9]/g, ''));
@@ -30,6 +32,27 @@ async function runElectron() {
       setSearch('aitest');
       await wait(() => ['apg0erw', '7whmhcc', '9yzo6ux'].every(id => document.querySelector('#asset-card-' + id)), 'Cached aitest assets were not searchable before scan completion');
       check(!(await window.fixture.state()).completed, 'Search must not wait for scan completion');
+      if (${backgroundOnly}) {
+        const { indexReads } = await window.fixture.state();
+        const stage = document.querySelector('.asset-stage');
+        const cardWidth = () => document.querySelector('#asset-card-apg0erw')?.style.width;
+        const previousWidth = cardWidth();
+        await window.fixture.setForeground(false);
+        stage.style.display = 'none';
+        await window.fixture.backgroundChanges();
+        await pause(400);
+        check((await window.fixture.state()).indexReads === indexReads, 'Background requested a full index');
+        check(count() === 20000 && document.querySelector('#asset-card-apg0erw'), 'Background rebuilt visible search results');
+        check(cardWidth() === previousWidth, 'A zero-sized stage replaced the cached card layout');
+        await window.fixture.blockSharedIndex();
+        stage.style.display = '';
+        const restoreStarted = performance.now();
+        await window.fixture.setForeground(true);
+        await wait(() => document.querySelector('#asset-card-resumed') && !document.querySelector('#asset-card-apg0erw'), 'Search did not converge after foregrounding');
+        check(count() === 20001, 'Restored list missed background additions');
+        check((await window.fixture.state()).indexReads === indexReads + 1, 'Foregrounding did not use a single catch-up read');
+        return { ok: true, firstCardsAt, finalCount: count(), restoreMs: Math.round(performance.now() - restoreStarted), checks: ['20,000-card renderer retains its layout and defers background index updates', 'Foregrounding catches up from memory and refreshes search while shared I/O is unavailable'] };
+      }
       document.querySelector('#asset-card-apg0erw').click();
       await wait(() => document.querySelector('.right-panel.open .resolution-badge')?.textContent === '4K', 'Selected detail lost the full texture metadata');
       document.querySelector('#asset-card-7whmhcc').click();
@@ -79,12 +102,22 @@ async function launch() {
   fs.writeFileSync(path.join(directory, "preload.cjs"), `
 const { contextBridge } = require('electron');
 let callback, pendingRead, hold = false, cleared = false, firstRead = true, completed = false, detailReads = 0;
+let foreground = true, foregroundListener, indexReads = 0, sharedIndexBlocked = false;
 const settings = { customLibraryPath: 'D:/Fixture', uiLanguage: 'zh', exportTarget: 'unreal' };
 let assets = Array.from({ length: 20000 }, (_, i) => ({ id: 'asset_' + i, name: 'Rock ' + i, source: 'custom', assetType: 'surface', topCategory: 'environment', path: 'D:/Fixture/' + i, metaPath: '', tags: [], meta: {}, modelFiles: [], previewImage: null }));
 ['apg0erw', '7whmhcc', '9yzo6ux'].forEach((id, i) => { assets[16000 + i] = { ...assets[16000 + i], id, name: 'SM_Env_ZGNC_AItest_' + i, assetType: '3d', standardAssetTags: ['Dressing'], tags: ['temp'] }; });
 const noop = () => () => {};
 contextBridge.exposeInMainWorld('fixture', {
- state: async () => ({ waiting: Boolean(pendingRead), cleared, completed, detailReads }),
+ state: async () => ({ waiting: Boolean(pendingRead), cleared, completed, detailReads, indexReads }),
+ setForeground: async active => { foreground = active; foregroundListener?.(active); },
+ blockSharedIndex: async () => { sharedIndexBlocked = true; },
+ backgroundChanges: async () => {
+   const old = assets.find(a => a.id === 'apg0erw');
+   assets = assets.filter(a => a.id !== old.id).concat({ ...old, id: 'resumed', name: 'Aitest resumed' });
+   callback?.({ incremental: true, count: assets.length });
+   assets.push({ ...assets[0], id: 'background-new' });
+   callback?.({ incremental: true, count: assets.length });
+ },
  holdRead: async () => { hold = true; callback?.(); },
  batch: async () => { assets[0] = { ...assets[0], name: 'Updated Rock' }; const added = { ...assets[0], id: 'new', name: 'New Rock' }; assets.push(added); callback?.({ incremental: true, count: assets.length, records: [assets[0], added] }); },
  release: async () => { pendingRead?.(); pendingRead = null; },
@@ -100,7 +133,9 @@ contextBridge.exposeInMainWorld('arkhive', {
      textureEntries: [{ textureType: 'Diffuse', path: 'Diffuse.png', width: size, height: size }] } };
    return { ok: true, asset, listAsset };
  },
- getAssetIndex: async () => {
+ getAssetIndex: async options => {
+   indexReads++;
+   if (sharedIndexBlocked && !options?.preferMemory) throw new Error('Shared deletion check unavailable');
    if (firstRead) {
      firstRead = false; const cached = [...assets];
      setTimeout(() => { assets[0] = { ...assets[0], name: 'Early scan update' }; callback?.({ incremental: true, count: assets.length, records: [assets[0]] }); }, 20);
@@ -110,6 +145,7 @@ contextBridge.exposeInMainWorld('arkhive', {
  },
  getAppVersion: async () => ({ ok: true, version: '2.2.9' }),
  onAssetChange: listener => { callback = listener; return () => { callback = null; }; },
+ onWindowForegroundChange: listener => { foregroundListener = listener; listener(foreground); return () => { foregroundListener = null; }; },
  clearCaches: async () => { cleared = true; return { ok: true, removed: [] }; },
  getUnrealConnectionStatus: async () => ({ connected: false }), getPluginStatus: async () => ({ installed: false }),
  checkAppUpdate: async () => ({ ok: true, hasUpdate: false }), setTaskbarProgress: async () => ({ ok: true }),
@@ -118,7 +154,7 @@ contextBridge.exposeInMainWorld('arkhive', {
  foliageOpaqueStatus: async () => ({ available: false }), pathExists: async () => true
 });
 `);
-  const child = spawn(require("electron"), [path.join(__dirname, "test-library-cache-electron.cjs"), directory], { stdio: "inherit", windowsHide: true });
+  const child = spawn(require("electron"), [path.join(__dirname, "test-library-cache-electron.cjs"), directory, ...process.argv.slice(2)], { stdio: "inherit", windowsHide: true });
   const timeout = setTimeout(() => child.kill(), 60000);
   const code = await new Promise(resolve => { child.on("exit", resolve); child.on("error", error => { console.error(error); resolve(1); }); });
   clearTimeout(timeout);

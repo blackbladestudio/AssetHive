@@ -1,3 +1,7 @@
+const { analyzeNaniteFoliage } = require("./naniteFoliage");
+const { useNaniteFoliageBranch } = require("../../shared/plantBranches.mjs");
+const { isMaskAsset, normalizeMaskGroups } = require("../../shared/maskMaterials.mjs");
+const { buildMaskMaterial } = require("./maskMaterials");
 const fsSync = require("node:fs");
 const { runImageTask } = require("./imageTasks");
 const fs = require("node:fs/promises");
@@ -31,7 +35,7 @@ if (sharp && typeof sharp.concurrency === "function") {
 }
 // 导出槽位白名单（2026-10-29 定稿）：Fuzz **永不导出** —— 母材质不再按 fuzz 分叉，
 // 导入侧即使识别到 fuzz 贴图也只留在库里，不进导出 job。
-const ALLOWED_EXPORT_TEXTURE_SLOTS = new Set(["albedo", "roughness", "gloss", "normal", "ao", "displacement", "mask", "metalness", "emissive", "opacity", "translucency", "subsurfacecolor", "orm"]);
+const ALLOWED_EXPORT_TEXTURE_SLOTS = new Set(["albedo", "roughness", "gloss", "normal", "ao", "displacement", "mask", "metalness", "emissive", "opacity", "translucency", "subsurfacecolor", "orm", "uv2ao"]);
 const SURFACE_EXPORT_TEXTURE_SLOTS = new Set([...ALLOWED_EXPORT_TEXTURE_SLOTS, "orm"]);
 const MODEL_FILE_EXTENSIONS = new Set([".fbx", ".st9", ".obj", ".abc", ".gltf", ".glb", ".ztl"]);
 const HAS_NATIVE_IMAGE = Boolean(nativeImage && typeof nativeImage.createFromPath === "function" && typeof nativeImage.createFromBitmap === "function");
@@ -699,7 +703,7 @@ function shouldAllowDisplacementByAssetType(assetType) {
 // 这里只用来判断"插件的推导能不能给出结果"，不复制映射关系本身 ——
 // 复刻一份必然与插件漂移。
 const PLUGIN_CATEGORY_TAGS = Object.freeze([
-  "mega", "kits", "kit", "destructible", "props", "dressing", "megascans", "pbrmax",
+  "mask", "mega", "kits", "kit", "destructible", "props", "dressing", "megascans", "pbrmax",
   // 第三方标签（2026-10-19）：插件据此把第三方资产落到 Objects/ThirdParty；
   // 这里必须一并列为"插件可推导"，否则导出侧会给出 3D_Assets 覆盖掉插件结果。
   "thirdparty",
@@ -1320,6 +1324,7 @@ function collectExportModelLodsForPlan(asset, metaOverride) {
 // - "lod"：使用原始 Masked 模型作 LOD0，并携带该变体自己的 LOD 链（目标 LOD1..N）。
 function normalizePlantExportMode(value) {
   const normalized = String(value ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (normalized === "nanitefoliage") return "naniteFoliage";
   if (normalized === "nanitemasked") return "naniteMasked";
   if (normalized === "lod" || normalized === "lods" || normalized === "masked" ||
       normalized === "maskedlod" || normalized === "maskedlods") {
@@ -1813,6 +1818,7 @@ function normalizeExportTextureSlot(value, options = {}) {
   if (compact === "subsurfacecolor" || compact === "translucency" || compact === "translucent"
     || compact === "transmission" || compact === "sss") return "subsurfacecolor";
   if (compact === "fuzz") return "fuzz";
+  if (compact === "uv2ao") return "uv2ao";
   if (compact === "mask" || compact === "detailpack") return "mask";
   return "";
 }
@@ -2027,8 +2033,13 @@ function collectTextureGroupsForExport(asset, assetType, fullMeta, targetResolut
     }
   }
 
+  const channelMode = isMaskAsset({ ...fullMeta, assetType: normalizedAssetType });
+  if (channelMode) {
+    for (const area of Object.keys(fullMeta?.maskGroups || {})) ensureGroup(Number(area));
+    if (!groups.size) ensureGroup(1);
+  }
   return [...groups.values()]
-    .filter((group) => group.bySlot.size > 0)
+    .filter((group) => channelMode || group.bySlot.size > 0)
     .sort((a, b) => {
       const roleOrder = (role) => role === "atlas" ? 0 : role === "billboard" ? 1 : 0;
       return roleOrder(a.materialRole) - roleOrder(b.materialRole) || a.groupId - b.groupId;
@@ -2322,6 +2333,8 @@ async function buildExportAssets(assets, onProgress, exportResolution = "4k", de
   const targetResolutionPixels = exportResolutionToPixels(exportResolution);
   const normalizedDecalParentType = normalizeDecalParentType(decalParentType);
   const normalizedPlantSyntheticWind = normalizePlantSyntheticWind(plantSyntheticWind);
+  const requestedPlantExportMode = plantExportMode;
+  if (plantExportMode === "naniteFoliage") plantExportMode = "opaque";
   const exportAssets = [];
   const totalAssets = Math.max(1, assets.length);
   let scannedAssetCount = 0;
@@ -2344,6 +2357,7 @@ async function buildExportAssets(assets, onProgress, exportResolution = "4k", de
     }
     const fullMeta = await loadAssetMetaForExport(asset);
     metaCache.set(asset.id, fullMeta);
+    if (useNaniteFoliageBranch(asset, fullMeta, requestedPlantExportMode)) continue;
     const is3D = is3DAssetType(assetType);
     let exportModelPlan = { modelVariants: [], modelLods: [] };
     if (is3D) {
@@ -2420,6 +2434,24 @@ async function buildExportAssets(assets, onProgress, exportResolution = "4k", de
     }
 
     const fullMeta = metaCache.get(asset.id) || (await loadAssetMetaForExport(asset));
+    if (isPlant && useNaniteFoliageBranch(asset, fullMeta, requestedPlantExportMode)) {
+      const models = (fullMeta.naniteFoliage?.variants || []).map(v => path.isAbsolute(v.file) ? v.file : path.resolve(asset.path, v.file));
+      const manifest = await analyzeNaniteFoliage(models.length ? models : (asset.modelFiles || []).filter(file => /\.usda$/i.test(file)), { roles: fullMeta.naniteFoliage?.roles, plantTag: (fullMeta.standardAssetTags || []).find(tag => /^(Grass|Bush|Tree|HeroFoliage)$/i.test(tag)) || "" });
+      if (manifest.warnings.length) throw new Error(manifest.warnings.join("；"));
+      for (const group of manifest.groups) {
+        if (!group.textures.ORM && (group.textures.AO || group.textures.Gloss)) {
+          const roughness = group.textures.Gloss ? await runImageTask("glossToRoughness", [group.textures.Gloss, `${asset.id}_${group.key}`, targetResolutionPixels]) : "";
+          group.textures.ORM = await buildPackedOrmTexture(group.textures.AO || "", roughness, "", asset.id, group.key, targetResolutionPixels);
+        }
+        for (const slot of ["Diffuse", "Normal", "ORM", "SubsurfaceColor"]) if (group.textures[slot]) group.textures[slot] = await resizeTextureIfNeeded(group.textures[slot], targetResolutionPixels);
+      }
+      exportAssets.push({ id: asset.id, name: asset.name, assetType, plantAssetType: "naniteFoliage", plantExportMode: "naniteFoliage",
+        naniteFoliage: manifest, assetFolderName: resolveImportAssetFolderName(asset, { omitIdSuffix: true }),
+        zionSubfolder: resolveZionSubfolderForAsset(asset), standardAssetTags: fullMeta.standardAssetTags || [],
+        meshOverwritePolicy: normalizeMeshOverwritePolicy(meshOverwritePolicy), modelFiles: manifest.variants.map(v => v.file),
+        textureFiles: [...new Set(manifest.groups.flatMap(g => Object.values(g.textures)))], materialGroups: [] });
+      continue;
+    }
     if (isSurface) {
       const surfaceGroups = collectTextureGroupsForExport(asset, assetType, fullMeta, targetResolutionPixels);
       const surfaceGroup = surfaceGroups.find((group) => group.groupId === 1) || surfaceGroups[0];
@@ -2783,6 +2815,8 @@ async function buildExportAssets(assets, onProgress, exportResolution = "4k", de
     if (isAtlas && !textureGroups.some(group => group.bySlot.size > 0)) {
       throw new Error("Atlas资产缺少可用纹理");
     }
+    const maskAsset = isMaskAsset({ ...fullMeta, assetType, standardAssetTags: fullMeta?.standardAssetTags || asset.standardAssetTags });
+    const maskGroups = maskAsset ? normalizeMaskGroups(fullMeta?.maskGroups) : {};
     const materialGroups = [];
     // Blank names retain the plugin's existing default matching. Texture-less
     // models can still borrow named material sets from the rest of the batch.
@@ -2913,6 +2947,7 @@ async function buildExportAssets(assets, onProgress, exportResolution = "4k", de
         if (slot === "ao") slotName = "AO";
         else if (slot === "orm") slotName = "ORM";
         else if (slot === "mask") slotName = "Mask";
+        else if (slot === "uv2ao") slotName = "UV2AO";
         else if (isDisplacementSlot) slotName = "Displacement";
 
         const entry = {
@@ -2991,6 +3026,7 @@ async function buildExportAssets(assets, onProgress, exportResolution = "4k", de
         }
       }
       materialGroups.push({
+        ...(maskAsset ? { maskMaterial: await buildMaskMaterial(group, maskGroups[group.areaIndex]) } : {}),
         groupId: group.groupId,
         ...(opacityInDiffuseAlpha ? { opacityInDiffuseAlpha: true } : {}),
         ...(namedMaterialMatching ? { materialName: group.materialName } : {}),
@@ -3016,6 +3052,7 @@ async function buildExportAssets(assets, onProgress, exportResolution = "4k", de
       id: asset.id,
       name: asset.name,
       assetType,
+      textureGroupMode: maskAsset ? "channel" : "texture",
       categoryFolder: (() => {
         if (isAtlas) return "Objects";
         // 基础分类目录的权威定义在插件侧（按 Asset Tag 推导：
@@ -3260,7 +3297,7 @@ async function exportToUnreal(assets, options, onProgress) {
   const requiresCommonMaterial = exportAssets.some((asset) => {
     const assetType = String(asset?.assetType || "").trim().toLowerCase();
     return !Array.isArray(asset.meshOverwritePolicy) && asset.meshOverwritePolicy !== "meshOnly"
-      && assetType !== "hdri" && assetType !== "surface" && assetType !== "decal" && !isAtlasAssetType(assetType);
+      && asset.plantAssetType !== "naniteFoliage" && assetType !== "hdri" && assetType !== "surface" && assetType !== "decal" && !isAtlasAssetType(assetType);
   });
   let resolvedOptions;
   let pluginState;
@@ -3270,7 +3307,7 @@ async function exportToUnreal(assets, options, onProgress) {
       await fs.mkdir(path.dirname(resolvedOptions.unrealLogPath), { recursive: true });
     }
     if (typeof onProgress === "function") {
-      onProgress({ percent: 62, message: "检查插件状态..." });
+      onProgress({ percent: 62, message: "准备 Unreal 导入..." });
     }
     pluginState = await ensurePluginInstalled(resolvedOptions.unrealProjectPath, resolvedOptions.unrealEditorPath);
     if (requiresCommonMaterial) {

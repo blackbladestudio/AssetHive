@@ -52,6 +52,37 @@ async function runElectron() {
       };
       ${source}
     })()`);
+    if (process.argv.includes('--status-only')) {
+      await run(`
+        const status = () => document.querySelector('.left-status .status-text');
+        await wait(() => document.querySelector('#asset-card-surface'), 'Asset card missing');
+        document.querySelector('#asset-card-surface').click();
+        await wait(() => document.querySelector('.detail-export-btn:not(:disabled)'), 'Unreal export not ready');
+        const scanDetail = '正在读取共享库目录 '.repeat(20);
+        await window.fixture.scan({ active: true, progress: 30, message: scanDetail });
+        await wait(() => status()?.textContent === '扫描中', 'Scan stage expanded into the status line');
+        check(status().title === scanDetail.trim(), 'Scan detail was lost');
+        await window.fixture.holdNextExport();
+        document.querySelector('.detail-export-btn').click();
+        await wait(async () => (await window.fixture.state()).exportPending, 'Export did not start');
+        await window.fixture.progress({ percent: 80, message: '导入模型：model.fbx' });
+        await wait(() => status()?.textContent === 'Unreal Engine 导入中', 'Export did not take over progress');
+        await window.fixture.completeExport();
+        await wait(() => status()?.textContent === '导入完成', 'Success retained technical plugin or file details');
+        check(status().title === '导入完成', 'Success tooltip retained technical details');
+        await window.fixture.scan({ active: false, progress: 100, phase: 'done', manual: false, total: 100 });
+        await wait(() => status()?.textContent === '', 'Automatic scan completion reappeared after export');
+        await window.fixture.failNextExport('plugin-disabled');
+        document.querySelector('.detail-export-btn').click();
+        await wait(() => status()?.textContent === 'AssetHive 插件被禁用', 'Actionable plugin error was hidden');
+      `);
+      fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify({ ok: true, checks: [
+        'Scan stage detail stays in the tooltip', 'Unreal import shows task progress and a clean result',
+        'Routine scan completion stays quiet and actionable plugin errors remain visible'
+      ] }, null, 2));
+      app.exit(0);
+      return;
+    }
     await run(`
       await wait(() => document.querySelector('.card'), 'Asset card missing');
       document.querySelector('#asset-card-surface').click();
@@ -384,7 +415,7 @@ if (process.env.ASSETHIVE_TEST_LEGACY_BLENDER) delete settings.blenderExecutable
 const installs = [], sentTargets = [];
 const exportOptions = [];
 const exportAssetIds = [];
-let holdExport = false, pendingExport = null, exportProgress = null, nextExportOutcome = '';
+let holdExport = false, pendingExport = null, exportProgress = null, scanProgress = null, nextExportOutcome = '';
 const installPaths = [];
 const threeDCoatImports = [];
 let blenderConnected = true;
@@ -399,7 +430,7 @@ assets.find(item => item.id === 'model').modelFiles = ['D:\\\\Fixture\\\\model.f
 const threeDCoatState = () => ({ executable: threeDCoatExecutable, dataDirectory: 'D:\\\\Documents\\\\3DCoat2026',
   executableExists: threeDCoatExecutableExists, dataDirectoryExists: threeDCoatReady, ready: threeDCoatReady, mode: 'ppp', language: 'zh' });
 contextBridge.exposeInMainWorld('fixture', { state: async () => ({ settings, installs, installPaths, installing: pendingInstall?.target, exports: sentTargets, exportOptions, exportAssetIds, exportPending: Boolean(pendingExport), threeDCoatImports }), setConnected: async value => { blenderConnected = value; },
- holdNextExport: async () => { holdExport = true; }, failNextExport: async outcome => { nextExportOutcome = outcome; }, completeExport: async () => { pendingExport(); pendingExport = null; }, progress: async payload => { exportProgress?.(payload); },
+ holdNextExport: async () => { holdExport = true; }, failNextExport: async outcome => { nextExportOutcome = outcome; }, completeExport: async () => { pendingExport(); pendingExport = null; }, progress: async payload => { exportProgress?.(payload); }, scan: async payload => { scanProgress?.(payload); },
  completeInstall: async result => { const pending = pendingInstall; pendingInstall = null; if (result.ok && pending.target === 'blender') blenderInstalled = true; pending.resolve(result); } });
 const install = (target, targetPath) => { installs.push(target); installPaths.push(targetPath); return new Promise(resolve => { pendingInstall = { target, resolve }; }); };
 const send = async (target, payload) => {
@@ -408,7 +439,9 @@ const send = async (target, payload) => {
  const outcome = nextExportOutcome; nextExportOutcome = '';
  if (outcome === 'rejected') throw new Error('simulated export rejection');
  if (outcome === 'failed') return { ok: false, message: 'simulated export failure' };
- return { ok: true, results: payload.assetIds.map(assetId => ({ assetId, status: 'success' })) };
+ if (outcome === 'plugin-disabled') return { ok: false, message: 'AssetHive 插件被禁用' };
+ return { ok: true, results: payload.assetIds.map(assetId => ({ assetId, status: 'success' })),
+  pluginState: { copied: false, reason: 'Project already has AssetHive plugin' }, jobFile: 'fixture-job.json', logFile: 'fixture-engine.log' };
 };
 const noop = () => () => {};
 contextBridge.exposeInMainWorld('arkhive', {
@@ -429,13 +462,14 @@ contextBridge.exposeInMainWorld('arkhive', {
  exportToBlender: async payload => send('blender', payload),
  exportToUnreal: async payload => send('unreal', payload),
  checkAppUpdate: async () => ({ ok: true, hasUpdate: false }), setTaskbarProgress: async () => ({ ok: true }),
- onAssetChange: noop, onExportProgress: callback => { exportProgress = callback; return () => { exportProgress = null; }; }, onScanProgress: noop, onCustomSaveProgress: noop,
+ onAssetChange: noop, onExportProgress: callback => { exportProgress = callback; return () => { exportProgress = null; }; },
+ onScanProgress: callback => { scanProgress = callback; return () => { scanProgress = null; }; }, onCustomSaveProgress: noop,
  onCalculateBoundsRequest: noop, onResolveDroppedItemsProgress: noop,
  loadImportQueue: async () => ({ drafts: [], activeIndex: 0, selectedIndexes: [] }), saveImportQueue: async value => value,
  foliageOpaqueStatus: async () => ({ available: false }), pathExists: async () => true
 });
 `);
-  const child = spawn(require("electron"), [path.join(__dirname, "test-export-targets-electron.cjs"), directory], { stdio: "inherit", windowsHide: true });
+  const child = spawn(require("electron"), [path.join(__dirname, "test-export-targets-electron.cjs"), directory, ...process.argv.slice(2)], { stdio: "inherit", windowsHide: true });
   const timeout = setTimeout(() => child.kill(), 60000);
   const code = await new Promise(resolve => child.on("exit", resolve));
   clearTimeout(timeout);

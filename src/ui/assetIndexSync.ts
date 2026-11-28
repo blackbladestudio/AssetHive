@@ -24,21 +24,35 @@ export function createAssetIndexSync({ readIndex, update, schedule, cancel }: {
   let disposed = false;
   let inFlight: Promise<void> | null = null;
   let refreshPending = false;
+  let deferred = false;
+  let needsSnapshot = false;
+  let deferredReset = false;
+  let changesDuringSnapshot: Array<AssetIndexChange | undefined> | null = null;
   let completion: { revision: number; ids: Set<string>; favorites: Set<string> } | null = null;
 
   function requestRefresh(delay = 0) {
     if (disposed || timer) return;
-    if (inFlight) { refreshPending = true; return; }
+    if (deferred || inFlight) { refreshPending = true; return; }
     timer = schedule(() => { timer = 0; void refresh().catch(() => {}); }, delay);
   }
 
   async function refresh() {
+    if (deferred) { needsSnapshot = true; return; }
     if (inFlight) return inFlight;
+    const changes: Array<AssetIndexChange | undefined> | null = needsSnapshot ? [] : null;
+    changesDuringSnapshot = changes;
+    needsSnapshot = false;
     const currentRequest = ++request;
     const currentRevision = revision;
     const reading = (async () => {
       const assets = await readIndex();
       if (disposed || currentRequest !== request || !Array.isArray(assets)) return;
+      if (changes) {
+        // Start with the authoritative snapshot so stale cards from before the
+        // window went into the background cannot reappear after a deletion.
+        update(assets);
+        return;
+      }
       if (currentRevision === revision) { update(assets); return; }
       // Seed the missing base immediately, even if a scan keeps streaming.
       // Newer rendered records win; a later completion still confirms removals.
@@ -51,11 +65,23 @@ export function createAssetIndexSync({ readIndex, update, schedule, cancel }: {
       });
     })();
     inFlight = reading;
+    let retrySnapshot = false;
     try { await reading; }
+    catch (error) {
+      if (changes && currentRequest === request) needsSnapshot = retrySnapshot = true;
+      throw error;
+    }
     finally {
       if (inFlight === reading) {
+        if (changes && changesDuringSnapshot === changes) {
+          changesDuringSnapshot = null;
+          // Replay deltas in order after seeding the base. Keeping the read in
+          // flight here also combines any refresh requests raised by replay.
+          for (const change of changes) onChange(change);
+        }
         inFlight = null;
-        if (refreshPending) { refreshPending = false; requestRefresh(); }
+        if (refreshPending && !deferred) { refreshPending = false; requestRefresh(); }
+        else if (retrySnapshot && !deferred) requestRefresh(4000);
       }
     }
   }
@@ -65,8 +91,12 @@ export function createAssetIndexSync({ readIndex, update, schedule, cancel }: {
     revision++;
     if (payload?.reset) {
       request++; inFlight = null; refreshPending = false; completion = null;
-      update([]);
+      changesDuringSnapshot = null;
+      if (deferred) deferredReset = true;
+      else update([]);
     }
+    if (deferred) { needsSnapshot = true; return; }
+    if (changesDuringSnapshot) { changesDuringSnapshot.push(payload); return; }
     const records = (payload?.records || []).filter(record => record?.id);
     const complete = payload?.complete && Array.isArray(payload.ids);
     if (complete || (payload?.incremental && records.length > 0)) {
@@ -96,6 +126,21 @@ export function createAssetIndexSync({ readIndex, update, schedule, cancel }: {
 
   return {
     onChange, refresh,
-    dispose() { disposed = true; request++; if (timer) cancel(timer); timer = 0; }
+    setDeferred(value: boolean) {
+      if (disposed || value === deferred) return;
+      deferred = value;
+      if (deferred) {
+        needsSnapshot ||= Boolean(timer || inFlight || refreshPending);
+        if (timer) cancel(timer);
+        timer = 0;
+        refreshPending = false;
+        if (inFlight) request++;
+        changesDuringSnapshot = null;
+      } else {
+        if (deferredReset) { deferredReset = false; update([]); }
+        if (needsSnapshot) requestRefresh();
+      }
+    },
+    dispose() { disposed = true; request++; changesDuringSnapshot = null; if (timer) cancel(timer); timer = 0; }
   };
 }

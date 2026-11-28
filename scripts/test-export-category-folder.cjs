@@ -30,17 +30,17 @@ const { resolveZion3DCategoryFolder } = previewModule.exports;
 
 test("Zion subfolder previews follow each selected asset's category", () => {
   const cases = [["Kit", "Kit"], ["Kits", "Kit"], ["Destructible", "Destructible"],
-    ["Props", "Props"], ["Dressing", "Objects"], ["MEGA", "MEGA"]];
+    ["Props", "Props"], ["Dressing", "Objects"], ["MEGA", "Objects"], ["Mask", "Objects"]];
   for (const [tag, expected] of cases) {
     assert.equal(resolveZion3DCategoryFolder({ standardAssetTags: [tag] }), expected);
     assert.equal(resolveZion3DCategoryFolder({ meta: { standardAssetTags: [` ${tag.toLowerCase()} `] } }), expected);
   }
   const batch = cases.map(([tag]) => ({ standardAssetTags: [tag] }));
-  assert.deepEqual([...new Set(batch.map(resolveZion3DCategoryFolder))], ["Kit", "Destructible", "Props", "Objects", "MEGA"]);
+  assert.deepEqual([...new Set(batch.map(resolveZion3DCategoryFolder))], ["Kit", "Destructible", "Props", "Objects"]);
 });
 
 test("category previews honor standard tags, source priority and legacy taxonomy filtering", () => {
-  assert.equal(resolveZion3DCategoryFolder({ standardAssetTags: ["Kits", "MEGA"] }), "MEGA");
+  assert.equal(resolveZion3DCategoryFolder({ standardAssetTags: ["Kits", "MEGA"] }), "Kit");
   assert.equal(resolveZion3DCategoryFolder({ standardAssetTags: ["Props", "Destructible"] }), "Destructible");
   assert.equal(resolveZion3DCategoryFolder({ standardAssetTags: ["Kits"], tags: ["Third Party"] }), "Objects");
   assert.equal(resolveZion3DCategoryFolder({ standardAssetTags: ["ThirdParty"], tags: ["Kits"] }), "Objects");

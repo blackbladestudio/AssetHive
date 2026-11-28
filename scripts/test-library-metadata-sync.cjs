@@ -39,7 +39,7 @@ test("metadata sync maps environment asset types to the current top category", (
 test("metadata sync canonicalizes and filters standard asset tags by asset type", () => {
   assert.deepEqual(
     normalizeStandardAssetTagsForSync(["kit", "pbr max", "MEGA", "Tree"], "3d"),
-    ["Kits", "ThirdParty", "MEGA"]
+    ["Kits", "ThirdParty"]
   );
   assert.deepEqual(
     normalizeStandardAssetTagsForSync(["Tree", "Hero_Foliage", "Dressing"], "3dplant"),

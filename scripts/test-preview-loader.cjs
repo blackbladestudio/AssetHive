@@ -20,6 +20,59 @@ function load(file, globals = {}) {
 const { PreviewLoader } = load("previewLoader.ts");
 const { getPreviewUrl } = load("previewUrl.ts");
 
+test("the background lets an in-flight card finish and resumes the current viewport first", async () => {
+  const calls = [];
+  let finishFirst;
+  const loader = new PreviewLoader(file => {
+    calls.push(file);
+    return file === "started" ? new Promise(resolve => { finishFirst = resolve; }) : Promise.resolve(file);
+  }, 1);
+  loader.subscribe("started", () => {});
+  loader.subscribe("older", () => {});
+  await setImmediate();
+  loader.setPaused(true);
+  loader.subscribe("visible", () => {});
+  loader.setViewport(["visible"]);
+  finishFirst("cached-started");
+  await setImmediate();
+  assert.equal(loader.get("started"), "cached-started");
+  assert.deepEqual(calls, ["started"]);
+  loader.setPaused(false);
+  await setImmediate();
+  assert.deepEqual(calls, ["started", "visible", "older"]);
+});
+
+test("status checks use a slower background interval and refresh once on focus without overlap", async () => {
+  let reportForeground;
+  let finishPoll;
+  let calls = 0;
+  const timers = new Map();
+  const { pollWindowStatus } = load("windowForeground.ts", {
+    window: { arkhive: { onWindowForegroundChange(callback) { reportForeground = callback; callback(true); return () => {}; } } },
+    document: { visibilityState: "visible", addEventListener() {}, removeEventListener() {} },
+    Date: { now: () => 1234 },
+    setTimeout: (run, interval) => { timers.set(run, interval); return run; },
+    clearTimeout: run => timers.delete(run)
+  });
+  const stop = pollWindowStatus(() => new Promise(resolve => { calls++; finishPoll = resolve; }), 4000);
+  finishPoll();
+  await setImmediate();
+  assert.deepEqual([...timers.values()], [4000]);
+  reportForeground(false);
+  assert.deepEqual([...timers.values()], [30000]);
+  const [backgroundPoll] = timers.keys();
+  void backgroundPoll();
+  reportForeground(true);
+  assert.equal(calls, 2);
+  finishPoll();
+  await setImmediate();
+  assert.equal(calls, 3);
+  stop();
+  finishPoll();
+  await setImmediate();
+  assert.equal(timers.size, 0);
+});
+
 test("visible animation cards generate one cover at a time and restart cancelled work after foregrounding", async () => {
   let reportVisibility;
   const { AnimationCoverQueue } = load("animationCoverQueue.ts", { IntersectionObserver: class {

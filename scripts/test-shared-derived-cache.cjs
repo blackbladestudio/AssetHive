@@ -489,8 +489,14 @@ test("selecting a library restores its shared cache while an old scan is still t
 
 test("an existing empty local database takes precedence over older shared snapshots", async () => {
   const f = await restoreFixture({ loadLibrarySqlCache: async () => [] });
-  await f.context.restoreLibraryIndexCache();
+  assert.equal(await f.context.restoreLibraryIndexCache(), true);
   assert.equal(f.shares(), 0);
+  assert.equal(vm.runInContext("index.length", f.context), 0);
+});
+
+test("missing cache snapshots require an initial library scan", async () => {
+  const f = await restoreFixture({ getSharedDerivedCache: () => ({ readSnapshot: async () => null }) });
+  assert.equal(await f.context.restoreLibraryIndexCache(), false);
   assert.equal(vm.runInContext("index.length", f.context), 0);
 });
 

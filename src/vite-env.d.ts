@@ -41,11 +41,15 @@ export type DroppedAsset = {
     topCategory?: "environment" | "character" | "animation";
     standardAssetTags?: string[];
     zionTags?: string[];
+    plantAssetType?: "standard" | "naniteFoliage";
+    naniteFoliage?: Record<string, unknown>;
     nativePlantWind?: Record<string, unknown> | null;
     nativePlantWindWarnings?: string[];
     tags?: string[];
     modelFiles?: string[];
     materialNames?: Record<string, string>;
+    textureGroupMode?: "texture" | "channel";
+    maskGroups?: import("../shared/maskMaterials.mjs").MaskGroups;
     modelVariants?: Array<Record<string, unknown>> | Record<string, unknown>;
     modelLods?: Array<Record<string, unknown>>;
     components?: Array<Record<string, unknown>>;
@@ -100,7 +104,7 @@ declare global {
         failed: Array<{ path: string; message: string }>;
         message: string;
       }>;
-      getAssetIndex: () => Promise<AssetRecord[]>;
+      getAssetIndex: (options?: { preferMemory?: boolean }) => Promise<AssetRecord[]>;
       loadImportQueue?: (libraryPath?: string) => Promise<ImportQueueSnapshot>;
       saveImportQueue?: (snapshot: ImportQueueSnapshot) => Promise<ImportQueueSnapshot>;
       getAssetById?: (assetId: string) => Promise<{ ok: boolean; asset: AssetRecord | null; listAsset?: AssetRecord | null }>;
@@ -132,6 +136,7 @@ declare global {
       getDroppedFilePath?: (file: File) => string;
       pathExists?: (filePath: string) => Promise<boolean>;
       deduplicateCharacterTextures: (files: string[]) => Promise<{ files: string[]; duplicates: { sourcePath: string; keptPath: string }[] }>;
+      detectMaskChannels?: (filePath: string) => Promise<{ ok: boolean; channels: import("../shared/maskMaterials.mjs").MaskChannel[]; message?: string }>;
       analyzeCharacterModels?: (filePaths: string[]) => Promise<{ ok: boolean; message?: string; analyses: Record<string, { materialNames?: string[]; ok: boolean; message?: string; meshKind?: "staticMesh" | "skeletalMesh"; hasSkeleton?: boolean; hasSkin?: boolean; boneCount?: number; skinnedMeshCount?: number; triangleCount?: number | null }> }>;
       getPreviewThumbnail?: (filePath: string, options?: { character?: boolean }) => Promise<string>;
       foliageOpaqueStatus?: () => Promise<{ available: boolean; workerPath: string; message: string }>;
@@ -181,6 +186,8 @@ declare global {
         textureEntries?: Array<{ textureType: string; filePath: string; areaId: number; materialRole?: "atlas" | "billboard" }>;
         textureAreaCount?: number;
         materialNames?: Record<string, string>;
+        textureGroupMode?: "texture" | "channel";
+        maskGroups?: import("../shared/maskMaterials.mjs").MaskGroups;
         foliageOpaque?: boolean | { enabled?: boolean; faceBudget?: number; contourPrecisionTexels?: number; maskErodeTexels?: number; fillHoles?: boolean; holeMaxAreaTexels?: number; cleanupPercent?: number };
         normalMapFormat?: "dx" | "opengl";
         normalMapFormats?: Record<number, "dx" | "opengl">;
@@ -258,6 +265,8 @@ declare global {
         normalMapFormats?: Record<number, "dx" | "opengl">;
         removeModelSlots?: string[];
         materialNames?: Record<string, string>;
+        textureGroupMode?: "texture" | "channel";
+        maskGroups?: import("../shared/maskMaterials.mjs").MaskGroups;
         removeTextureSlots?: string[];
         previewImagePath?: string;
         previewSkeletonPath?: string;
@@ -368,7 +377,7 @@ declare global {
       onAssetChange: (callback: (payload?: { incremental?: boolean; count?: number; records?: AssetRecord[] }) => void) => () => void;
       onCharacterDeleted?: (callback: (payload: { assetId: string; assetPath: string; paths: string[]; clearedDraftIds: string[] }) => void) => () => void;
       onScanProgress?: (
-        callback: (payload: { active: boolean; progress: number; source?: string; phase?: string; processed?: number; total?: number; message?: string }) => void
+        callback: (payload: { active: boolean; progress: number; source?: string; phase?: string; processed?: number; total?: number; message?: string; manual?: boolean; startup?: boolean }) => void
       ) => () => void;
       onCustomSaveProgress?: (callback: (payload: { assetId: string; progress: number; message?: string; failed?: boolean }) => void) => () => void;
       // 不透明裁切的透明度来源体检：不可用时 available=false + message 给出原因。

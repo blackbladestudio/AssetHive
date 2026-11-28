@@ -1,3 +1,4 @@
+const { normalizeMaskGroups, isMaskAsset } = require("../../shared/maskMaterials.mjs");
 const { removeAssetNameTags } = require("../../shared/assetNameTags.mjs");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
@@ -154,7 +155,7 @@ function createAssetMetadata(input = {}, options = {}) {
   const sourceTags = inputStandardAssetTags.filter((tag) => /^(megascans|pbrmax)$/i.test(tag));
   const standardAssetTags = normalizeStringArray(inputStandardAssetTags.map(normalizeStandardAssetTag));
   const zionTags = normalizeStringArray(input.zionTags);
-  const tags = normalizeStringArray([...removeAssetNameTags(input.tags, input), ...sourceTags, assetType, category, animationAffiliation, ...standardAssetTags, ...zionTags]);
+  const tags = normalizeStringArray([...removeAssetNameTags(input.tags, input).filter(tag => assetType !== "3d" || !/^(mega|mask)$/i.test(tag)), ...sourceTags, assetType, category, animationAffiliation, ...standardAssetTags, ...zionTags]);
   const categories = normalizeStringArray([
     ...(Array.isArray(input.categories) ? input.categories : []),
     topCategory,
@@ -191,6 +192,8 @@ function createAssetMetadata(input = {}, options = {}) {
   return {
     ...input,
     materialNames: normalizeMaterialNames(input.materialNames),
+    maskGroups: assetType === "3d" ? normalizeMaskGroups(input.maskGroups) : undefined,
+    textureGroupMode: assetType === "3d" ? (isMaskAsset(input) ? "channel" : "texture") : undefined,
     schemaVersion: ASSET_METADATA_SCHEMA_VERSION,
     id: assetID,
     assetID,

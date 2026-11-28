@@ -180,6 +180,13 @@ class AssetHiveTCPClient extends EventEmitter {
   async importAssets(job, { projectPath = "", onProgress } = {}) {
     const info = await this.getEditorInfo();
     if (!info) throw notDispatched("未连接到兼容的 AssetHive 插件，请更新插件并打开 Unreal 项目");
+    if (job?.assets?.some(asset => asset.plantAssetType === "naniteFoliage") && !info.capabilities?.includes("naniteFoliage")) {
+      throw notDispatched("当前 Unreal 插件不支持 Nanite Foliage，请更新插件并重启编辑器");
+    }
+    if (job?.assets?.some(asset => asset.materialGroups?.some(group => group.maskMaterial))
+      && !info.capabilities?.includes("maskMaterials")) {
+      throw notDispatched("当前 Unreal 插件不支持 Mask 多通道 tiling，请更新插件后重新导出");
+    }
     if (job?.assets?.some(asset => /^(atlas|atlases)$/i.test(String(asset.assetType || "").trim()))
       && !info.capabilities?.includes("atlasTextureOnly")) {
       throw notDispatched("当前 Unreal 插件不支持图集材质与贴图导入，请更新并重新编译插件后重启编辑器");

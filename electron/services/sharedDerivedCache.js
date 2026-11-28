@@ -83,6 +83,7 @@ function createSharedDerivedCache({ libraryRoot, localRoot, onFailure, canWarm =
     publishSnapshot: assets => sharedDir
       ? snapshots.run("writeSnapshot", { sharedDir, root, writer, assets }) : Promise.resolve(null),
     warmThumbnail,
+    setNormalWarmupPaused: warmup.setNormalPaused,
     warmAssets(assets, options) {
       if (!sharedDir) return;
       warmup.enqueue([...new Set(assets.map(asset => {

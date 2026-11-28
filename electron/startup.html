@@ -3,55 +3,92 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
   <title>AssetHive</title>
   <style>
     :root { color-scheme: dark; font-family: Inter, 'Microsoft YaHei', sans-serif; }
     * { box-sizing: border-box; }
     html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
-    body { background: #181818; color: #e0e0e0; user-select: none; }
-    .splash { height: 100%; display: flex; flex-direction: column; justify-content: space-between; padding: 32px; border: 1px solid #333; -webkit-app-region: drag; }
-    .close { position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #a0a0a0; font-size: 23px; cursor: pointer; -webkit-app-region: no-drag; }
-    .close:hover { background: #2c2c2c; color: #fff; }
-    .close:focus-visible { outline: 2px solid #2196f3; outline-offset: -2px; }
-    .brand { display: flex; align-items: center; gap: 14px; }
-    .logo { width: 48px; height: 48px; object-fit: contain; }
-    h1 { margin: 0; color: #fff; font-size: 24px; font-weight: 600; letter-spacing: .3px; }
-    .edition { margin-top: 6px; font-size: 9px; letter-spacing: 1.6px; color: #858585; }
-    .status { margin-bottom: 12px; color: #a0a0a0; font-size: 12px; }
-    .progress { height: 8px; overflow: hidden; border-radius: 2px; background: #303030; }
-    .progress::before { content: ''; display: block; width: 38%; height: 100%; border-radius: inherit; background: #2196f3; animation: progress 1.6s ease-in-out infinite; }
+    body { background: #121212; color: #e0e0e0; user-select: none; }
+    .splash { height: 100%; display: grid; place-items: center; padding: 32px; -webkit-app-region: drag; }
+    .window-controls { position: absolute; top: 8px; right: 8px; display: flex; gap: 4px; -webkit-app-region: no-drag; }
+    .window-controls button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #a0a0a0; font-size: 23px; cursor: pointer; }
+    .window-controls button:hover { background: #2c2c2c; color: #fff; }
+    .window-controls button:focus-visible { outline: 2px solid #2196f3; outline-offset: -2px; }
+    .content { display: grid; justify-items: center; text-align: center; }
+    .brand {
+      --logo-size: 68px;
+      --brand-gap: 16px;
+      position: relative; display: flex; align-items: center; gap: var(--brand-gap);
+    }
+    .brand-logo {
+      flex: none; width: var(--logo-size); height: var(--logo-size);
+    }
+    .brand-logo img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .brand-name {
+      margin: 0; color: #fff; font-size: 44px; font-weight: 800; letter-spacing: .08em;
+      font-family: Bahnschrift, 'Agency FB', 'Segoe UI', sans-serif; text-transform: uppercase;
+    }
+    .brand-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .brand.is-animated .brand-logo, .brand.is-animated .brand-name { opacity: 0; }
+    .status { margin: 16px 0 0; color: #a0a0a0; font-size: 16px; }
+    .status-dots { display: inline-flex; margin-inline-start: 1px; }
     .en { display: none; }
     html[lang="en"] .zh { display: none; }
     html[lang="en"] .en { display: inline; }
-    @keyframes progress { from { transform: translateX(-100%); } to { transform: translateX(264%); } }
-    @media (prefers-reduced-motion: reduce) { .progress::before { animation: none; transform: translateX(82%); } }
+    @media (max-width: 1500px) {
+      .brand-name { font-size: 34px; letter-spacing: .045em; }
+    }
+    @media (max-width: 1200px) {
+      .brand { --logo-size: 60px; --brand-gap: 14px; }
+      .brand-name { font-size: 29px; letter-spacing: .025em; }
+    }
+    @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+      .status-dots > span { animation: status-dot 1s ease-in-out infinite backwards; }
+      .status-dots > span:nth-child(2) { animation-delay: .16s; }
+      .status-dots > span:nth-child(3) { animation-delay: .32s; }
+    }
+    @keyframes status-dot {
+      0%, 75%, 100% { opacity: .28; }
+      30% { opacity: 1; }
+    }
   </style>
 </head>
 <body>
-  <main class="splash" aria-busy="true">
-    <button class="close" type="button" aria-label="关闭" title="关闭">×</button>
-    <div class="brand">
-      <img class="logo" src="./v2.ico" alt="" aria-hidden="true">
-      <div>
-        <h1>Asset Hive</h1>
-        <div class="edition">BLACK BLADE EDITION</div>
-      </div>
+  <main class="splash">
+    <div class="window-controls">
+      <button class="minimize" type="button" aria-label="最小化" title="最小化">−</button>
+      <button class="close" type="button" aria-label="关闭" title="关闭">×</button>
     </div>
-    <div>
-      <div class="status" role="status"><span class="zh">正在启动…</span><span class="en">Starting…</span></div>
-      <div class="progress" role="progressbar" aria-label="正在启动" aria-valuemin="0" aria-valuemax="100"></div>
+    <div class="content">
+      <div class="brand">
+        <span class="brand-logo" aria-hidden="true">
+          <img src="../images/Icon_V2_256.png" alt="">
+        </span>
+        <h1 class="brand-name">Asset Hive</h1>
+        <canvas class="brand-canvas" aria-hidden="true" hidden></canvas>
+      </div>
+      <p class="status" role="status">
+        <span class="zh">正在启动</span><span class="en">Starting</span><span class="status-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
+      </p>
     </div>
   </main>
   <script>
+    const minimizeButton = document.querySelector('.minimize');
     const closeButton = document.querySelector('.close');
-    if (new URLSearchParams(location.search).get('lang') === 'en') {
-      document.documentElement.lang = 'en';
-      closeButton.title = 'Close';
-      closeButton.setAttribute('aria-label', 'Close');
-      document.querySelector('.progress').setAttribute('aria-label', 'Starting');
+    function setLanguage(language) {
+      const english = language === 'en';
+      document.documentElement.lang = english ? 'en' : 'zh-CN';
+      minimizeButton.title = english ? 'Minimize' : '最小化';
+      minimizeButton.setAttribute('aria-label', minimizeButton.title);
+      closeButton.title = english ? 'Close' : '关闭';
+      closeButton.setAttribute('aria-label', closeButton.title);
     }
+    setLanguage(new URLSearchParams(location.search).get('lang'));
+    window.startup?.onLanguageChange(setLanguage);
+    minimizeButton.addEventListener('click', () => window.startup?.minimize());
     closeButton.addEventListener('click', () => window.startup?.close());
   </script>
+  <script src="./startupBrand.js"></script>
 </body>
 </html>

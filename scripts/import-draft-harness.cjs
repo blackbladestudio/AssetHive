@@ -16,6 +16,7 @@ const characterUi = characterUiModule.exports;
 // bridge, so behaviour can be asserted without Electron, a library or any user
 // settings being touched.
 const FUNCTIONS = [
+  "ensureMaskTextureEntries",
   "setCharacterPackageFileIncluded",
   "pruneCharacterImportFiles",
   "characterPackageModelSlots",
@@ -27,6 +28,7 @@ const FUNCTIONS = [
   "isModelFileAcceptedForType",
   "formatAcceptedModelExts",
   "textureEntriesToSlots",
+  "getTextureSlotToken",
   "normalizeNormalMapFormatsByArea",
   "getTextureAreaIdList",
   "normalizeZionTag",
@@ -127,6 +129,7 @@ function buildScope(files, options = {}) {
   state.importModalLocked = false;
   const heroRules = require("../shared/heroPackageRules.mjs");
   const scope = {
+    ...require('../shared/maskMaterials.mjs'),
     animationImportRules: require('../shared/animation-import-rules.json'),
     settings: {},
     isAnimationAssetImportType: type => type === 'animation',

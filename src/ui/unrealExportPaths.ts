@@ -18,7 +18,6 @@ export function resolveZion3DCategoryFolder(asset: Partial<AssetRecord> & { cate
   const profileTags = new Set(standardTags.length ? standardTags : jobTags);
   const allTags = new Set([...profileTags, ...jobTags]);
   if (["thirdparty", "第三方", "megascans", "pbrmax"].some((tag) => allTags.has(tag))) return "Objects";
-  if (profileTags.has("mega")) return "MEGA";
   if (profileTags.has("kit") || profileTags.has("kits")) return "Kit";
   if (profileTags.has("destructible")) return "Destructible";
   if (profileTags.has("props")) return "Props";

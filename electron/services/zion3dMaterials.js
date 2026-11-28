@@ -32,6 +32,10 @@ function textureMaterial(file) {
   const base = String(file || "").split(/[\\/]/).pop().replace(/\.[^.]+$/, "")
     .replace(/_(?:1|2|4|8|16)K$/i, "");
   if (/(?:^|_)(?:thumb|thumbnail|preview|render)(?:_|$)/i.test(base)) return null;
+  if (/uv2[ _-]?ao/i.test(base)) {
+    const name = materialStem(base.replace(/_?uv2[ _-]?ao/i, "").replace(/_AO$/i, ""));
+    return name ? { name, key: materialKey(name), textureType: "UV2AO" } : null;
+  }
   const tokens = base.split("_");
   for (let count = Math.min(4, tokens.length - 1); count >= 1; count--) {
     const textureType = normalizeTextureType(tokens.slice(-count).join("_"));
@@ -94,9 +98,9 @@ function namedPlantTextureMetadata(files, wind) {
 function materialScope(asset) {
   const tags = (asset.standardAssetTags || []).map((tag) => String(tag).trim().toLowerCase().replace(/[\s_-]+/g, "")
     .replace(/^kit$/, "kits").replace(/^prop$/, "props").replace(/^microfoliage$/, "micro"));
-  const categoryTags = [...new Set(tags.filter((tag) => /^(?:props|kits|destructible|dressing|mega|tree|bush|grass|micro|herofoliage)$/.test(tag)))].sort();
+  const categoryTags = [...new Set(tags.filter((tag) => /^(?:props|kits|destructible|dressing|mask|mega|tree|bush|grass|micro|herofoliage)$/.test(tag)))].sort();
   const folder = (value) => String(value || "").trim().replaceAll("\\", "/").toLowerCase();
-  return JSON.stringify([asset.assetType || "3d", folder(asset.exportRootPath), folder(asset.zionSubfolder), categoryTags,
+  return JSON.stringify([asset.assetType || "3d", folder(asset.exportRootPath), folder(asset.zionSubfolder), categoryTags, asset.textureGroupMode || "texture",
     asset.assetType === "3dplant" && !categoryTags.some((tag) => /^(?:tree|bush|grass|micro|herofoliage)$/.test(tag))
       ? folder(asset.plantCategory) : "",
     [...tags, ...(asset.tags || [])].some((tag) => /^temp$/i.test(String(tag).trim()))]);
@@ -181,6 +185,7 @@ async function prepareNamedMaterialBatch(assets) {
         textures.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
         const signature = [group.materialRole || "", textures];
         if (group.opacityInDiffuseAlpha) signature.push("diffuseAlpha");
+        if (group.maskMaterial) signature.push(group.maskMaterial);
         group.textureSignature = crypto.createHash("sha256").update(JSON.stringify(signature)).digest("hex");
         const existing = byName.get(identity);
         if (existing && (existing.conflicted || existing.signature !== group.textureSignature)) {

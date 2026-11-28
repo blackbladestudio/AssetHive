@@ -8,6 +8,7 @@ export class PreviewLoader {
   private inFlight = new Set<string>();
   private prefetch: string[] = [];
   private viewport: string[] = [];
+  private paused = false;
   private scheduled = false;
   private versions = new Map<string, number>();
 
@@ -76,6 +77,11 @@ export class PreviewLoader {
     this.schedule();
   }
 
+  setPaused(paused: boolean) {
+    this.paused = paused;
+    if (!paused) this.schedule();
+  }
+
   private trim() {
     for (const path of this.cache.keys()) {
       if (this.cache.size <= this.capacity) break;
@@ -93,6 +99,7 @@ export class PreviewLoader {
   }
 
   private pump() {
+    if (this.paused) return;
     // Overscan mounts rows above the viewport too. The cards actually on screen
     // must precede those rows, especially after a large scroll jump.
     const visible = this.viewport.filter(path => this.listeners.has(path));

@@ -1,7 +1,7 @@
 const { downloadUpdatePackage, verifyCachedUpdatePackage } = require("./services/updatePackage");
 const { windowsPackageType, pickWindowsUpdateAsset, findLocalUpdatePackage, detectWindowsInstallation } = require("./services/windowsUpdate");
 const { createAppUpdateController } = require("./services/appUpdateController");
-const { createStartupWindow } = require("./services/startupWindow");
+const { createStartupView } = require("./services/startupView");
 const { createRendererDiagnostics, startLocalCrashReporting } = require("./services/rendererDiagnostics");
 const { createSharedDerivedCache } = require("./services/sharedDerivedCache");
 const { createCacheProcess } = require("./services/cacheProcess");
@@ -20,7 +20,7 @@ const { Buffer } = require("node:buffer");
 const fsSync = require("node:fs");
 const { transactionalFs: fs, protectFile, commitFileTransaction, withFileTransaction, recoverFileTransactions } = require("./services/assetFileTransaction");
 const { execFile } = require("node:child_process");
-const { app, BrowserWindow, crashReporter, ipcMain, dialog, shell, clipboard, nativeImage, powerMonitor } = require("electron");
+const { app, BrowserWindow, WebContentsView, crashReporter, ipcMain, dialog, shell, clipboard, nativeImage, powerMonitor } = require("electron");
 const { createScanSchedule, CHANGE_CHECK_INTERVAL_MS } = require("./services/scanSchedule");
 const { recordLibraryChanges } = require("./services/libraryChanges");
 const { createLibraryChangeMaintenance } = require("./services/libraryChangeRetention");
@@ -124,7 +124,6 @@ let quitting = false;
 let quitAfterImport = false;
 let quitForceExitTimer = null;
 let rendererRecoveryPending = false;
-const startupWindows = new Map();
 
 function hasActiveBackgroundImport() {
   return backgroundImportOwners.size > 0 || activeImportCalls > 0;
@@ -140,18 +139,10 @@ function showMainWindow() {
   // A second launch must not revive a process already shutting down.
   if (quitting) return;
   const win = BrowserWindow.getAllWindows().find((window) => !window.isDestroyed());
-  if (!win) {
-    createWindow();
-    return;
-  }
-  const startupWindow = startupWindows.get(win.id);
-  if (startupWindow) {
-    startupWindow.focus();
-    return;
-  }
+  if (!win) return;
   if (win.isMinimized()) win.restore();
-  win.show();
-  win.focus();
+  // Startup will show the window as soon as there is content to display.
+  if (win.isVisible()) win.focus();
 }
 
 function confirmQuitAfterImport(window) {
@@ -235,6 +226,7 @@ const {
 const { exportToUnreal, isZionPlantAsset } = require("./services/unrealExporter");
 const { exportToBlender, normalizeBlenderDecimationRatio } = require("./services/blenderExporter");
 const { getBlenderStatus, installBlenderPlugin } = require("./services/blenderIntegration");
+const { groupNaniteFoliage, archiveNaniteFoliage, isUsda } = require("./services/naniteFoliage");
 const { normalizeNativePlantWind, detectNativePlantWind } = require("./services/nativePlantWind");
 const { resolveNativePlantGroups } = require("./services/nativePlantGroups");
 const { tcpClient } = require("./services/unrealDiscovery");
@@ -397,7 +389,7 @@ let settings = {
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".exr", ".hdr", ".tga"]);
 const IMPORT_TEXTURE_MAX_RESOLUTION_PIXELS = 8192;
 const LIBRARY_TEXTURE_MAX_RESOLUTION_PIXELS = 4096;
-const MODEL_EXTENSIONS = new Set([".fbx", ".st9", ".obj", ".abc", ".gltf", ".glb", ".ztl"]);
+const MODEL_EXTENSIONS = new Set([".fbx", ".st9", ".usda", ".obj", ".abc", ".gltf", ".glb", ".ztl"]);
 const TEXTURE_SUFFIXES = [...TEXTURE_TYPES];
 const TEXTURE_SUFFIX_SET = new Set(TEXTURE_SUFFIXES.map((name) => name.toLowerCase()));
 const MODEL_SLOT_SUFFIXES = ["Ztool", "HighPoly", "Lod0", "Lod1", "Lod2", "Lod3"];
@@ -977,6 +969,7 @@ function getSharedDerivedCache() {
       },
       onFailure: error => writeLog("WARN", "optional derived cache unavailable; using local fallback", { message: error.message })
     });
+    sharedDerivedCache.setNormalWarmupPaused(!foregroundWindows.size);
   }
   return sharedDerivedCache;
 }
@@ -1415,14 +1408,18 @@ async function applyUserFavorites(assets) {
 function applyFavoriteIds(nextIndex, favoriteIds, favoriteMetaTokens) {
   const idSet = favoriteIds instanceof Set ? favoriteIds : new Set();
   const metaSet = favoriteMetaTokens instanceof Set ? favoriteMetaTokens : new Set();
+  let changed = false;
   for (const asset of Array.isArray(nextIndex) ? nextIndex : []) {
     if (!asset || typeof asset !== "object") {
       continue;
     }
     const id = String(asset.id || "").trim();
     const metaToken = normalizeComparePath(String(asset.metaPath || "").trim());
-    asset.favorite = Boolean((id && idSet.has(id)) || (metaToken && metaSet.has(metaToken)));
+    const favorite = Boolean((id && idSet.has(id)) || (metaToken && metaSet.has(metaToken)));
+    if (Boolean(asset.favorite) !== favorite) changed = true;
+    asset.favorite = favorite;
   }
+  return changed;
 }
 
 function extractAssetRelativeSize(asset) {
@@ -2024,6 +2021,50 @@ async function ensureCurrentUnrealWorkspace(projectPath, options = settings) {
       if (!asset) throw new Error('角色资产清单已变化，首次工作区核验将重试');
       await refreshSuitStatus(asset, { ...options, unrealProjectPath: projectPath }, tcpClient);
     } });
+}
+
+let unrealWorkspaceCheckTimer;
+let unrealWorkspaceCheckState;
+function unrealWorkspaceKey(projectPath) {
+  return `${librarySelectionGeneration}:${normalizeComparePath(projectPath)}`;
+}
+
+function scheduleUnrealWorkspaceCheck(delay = 0) {
+  if (quitting || unrealWorkspaceCheckTimer || !scanIndexAuthoritative) return;
+  const projectPath = tcpClient.findClient()?.editorInfo?.projectPath;
+  if (!projectPath) return;
+  const key = unrealWorkspaceKey(projectPath);
+  const previous = unrealWorkspaceCheckState?.key === key ? unrealWorkspaceCheckState : null;
+  if (previous?.complete || (previous?.emptyIndex?.deref() === index && previous.emptyCount === index.length)) return;
+  unrealWorkspaceCheckTimer = globalThis.setTimeout(async () => {
+    unrealWorkspaceCheckTimer = null;
+    if (quitting || !scanIndexAuthoritative) return;
+    const currentProject = tcpClient.findClient()?.editorInfo?.projectPath;
+    if (!currentProject || key !== unrealWorkspaceKey(currentProject)) {
+      scheduleUnrealWorkspaceCheck();
+      return;
+    }
+    if (scanInProgress || hasActiveBackgroundImport() || activeExportCalls || recycleInProgress) {
+      scheduleUnrealWorkspaceCheck(5000);
+      return;
+    }
+    activeExportCalls++;
+    const checkedIndex = index;
+    const checkedCount = checkedIndex.length;
+    try {
+      const result = await ensureCurrentUnrealWorkspace(projectPath);
+      unrealWorkspaceCheckState = {
+        key, complete: !result.deferred,
+        emptyIndex: result.deferred ? new WeakRef(checkedIndex) : null, emptyCount: checkedCount
+      };
+      if (result.checked) writeLog('INFO', 'first Unreal workspace presence check completed', { projectPath, count: result.count });
+    } catch (error) {
+      unrealWorkspaceCheckState = { key, message: '新工作区资源状态尚未核验完成：' + error.message };
+      writeLog('WARN', 'first Unreal workspace presence check incomplete', { projectPath, message: error.message });
+      scheduleUnrealWorkspaceCheck(30000);
+    } finally { activeExportCalls--; }
+  }, delay);
+  unrealWorkspaceCheckTimer.unref?.();
 }
 
 async function getUnrealConnectionStatus(targetProjectPath, targetEditorPath) {
@@ -3934,6 +3975,8 @@ async function readMegascansDropMetadata(jsonFiles) {
     modelVariants,
     modelLods: modelLodPlan.modelLods.map((item) => ({ ...item, file: normalizePath(item.file) })),
     materialNames: meta.materialNames,
+    maskGroups: meta.maskGroups,
+    textureGroupMode: meta.textureGroupMode,
     textureSlots: textureSlots.map((entry) => {
       const stored = (Array.isArray(meta.textureEntries) ? meta.textureEntries : []).find((item) =>
         path.basename(item.uri || item.path || "").toLowerCase() === path.basename(entry.filePath).toLowerCase());
@@ -3941,6 +3984,8 @@ async function readMegascansDropMetadata(jsonFiles) {
     }),
     previewImagePath: explicitPreview || previewCandidates[0] || "",
     nativePlantWind: normalizeNativePlantWind(meta.nativePlantWind),
+    plantAssetType: meta.plantAssetType,
+    naniteFoliage: meta.naniteFoliage,
     sourceSemanticTags: sourceIdentity?.sourceKind === "megascans" ? bridgeSemanticDetails(meta.semanticTags) : undefined,
     sourceClassification: ["imperfection", "displacement"].includes(assetType) ? (meta.sourceClassification || {
       source: "quixel", sourceAssetId: sourceIdentity?.sourceAssetId, assetType,
@@ -4465,6 +4510,8 @@ async function importCustomAsset(payload, sender) {
   const resolvedModelSlots = sortModelSlotEntries([...modelSlotMap.values()].map((item) => [item.suffix, item])).map(([, item]) => item)
     .filter(item => assetType !== 'suit' || require('../shared/heroPackageRules.mjs').partitionHeroSuitFiles([item.source], characterFields, { includeWeapons: false }).accepted.length > 0);
 
+  const isNaniteFoliage = assetType === "3dplant" && resolvedModelSlots.some(item => isUsda(item.source));
+  if ((payload?.plantAssetType === "naniteFoliage" || isNaniteFoliage) && (!isNaniteFoliage || !resolvedModelSlots.every(item => isUsda(item.source)))) return { ok: false, message: "Nanite Foliage 需要全部模型为 USDA，并带对应的 Wind JSON" };
   const textureCandidates = [...normalizedTextureSlots];
   for (const sourceTexture of sourceTextureCandidates) {
     const detectedSuffix = normalizePbrMaxDecalTextureType(detectTextureSuffix(sourceTexture.source), pbrMaxDecalTextureOptions);
@@ -4667,6 +4714,12 @@ async function importCustomAsset(payload, sender) {
   const copiedModelLodEntries = [];
   const copiedPlantLayerLods = [];
   const copiedTextureFiles = [];
+  let naniteFoliage = null;
+  if (isNaniteFoliage) {
+    naniteFoliage = await archiveNaniteFoliage(resolvedModelSlots.map(item => item.source), destinationDir, payload?.naniteFoliage?.roles);
+    for (const [i, variant] of naniteFoliage.variants.entries()) copiedModelEntries.push({ suffix: formatMeshSlotName(i + 1), path: path.join(destinationDir, variant.file), source: resolvedModelSlots[i]?.source, variantKey: variant.variantKey });
+    for (const [i, group] of naniteFoliage.groups.entries()) for (const [textureType, file] of Object.entries(group.textures)) copiedTextureFiles.push({ suffix: textureType, textureType, areaIndex: i + 1, materialName: group.name, materialRole: "", path: path.join(destinationDir, file) });
+  }
   const characterModelAnalyses = new Map();
   if (isCharacterImport) {
     for (const model of familyPlan ? familyPlan.files.filter(item => ["staticMesh", "skeletalMesh"].includes(item.role)).map(item => ({ source: item.sourcePath })) : resolvedModelSlots) {
@@ -4727,7 +4780,7 @@ async function importCustomAsset(payload, sender) {
       .map((model) => [model.suffix, model.source]),
     payload?.modelVariantKeys
   );
-  for (const model of isFamilyImport ? [] : resolvedModelSlots) {
+  for (const model of isFamilyImport || isNaniteFoliage ? [] : resolvedModelSlots) {
     const modelExt = path.extname(model.source).toLowerCase();
     if (!MODEL_EXTENSIONS.has(modelExt)) {
       return { ok: false, message: "模型格式无效，请选择 fbx/obj/abc/gltf/glb" };
@@ -4801,7 +4854,7 @@ async function importCustomAsset(payload, sender) {
         variantKey, lod: lodCandidate.lod });
     }
   }
-  if (assetType === "3dplant" && sourceIdentity.sourceAssetId) {
+  if (!isNaniteFoliage && assetType === "3dplant" && sourceIdentity.sourceAssetId) {
     const models = copiedModelEntries.flatMap((entry, index) => entry.variantKey
       ? [{ ...entry, source: resolvedModelSlots[index].source }] : []);
     await importPlantLayers(sourceIdentity.sourceAssetId, models, destinationDir, copiedPlantLayerLods);
@@ -4870,7 +4923,7 @@ async function importCustomAsset(payload, sender) {
     characterProgress(15 + copiedTextureFiles.length / Math.max(1, resolvedTextureSlots.length) * 35, `正在保存贴图 ${copiedTextureFiles.length}/${resolvedTextureSlots.length}`);
     return null;
   };
-  const texturesToCopy = isFamilyImport ? [] : resolvedTextureSlots;
+  const texturesToCopy = isFamilyImport || isNaniteFoliage ? [] : resolvedTextureSlots;
   const textureCopyConcurrency = isCharacterImport ? 3 : 1;
   const textureCopyResults = await boundedMap(texturesToCopy, textureCopyConcurrency, saveImportTexture);
   const textureCopyFailure = textureCopyResults.find(result => result?.ok === false);
@@ -4983,7 +5036,7 @@ async function importCustomAsset(payload, sender) {
 
   const importWarnings = [...(familyPlan?.warnings || [])];
   let nativePlantWind = null;
-  if (isZionPlantAsset({ assetType, standardAssetTags, tags, zionTags })) {
+  if (!isNaniteFoliage && isZionPlantAsset({ assetType, standardAssetTags, tags, zionTags })) {
     nativePlantWind = normalizeNativePlantWind(payload?.nativePlantWind);
     if (!nativePlantWind) {
       const detectedWind = await detectNativePlantWind({
@@ -4994,7 +5047,7 @@ async function importCustomAsset(payload, sender) {
       importWarnings.push(...detectedWind.warnings);
     }
   }
-  const foliageOpaqueRequested = !isZionPlantAsset({ assetType, standardAssetTags, tags, zionTags })
+  const foliageOpaqueRequested = !isNaniteFoliage && !isZionPlantAsset({ assetType, standardAssetTags, tags, zionTags })
     && (payload?.foliageOpaque === true || payload?.foliageOpaque?.enabled === true);
   // 裁切面数预设（0 = 插件按自己的档位表；> 0 = 操作者覆盖）：在下面的裁切块里算出，
   // 但写资产元数据的地方在块外，块内 const 读不到 —— 所以先在这里占位。
@@ -5215,7 +5268,7 @@ async function importCustomAsset(payload, sender) {
 
   let dimensions = null;
   let modelAnalysis = null;
-  if (sender && isModelAssetType(assetType) && !isAnimationAssetType(assetType)) {
+  if (!isNaniteFoliage && sender && isModelAssetType(assetType) && !isAnimationAssetType(assetType)) {
     const highPolySlot = resolvedModelSlots.find((s) => s.suffix.toLowerCase() === "highpoly") || resolvedModelSlots[0];
     if (highPolySlot && highPolySlot.source && !(isCharacterImport && /\.abc$/i.test(highPolySlot.source))) {
       try {
@@ -5287,6 +5340,7 @@ async function importCustomAsset(payload, sender) {
     standardAssetTags,
     zionTags,
     ...(nativePlantWind ? { nativePlantWind } : {}),
+    ...(naniteFoliage ? { plantAssetType: "naniteFoliage", naniteFoliage } : {}),
     ...(typeof hasCollision === "boolean" ? { hasCollision } : {}),
     category,
     animationAffiliation: animationAffiliation || undefined,
@@ -5327,7 +5381,7 @@ async function importCustomAsset(payload, sender) {
       ...copiedModelEntries.map((item) => ({
         type: "model",
         slot: item.suffix,
-        uri: isFamilyImport ? normalizePath(path.relative(destinationDir, item.path)) : path.basename(item.path),
+        uri: isFamilyImport || isNaniteFoliage ? normalizePath(path.relative(destinationDir, item.path)) : path.basename(item.path),
         ...(item.variantKey ? modelVariantMetadataFields(item.variantKey) : {})
       })),
       ...copiedTextureFiles.map((item) => {
@@ -5335,7 +5389,7 @@ async function importCustomAsset(payload, sender) {
           type: "texture",
           slot: item.textureType,
           areaIndex: item.areaIndex,
-          uri: isFamilyImport ? normalizePath(path.relative(destinationDir, item.path)) : path.basename(item.path),
+          uri: isFamilyImport || isNaniteFoliage ? normalizePath(path.relative(destinationDir, item.path)) : path.basename(item.path),
           ...(item.materialRole ? { materialRole: item.materialRole } : {}),
           ...textureResolutionMetadataFields(item)
         };
@@ -5356,7 +5410,7 @@ async function importCustomAsset(payload, sender) {
     textureEntries: copiedTextureFiles.map((item) => ({
       textureType: item.textureType,
       areaIndex: item.areaIndex,
-      uri: isFamilyImport ? normalizePath(path.relative(destinationDir, item.path)) : path.basename(item.path),
+      uri: isFamilyImport || isNaniteFoliage ? normalizePath(path.relative(destinationDir, item.path)) : path.basename(item.path),
       ...(item.materialRole ? { materialRole: item.materialRole } : {}),
       ...textureResolutionMetadataFields(item),
       ...(String(item.textureType || "").toLowerCase() === "normal"
@@ -5366,6 +5420,8 @@ async function importCustomAsset(payload, sender) {
     normalMapFormat: normalizedNormalMapFormat,
     normalMapFormats: areaNormalMapFormats,
     materialNames: normalizedCharacterMaterialNames || payload?.materialNames,
+    maskGroups: payload?.maskGroups,
+    textureGroupMode: payload?.textureGroupMode,
     identity: {
       schemaVersion: IDENTITY_SCHEMA_VERSION,
       ...sourceIdentity,
@@ -5872,7 +5928,26 @@ async function updateCustomAssetFiles(payload, sender) {
   }
 
   const inputModelSlots = payload?.modelSlots && typeof payload.modelSlots === "object" ? payload.modelSlots : {};
-  for (const [slotKey, sourcePath] of Object.entries(inputModelSlots)) {
+  const incomingModels = Object.values(inputModelSlots).filter(Boolean);
+  const hasStandardPlantModels = [...modelSlotMap.values()].some(file => !isUsda(file));
+  const updatingNaniteBranch = incomingModels.some(isUsda) || (Boolean(meta.naniteFoliage) && !hasStandardPlantModels);
+  if (meta.naniteFoliage && nextAssetType !== "3dplant") return { ok: false, message: "包含 Nanite Foliage 分支的资产必须保留为 3D Plants" };
+  if (updatingNaniteBranch) {
+    if (nextAssetType !== "3dplant") return { ok: false, message: "Nanite Foliage 资产必须保留为 3D Plants" };
+    if (incomingModels.some(file => !isUsda(file))) return { ok: false, message: "请单独更新 Nanite Foliage 分支的 USDA 模型" };
+    const selections = hasStandardPlantModels ? new Map() : new Map(modelSlotMap);
+    for (const [slot, file] of Object.entries(inputModelSlots)) if (file) selections.set(normalizeModelSlot(slot), toAssetFilePath(file));
+    for (const slot of payload?.removeModelSlots || []) selections.delete(normalizeModelSlot(slot));
+    const manifest = await archiveNaniteFoliage([...selections.values()], assetDir, payload?.naniteFoliage?.roles || meta.naniteFoliage?.roles);
+    meta.naniteFoliage = manifest;
+    meta.plantAssetType = hasStandardPlantModels ? "standard" : "naniteFoliage";
+    if (!hasStandardPlantModels) {
+      modelSlotMap.clear(); modelLodMap.clear(); textureSlotMap.clear();
+      manifest.variants.forEach((v, i) => modelSlotMap.set(formatMeshSlotName(i + 1), path.join(assetDir, v.file)));
+      manifest.groups.forEach((g, i) => Object.entries(g.textures).forEach(([type, file]) => textureSlotMap.set(makeTextureToken(type, i + 1, ""), path.join(assetDir, file))));
+    }
+  }
+  for (const [slotKey, sourcePath] of Object.entries(updatingNaniteBranch ? {} : inputModelSlots)) {
     const normalizedSlot = normalizeModelSlot(slotKey);
     const source = String(sourcePath || "").trim();
     if (!normalizedSlot || !source) {
@@ -5945,7 +6020,7 @@ async function updateCustomAssetFiles(payload, sender) {
     }
   }
 
-  const removeModelSlots = Array.isArray(payload?.removeModelSlots) ? payload.removeModelSlots : [];
+  const removeModelSlots = !updatingNaniteBranch && Array.isArray(payload?.removeModelSlots) ? payload.removeModelSlots : [];
   for (const slotKey of removeModelSlots) {
     const normalizedSlot = normalizeModelSlot(slotKey);
     const filePath = modelSlotMap.get(normalizedSlot);
@@ -5956,8 +6031,8 @@ async function updateCustomAssetFiles(payload, sender) {
     }
   }
 
-  const payloadTextureEntries = Array.isArray(payload?.textureEntries) ? payload.textureEntries : [];
-  const inputTextureSlots = payload?.textureSlots && typeof payload.textureSlots === "object" ? payload.textureSlots : {};
+  const payloadTextureEntries = !updatingNaniteBranch && Array.isArray(payload?.textureEntries) ? payload.textureEntries : [];
+  const inputTextureSlots = !updatingNaniteBranch && payload?.textureSlots && typeof payload.textureSlots === "object" ? payload.textureSlots : {};
   const textureInputs = [];
   if (payloadTextureEntries.length > 0) {
     for (const entry of payloadTextureEntries) {
@@ -5981,7 +6056,7 @@ async function updateCustomAssetFiles(payload, sender) {
       }
     }
   }
-  if (Array.isArray(payload?.textureEntries)) {
+  if (!updatingNaniteBranch && Array.isArray(payload?.textureEntries)) {
     textureSlotMap.clear();
   }
   // 编辑保存同样只处理同槽位的 PNG；跳过 EXR，避免无意义的转换。
@@ -6246,7 +6321,9 @@ async function updateCustomAssetFiles(payload, sender) {
   meta.tags = mergedTags;
   meta.normalMapFormat = normalizedNormalMapFormat;
   meta.normalMapFormats = areaNormalMapFormats;
-  if (payload?.materialNames !== undefined) meta.materialNames = payload.materialNames;
+  if (payload?.materialNames !== undefined && !(updatingNaniteBranch && hasStandardPlantModels)) meta.materialNames = payload.materialNames;
+  if (payload?.maskGroups !== undefined) meta.maskGroups = payload.maskGroups;
+  if (payload?.textureGroupMode !== undefined) meta.textureGroupMode = payload.textureGroupMode;
   meta.categories = [nextTopCategory, nextAssetType, nextCategory.toLowerCase(), nextAffiliation].filter(Boolean);
   meta.semanticTags = typeof meta.semanticTags === "object" && meta.semanticTags ? meta.semanticTags : {};
   if (nextSourceIdentity.sourceKind === "megascans") Object.assign(meta.semanticTags, bridgeSemanticDetails(payload?.sourceSemanticTags));
@@ -6788,15 +6865,17 @@ async function deleteLegacyCustomAsset(payload) {
 
 // The recycle journal is authoritative even when a local/shared cache is stale.
 let recycleInProgress = false;
-async function filterRecycledIndex(concurrency = 8) {
+async function filterRecycledIndex(concurrency = 8, timeoutMs) {
   const root = String(settings.customLibraryPath || "").trim();
   if (!root) return;
   const generation = librarySelectionGeneration;
-  const [recycled, permanentlyDeleted] = await Promise.all([
+  const readJournals = Promise.all([
     listRecycledAssets(root, { concurrency }),
     listPermanentlyDeletedAssets(root, { concurrency })
   ]);
-  if (generation !== librarySelectionGeneration) return;
+  const journals = timeoutMs ? await Promise.race([readJournals, sleep(timeoutMs)]) : await readJournals;
+  if (!journals || generation !== librarySelectionGeneration) return;
+  const [recycled, permanentlyDeleted] = journals;
   const deleted = new Set([...recycled, ...permanentlyDeleted].map(item => item.assetId));
   if (deleted.size) index = index.filter(asset => !deleted.has(asset.id));
 }
@@ -7639,6 +7718,7 @@ async function restoreLibraryIndexCache() {
       const shared = await getSharedDerivedCache().readSnapshot();
       if (shared !== null) { cached = shared; fromShared = true; }
     }
+    const hasSnapshot = cached !== null;
     cached ??= [];
     if (!current() || (scanInProgress && activeScanGeneration === restoreGeneration) || scanIndexAuthoritative) {
       writeLog("INFO", "library cache restore skipped: scan owns the index", { count: cached.length });
@@ -7660,6 +7740,7 @@ async function restoreLibraryIndexCache() {
     }
     // Both local and shared snapshots are first-card hints. The normal scan
     // validates them; startup must not repeat thousands of network probes.
+    return hasSnapshot;
   } catch (error) {
     writeLog("WARN", "library cache restore failed", { message: error?.message || String(error) });
   }
@@ -7671,14 +7752,15 @@ async function waitForLibraryCacheRestore(timeoutMs = 15000) {
   if (!libraryCacheRestorePromise) {
     return;
   }
-  await Promise.race([libraryCacheRestorePromise, sleep(timeoutMs)]);
+  return await Promise.race([libraryCacheRestorePromise, sleep(timeoutMs)]);
 }
 
 async function performScan(window, options = {}) {
   const reason = String(options?.reason || "manual");
   const force = Boolean(options?.force);
+  const coldStartup = Boolean(options?.coldStartup);
   const requestedGeneration = librarySelectionGeneration;
-  await waitForLibraryCacheRestore();
+  if (!coldStartup) await waitForLibraryCacheRestore();
   if (requestedGeneration !== librarySelectionGeneration) return index;
   // Automatic polls are retried on the next tick. Do not compete with a user
   // operation for SMB I/O or start a scan of its partially copied package.
@@ -7722,6 +7804,12 @@ async function performScan(window, options = {}) {
     const message = String(payload?.message || "");
     window.webContents.send("assets:scanProgress", { active: true, progress: reportedProgress, source, phase, processed, total, message });
   };
+  const reportScanFinished = (payload) => {
+    if (!current() || !window || window.isDestroyed()) return;
+    const result = { ...payload, active: false, source: "all" };
+    if (options?.onFinished) options.onFinished(result);
+    else window.webContents.send("assets:scanProgress", result);
+  };
   scanInProgress = true;
   const previousSharedIndexComplete = sharedIndexComplete;
   sharedIndexComplete = false;
@@ -7738,8 +7826,10 @@ async function performScan(window, options = {}) {
       ];
       for (const entry of configuredRoots) {
         if (!entry.root) continue;
-        const rootStats = await statOrNull(entry.root);
+        const rootCheck = statOrNull(entry.root);
+        const rootStats = coldStartup ? await Promise.race([rootCheck, sleep(5000)]) : await rootCheck;
         if (!rootStats?.isDirectory()) {
+          if (coldStartup) throw new Error("启动时无法读取资产库目录");
           unavailableSourcesToPreserve.add(entry.source);
         }
       }
@@ -7821,8 +7911,10 @@ async function performScan(window, options = {}) {
       }
       if (pendingIncrementalRecords.length === 0) return;
       publishScanIndex(incrementalMap);
-      const records = pendingIncrementalRecords.splice(0, pendingIncrementalRecords.length)
-        .map(record => incrementalMap.get(record.id)).filter(Boolean).map(toAssetListRecord).filter(Boolean);
+      const records = foregroundWindows.has(window)
+        ? pendingIncrementalRecords.map(record => incrementalMap.get(record.id)).filter(Boolean).map(toAssetListRecord).filter(Boolean)
+        : undefined;
+      pendingIncrementalRecords.length = 0;
       window.webContents.send("assets:change", { incremental: true, count: index.length, records });
       lastIncrementalEmitAt = now;
     };
@@ -7855,12 +7947,15 @@ async function performScan(window, options = {}) {
         if (!current() || !record || !record.id) {
           return;
         }
-        record.favorite = favoriteIds.has(record.id) || favoriteMetaTokens.has(normalizeComparePath(String(record.metaPath || "").trim()));
         const previousRecord = incrementalMap.get(record.id);
-        if (!previousRecord || JSON.stringify(previousRecord) !== JSON.stringify(record)) {
-          getSharedDerivedCache().warmAssets?.([record], { priority: true });
+        const favorite = favoriteIds.has(record.id) || favoriteMetaTokens.has(normalizeComparePath(String(record.metaPath || "").trim()));
+        const favoriteChanged = Boolean(previousRecord?.favorite) !== favorite;
+        record.favorite = favorite;
+        const changed = favoriteChanged || (previousRecord !== record && (!previousRecord || JSON.stringify(previousRecord) !== JSON.stringify(record)));
+        if (changed) {
+          getSharedDerivedCache().warmAssets?.([record], { priority: true, foregroundOnly: true });
         }
-        if (incrementalPoll && previousRecord && JSON.stringify(previousRecord) === JSON.stringify(record)) return;
+        if (incrementalPoll && !changed) return;
         scanRecordsChanged = true;
         incrementalMap.set(record.id, record);
         pendingIncrementalRecords.push(record);
@@ -7910,9 +8005,9 @@ async function performScan(window, options = {}) {
     }
     pendingIncrementalRecords.push(...[...localIndexChanges.values()].filter(Boolean));
     emitIncrementalAssets(true);
-    applyFavoriteIds(index, favoriteIds, favoriteMetaTokens);
+    const favoritesChanged = applyFavoriteIds(index, favoriteIds, favoriteMetaTokens);
     reportScanProgress({ progress: 96, source: "all", phase: "save", processed: index.length, total: index.length });
-    const unchangedPoll = incrementalPoll && !scanRecordsChanged
+    const unchangedPoll = incrementalPoll && !scanRecordsChanged && !favoritesChanged
       && index.length === previousIndex.length && lastScanSnapshotRoot === scanRoot;
     const snapshotSaved = unchangedPoll || await saveIndexSnapshot(index, {
       publishShared: failedScanPaths.size === 0 && unavailableSourcesToPreserve.size === 0,
@@ -7932,18 +8027,23 @@ async function performScan(window, options = {}) {
     if (!current()) return index;
     if (unchangedPoll) writeLog("INFO", "incremental poll unchanged; snapshot write skipped", { count: index.length });
     reportScanProgress({ progress: 99, source: "all", phase: "finalize", processed: index.length, total: index.length });
+    reportScanFinished({ progress: 100, phase: failedScanPaths.size ? "partial" : "done", processed: index.length,
+      total: index.length, manual: reason === "manual-rescan",
+      message: failedScanPaths.size ? `${failedScanPaths.size} 处读取失败，已保留原有资产；详情见日志` : "" });
     if (window && !window.isDestroyed()) {
-      window.webContents.send("assets:scanProgress", { active: false, progress: 100, source: "all", phase: failedScanPaths.size ? "partial" : "done", processed: index.length, total: index.length, message: failedScanPaths.size ? `${failedScanPaths.size} 处读取失败，已保留原有资产；详情见日志` : "" });
+    }
+    if (!unchangedPoll && window && !window.isDestroyed()) {
       // 扫描过程已经按批把记录推给界面了。收尾只补一份 ID / 收藏清单
       // （2 万资产约 1MB），避免再把整份索引序列化一次；界面据此剔除已删除的
       // 资产并校正收藏标记。
-      window.webContents.send("assets:change", {
+      const count = index.length;
+      window.webContents.send("assets:change", foregroundWindows.has(window) ? {
         incremental: true,
         complete: true,
-        count: index.length,
+        count,
         ids: index.map((asset) => String(asset?.id || "")).filter(Boolean),
         favoriteIds: index.filter((asset) => asset?.favorite).map((asset) => String(asset.id || "")).filter(Boolean)
-      });
+      } : { incremental: true, count });
     }
     writeLog("INFO", "scan complete", { count: index.length, durationMs: Date.now() - startedAt,
       memory: process.memoryUsage() });
@@ -7951,11 +8051,10 @@ async function performScan(window, options = {}) {
     if (!current()) return index;
     await scanSchedule?.complete(scanRoot, false, false).catch(() => {});
     writeLog("ERROR", "scan failed", { message: error?.message });
-    if (window && !window.isDestroyed()) {
-      window.webContents.send("assets:scanProgress", { active: false, progress: 0, source: "all", phase: "failed" });
-    }
+    reportScanFinished({ progress: 0, phase: "failed", ...(coldStartup ? { message: error?.message } : {}) });
   } finally {
     scanInProgress = false;
+    scheduleUnrealWorkspaceCheck();
     const queued = pendingScanRequest;
     pendingScanRequest = null;
     if (queued) {
@@ -8304,7 +8403,7 @@ function startWatching(window) {
         }
 
         const isImage = ext === ".png" || ext === ".jpg" || ext === ".jpeg" || ext === ".webp" || ext === ".bmp";
-        const isModel = ext === ".fbx" || ext === ".st9" || ext === ".obj" || ext === ".abc" || ext === ".gltf" || ext === ".glb";
+        const isModel = ext === ".fbx" || ext === ".st9" || ext === ".usda" || ext === ".obj" || ext === ".abc" || ext === ".gltf" || ext === ".glb";
         if (isImage || isModel) {
           const resolvedFile = path.resolve(rawPath);
           const dirToken = normalizeComparePath(path.dirname(resolvedFile));
@@ -8320,7 +8419,7 @@ function startWatching(window) {
         }
       }
       if (changed && window && !window.isDestroyed()) {
-        getSharedDerivedCache().warmAssets?.(upserts, { priority: true });
+        getSharedDerivedCache().warmAssets?.(upserts, { priority: true, foregroundOnly: true });
         getSharedDerivedCache().warmAssets?.(index, { replace: true });
         scheduleIndexSnapshotSave("library_watcher");
         await applyLibrarySqlCacheChanges({ upsertAssets: upserts, deleteIds: deletes,
@@ -8374,6 +8473,7 @@ function createWindow() {
     const foreground = win.isVisible() && !win.isMinimized() && win.isFocused();
     if (foreground) foregroundWindows.add(win);
     else foregroundWindows.delete(win);
+    sharedDerivedCache?.setNormalWarmupPaused(!foregroundWindows.size);
     const hasForeground = foregroundWindows.size > 0;
     if (periodicScanTimer && hadForeground !== hasForeground) {
       startPeriodicScan(win, { immediate: hasForeground });
@@ -8386,6 +8486,7 @@ function createWindow() {
   win.webContents.ipc.on("window:requestForeground", publishForegroundState);
   win.once("closed", () => {
     foregroundWindows.delete(win);
+    sharedDerivedCache?.setNormalWarmupPaused(!foregroundWindows.size);
   });
   const diagnostics = createRendererDiagnostics({
     app, webContents: win.webContents, crashReporting: localCrashReporting, writeLog,
@@ -8409,74 +8510,99 @@ function createWindow() {
     app.quit();
   });
 
-  const startupWindow = createStartupWindow({
-    BrowserWindow, ipcMain, mainWindow: win, language: settings.uiLanguage,
-    icon: windowOptions.icon,
-    onCancel: () => win.close(),
-    onError: error => {
-      writeLog("ERROR", "startup animation load failed", { message: error?.message });
-      startupWindows.delete(win.id);
-    }
-  });
-  startupWindows.set(win.id, startupWindow);
-  win.once("closed", () => startupWindows.delete(win.id));
-  win.webContents.once("render-process-gone", () => startupWindows.delete(win.id));
-
   const rendererLoadStartedAt = Date.now();
+  const showWindow = () => {
+    if (!quitting && !win.isDestroyed() && !win.isVisible() && !win.isMinimized()) win.show();
+  };
+  const startupView = createStartupView({
+    WebContentsView, mainWindow: win, language: settings.uiLanguage,
+    onLoaded: () => {
+      showWindow();
+      writeLog("INFO", "startup view loaded", { durationMs: Date.now() - rendererLoadStartedAt });
+    },
+    onError: error => writeLog("WARN", "startup animation load failed", { message: error.message })
+  });
+
+  const rendererWaitTimer = globalThis.setTimeout(() => {
+    writeLog("WARN", "renderer still loading, waiting for UI", { durationMs: Date.now() - rendererLoadStartedAt });
+  }, 3000);
+  rendererWaitTimer.unref?.();
+  const finishStartup = () => {
+    globalThis.clearTimeout(rendererWaitTimer);
+    startupView.dispose();
+  };
+  win.once("closed", finishStartup);
+  win.webContents.once("render-process-gone", finishStartup);
+
+  let uiMounted = false;
+  let coldStartupScanned = false;
+  let startupLibraryReady = null;
+  let startupScanResult;
   const reportStartupMilestone = (event, payload) => {
     if (event.sender !== win.webContents || !["preload-ready", "modules-ready", "ui-mounted"].includes(payload?.stage)) return;
     const durationMs = Date.now() - rendererLoadStartedAt;
     diagnostics.recordEvent("renderer startup milestone", { stage: payload.stage, durationMs });
     writeLog("INFO", "renderer startup milestone", { stage: payload.stage, durationMs, navigation: payload.navigation });
+    if (payload.stage !== "ui-mounted" || uiMounted || quitting) return;
+    uiMounted = true;
+    finishStartup();
+    showWindow();
+    if (win.isFocused()) win.webContents.focus();
+    if (startupScanResult) win.webContents.send("assets:scanProgress", { ...startupScanResult, startup: true });
+    startWatching(win);
+    const startup = !coldStartupScanned && shouldAutoScanOnStartup();
+    if (startup) writeLog("INFO", "startup auto scan scheduled");
+    startPeriodicScan(win, { startup });
   };
   ipcMain.on("app:startupMilestone", reportStartupMilestone);
   win.once("closed", () => ipcMain.removeListener("app:startupMilestone", reportStartupMilestone));
-  const devServerUrl = process.env.VITE_DEV_SERVER_URL || (!app.isPackaged ? "http://127.0.0.1:5173" : "");
-  if (devServerUrl) {
-    writeLog("INFO", "load renderer url", { url: devServerUrl });
-    win.loadURL(devServerUrl).catch((error) => {
-      writeLog("ERROR", "loadURL failed", { message: error?.message });
-    });
-  } else {
-    const filePath = path.join(__dirname, "../dist/index.html");
-    writeLog("INFO", "load renderer file", { filePath });
-    win.loadFile(filePath).catch((error) => {
-      writeLog("ERROR", "loadFile failed", { message: error?.message });
-    });
-  }
-
-  const showWindow = () => {
-    if (!win.isDestroyed() && !win.isVisible()) {
-      win.show();
+  const loadStartupLibrary = async () => {
+    if (!String(settings.customLibraryPath || "").trim()) return;
+    const hasSnapshot = await waitForLibraryCacheRestore();
+    if (uiMounted || quitting || win.isDestroyed()) return;
+    if (!hasSnapshot && index.length === 0 && shouldAutoScanOnStartup()) {
+      coldStartupScanned = true;
+      await performScan(win, {
+        reason: "startup", force: true, coldStartup: true,
+        // A failed library probe can finish before the renderer subscribes.
+        onFinished: result => { startupScanResult = result; }
+      });
     }
-    startupWindow.finish();
-    startupWindows.delete(win.id);
+    if (!quitting && !win.isDestroyed() && index.length > 0) await filterRecycledIndex(8, 1200);
+  };
+  const loadRenderer = async () => {
+    // Give the local startup page the first visible frame before loading the app.
+    await startupView.ready;
+    if (quitting || win.isDestroyed()) return;
+    startupLibraryReady = loadStartupLibrary().catch(error => {
+      writeLog("WARN", "initial library load failed", { message: error?.message });
+    });
+    const devServerUrl = process.env.VITE_DEV_SERVER_URL || (!app.isPackaged ? "http://127.0.0.1:5173" : "");
+    if (devServerUrl) {
+      writeLog("INFO", "load renderer url", { url: devServerUrl });
+      win.loadURL(devServerUrl).catch((error) => {
+        writeLog("ERROR", "loadURL failed", { message: error?.message });
+      });
+    } else {
+      const filePath = path.join(__dirname, "../dist/index.html");
+      writeLog("INFO", "load renderer file", { filePath });
+      win.loadFile(filePath).catch((error) => {
+        writeLog("ERROR", "loadFile failed", { message: error?.message });
+      });
+    }
   };
 
-  // Cold renderer loading can take longer than three seconds. Keep the window
-  // hidden until its first paint rather than exposing an empty black surface.
-  const rendererWaitTimer = globalThis.setTimeout(() => {
-    writeLog("WARN", "renderer still loading, waiting for first paint", { durationMs: Date.now() - rendererLoadStartedAt });
-  }, 3000);
-  rendererWaitTimer.unref?.();
-  win.once("closed", () => globalThis.clearTimeout(rendererWaitTimer));
-
   win.once("ready-to-show", () => {
-    globalThis.clearTimeout(rendererWaitTimer);
     writeLog("INFO", "window ready-to-show", { durationMs: Date.now() - rendererLoadStartedAt });
-    showWindow();
-    startWatching(win);
-    const startup = shouldAutoScanOnStartup();
-    if (startup) writeLog("INFO", "startup auto scan scheduled");
-    startPeriodicScan(win, { startup });
   });
 
   win.webContents.on("did-finish-load", () => {
     writeLog("INFO", "did-finish-load", { durationMs: Date.now() - rendererLoadStartedAt });
   });
 
-  win.webContents.on("did-fail-load", async (_, errorCode, errorDescription, validatedURL) => {
-    globalThis.clearTimeout(rendererWaitTimer);
+  win.webContents.on("did-fail-load", async (_, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3 || quitting) return;
+    finishStartup();
     showWindow();
     writeLog("ERROR", "did-fail-load", { errorCode, errorDescription, validatedURL });
     await dialog.showMessageBox(win, {
@@ -8547,7 +8673,11 @@ function createWindow() {
   });
 
   writeLog("INFO", "window created", { id: win.id });
-  return win;
+  return {
+    loadRenderer, setStartupLanguage: startupView.setLanguage,
+    startupViewReady: startupView.ready,
+    getStartupLibrary: () => uiMounted ? null : startupLibraryReady
+  };
 }
 
 app.whenReady().then(async () => {
@@ -8609,9 +8739,14 @@ app.whenReady().then(async () => {
   app.on("child-process-gone", (_, details) => {
     writeLog("ERROR", "child-process-gone", details);
   });
-  // Only the bounded user settings read precedes window creation. The SQLite
-  // cache is local; library metadata access remains asynchronous after startup.
+  // The local startup view can paint while the bounded settings read runs.
+  const mainWindow = createWindow();
   await loadSettingsState();
+  if (quitting) return;
+  mainWindow?.setStartupLanguage(settings.uiLanguage);
+  // Show the local page before synchronous SQLite reads can occupy the main thread.
+  await mainWindow?.startupViewReady;
+  if (quitting) return;
   startRuntimeCacheMonitor();
   tcpClient.setTarget(settings);
   const connectionDiagnostics = new Map();
@@ -8623,6 +8758,7 @@ app.whenReady().then(async () => {
       writeLog("INFO", "unreal connection", diagnostic);
     }
   });
+  tcpClient.on("changed", () => scheduleUnrealWorkspaceCheck());
   tcpClient.connect();
   libraryCacheRestorePromise = restoreLibraryIndexCache();
   // Metadata maintenance requires Settings > Update Metadata.
@@ -8636,7 +8772,8 @@ app.whenReady().then(async () => {
     await clearAssetCaches();
     writeLog("INFO", "startup cache clear executed");
   }
-  createWindow();
+  if (quitting) return;
+  void mainWindow?.loadRenderer();
 
   registerThreeDCoatIpc({
     app, ipcMain, dialog, getAsset: refreshAssetById,
@@ -8707,6 +8844,9 @@ app.whenReady().then(async () => {
     settings = { ...settings, ...patch };
     const selection = libraryPathsChanged ? restoreSelectedLibraryCache() : librarySelectionGeneration;
     tcpClient.setTarget(settings);
+    if (settings.unrealProjectPath !== prev.unrealProjectPath || settings.unrealEditorPath !== prev.unrealEditorPath) {
+      scheduleUnrealWorkspaceCheck();
+    }
     await saveJson(getSettingsFilePath(), settings);
 
     // Update watcher + scan ONLY when the Custom library path actually changed.
@@ -9253,9 +9393,17 @@ app.whenReady().then(async () => {
     return result.filePaths[0];
   });
 
-  ipcMain.handle("assets:getIndex", async () => {
-    await filterRecycledIndex();
-    return index.map(toAssetListRecord).filter(Boolean);
+  ipcMain.handle("assets:getIndex", async (_, options) => {
+    const startupLibrary = mainWindow?.getStartupLibrary();
+    const preferMemory = options?.preferMemory === true;
+    const startedAt = startupLibrary ? Date.now() : 0;
+    // Passive renderer reloads and foreground catch-up only need the current
+    // published index. A separate shared-disk deletion check can block wakeup.
+    if (startupLibrary) await startupLibrary;
+    else if (!preferMemory) await filterRecycledIndex();
+    const records = index.map(toAssetListRecord).filter(Boolean);
+    if (startupLibrary) writeLog("INFO", "renderer startup snapshot ready", { count: records.length, durationMs: Date.now() - startedAt });
+    return records;
   });
   let detailDeletionCheck = null;
   ipcMain.handle("assets:getById", async (_, assetId) => {
@@ -9343,15 +9491,8 @@ app.whenReady().then(async () => {
   ipcMain.handle("unreal:getConnectionStatus", async () => {
     try {
       const status = await getUnrealConnectionStatus(settings.unrealProjectPath, settings.unrealEditorPath);
-      if (status.connected && status.projectPath && scanIndexAuthoritative && !scanInProgress && !activeExportCalls && !recycleInProgress) {
-        activeExportCalls++;
-        try {
-          const result = await ensureCurrentUnrealWorkspace(status.projectPath);
-          if (result.checked) writeLog('INFO', 'first Unreal workspace presence check completed', { projectPath: status.projectPath, count: result.count });
-        } catch (error) {
-          status.message = '新工作区资源状态尚未核验完成：' + error.message;
-          writeLog('WARN', 'first Unreal workspace presence check incomplete', { projectPath: status.projectPath, message: error.message });
-        } finally { activeExportCalls--; }
+      if (status.connected && unrealWorkspaceCheckState?.key === unrealWorkspaceKey(status.projectPath) && unrealWorkspaceCheckState.message) {
+        status.message = unrealWorkspaceCheckState.message;
       }
       const diagnostic = { ...status, projectPath: settings.unrealProjectPath, editorPath: settings.unrealEditorPath };
       const signature = JSON.stringify(diagnostic);
@@ -9592,7 +9733,7 @@ app.whenReady().then(async () => {
     const normalizedKind = String(kind || "any").trim().toLowerCase();
     let filters = [];
     if (normalizedKind === "model") {
-      filters = [{ name: "Model", extensions: ["fbx", "st9"] }];
+      filters = [{ name: "Model", extensions: ["fbx", "st9", "usda"] }];
     } else if (normalizedKind === "hairmodel") {
       filters = [{ name: "HairCard / Groom", extensions: ["fbx", "abc"] }];
     } else if (normalizedKind === "animation") {
@@ -10131,8 +10272,9 @@ app.whenReady().then(async () => {
         if (metadata) metadataGroups.push({ root, metadata, preferredName: metadata.name || path.basename(root) });
       }
       const { groupDroppedAssets } = require("./services/dropAssetGroups");
-      const assets = await resolveNativePlantGroups(groupDroppedAssets(files, metadataGroups, archiveSources),
-        { jsonFiles, metadataGroups, shouldAbort: () => job.aborted });
+      const naniteGroups = await groupNaniteFoliage(files, archiveSources, metadataGroups);
+      const assets = [...naniteGroups.assets, ...await resolveNativePlantGroups(groupDroppedAssets(naniteGroups.remaining, naniteGroups.remainingMetadata, archiveSources),
+        { jsonFiles, metadataGroups, shouldAbort: () => job.aborted })];
       if (job.aborted) return { files: [], assets: [] };
       sendProgress(null, "Done");
       return { files, preferredName, metadata: assets.length === 1 ? assets[0].metadata : null, assets, failedArchives };
@@ -10207,6 +10349,10 @@ app.whenReady().then(async () => {
     return require('./services/groomPreview').renderGroomPreview(String(sourcePath || ''), {
       cacheRoot: path.join(app.getPath('temp'), 'AssetHive'), blenderExecutablePath: settings.blenderExecutablePath
     });
+  });
+  ipcMain.handle("assets:detectMaskChannels", async (_, filePath) => {
+    try { return { ok: true, ...await runImageTask("detectMaskChannels", [String(filePath)]) }; }
+    catch (error) { return { ok: false, channels: [], message: error.message }; }
   });
   ipcMain.handle("assets:analyzeCharacterModels", async (_, rawPaths) => {
     try {
@@ -10391,7 +10537,9 @@ app.whenReady().then(async () => {
       if (result?.ok) {
         const windows = BrowserWindow.getAllWindows();
         const changed = index.find(asset => asset.id === result.assetId);
-        const update = changed && isCharacterUEAsset(changed) ? { incremental: true, records: [toAssetListRecord(changed)] } : undefined;
+        const character = changed && isCharacterUEAsset(changed);
+        if (character) scheduleUnrealWorkspaceCheck();
+        const update = character ? { incremental: true, records: [toAssetListRecord(changed)] } : undefined;
         for (const win of windows) if (!win.isDestroyed()) win.webContents.send('assets:change', update);
       } else {
         // 失败时通知界面清理进度环，避免卡片一直停在中间进度。

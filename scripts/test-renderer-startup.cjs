@@ -15,6 +15,23 @@ function load(relative, dependencies = {}, globals = {}) {
   return output.exports;
 }
 
+test("a committed startup view reports readiness even when animation frames are suppressed", () => {
+  const milestones = [];
+  let committedEffect;
+  const { StartupTiming } = load("src/ui/StartupTiming.tsx", {
+    react: { useEffect: effect => { committedEffect = effect; } }
+  }, {
+    window: {
+      requestAnimationFrame: () => assert.fail("startup readiness cannot rely on an uncovered renderer frame"),
+      arkhive: { reportStartupMilestone: stage => milestones.push(stage) }
+    }
+  });
+  StartupTiming();
+  assert.deepEqual(milestones, []);
+  committedEffect();
+  assert.deepEqual(milestones, ["ui-mounted"]);
+});
+
 // Run the hook's actual effects, including cleanup before changed effects and
 // state-driven renders. Worker delivery and debounce timers stay controllable.
 function searchFixture() {

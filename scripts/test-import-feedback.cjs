@@ -106,6 +106,7 @@ const compiled = ts.transpileModule(handlers, { compilerOptions: { target: ts.Sc
 function fixture(resolve) {
   const form = { assetName: "My asset", assetType: "3d", subCategory: "Other", textureEntries: [], modelSlots: { Mesh: "D:\\input.fbx" }, normalMapFormats: {}, normalMapFormat: "dx", previewImagePath: "", tagsText: "" };
   const state = {
+    ...require("../shared/maskMaterials.mjs"),
     importForm: form, defaultImportForm: {}, importSaving: false, busy: false, bridgeAvailable: true, assetModalMode: "import", importDuplicateCheckEnabled: false,
     setCharacterTaskIds: () => {}, setImportSidebarCollapsed: () => {},
     finishCharacterImportTasks: require('../shared/characterImportTasks.mjs').finishCharacterImportTasks,

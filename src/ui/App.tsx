@@ -1,3 +1,7 @@
+import { NaniteFoliageSummary } from "./NaniteFoliageSummary";
+import { plantBranches } from "../../shared/plantBranches.mjs";
+import { MaskChannelSettings } from "./MaskChannelSettings";
+import { defaultMaskGroup, isMaskAsset, normalizeMaskGroups } from "../../shared/maskMaterials.mjs";
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode, CSSProperties } from "react";
 import { CharacterFileChangeTag } from './CharacterFileChangeTag';
@@ -34,6 +38,7 @@ import { AnimationAssetActivity } from './AnimationAssetActivity';
 import { AnimationRulesPanel } from './AnimationRulesPanel';
 import { AnimationSendBadge } from './AnimationSendBadge';
 import { DialogCloseButton } from "./DialogCloseButton";
+import { StartupTiming } from "./StartupTiming";
 import { CharacterRigPanel } from './CharacterRigPanel';
 import { MonsterModelPanel } from './MonsterModelPanel';
 import { CharacterUpdateAssignments, CharacterUpdateChanges } from './CharacterUpdateReview';
@@ -47,7 +52,8 @@ import { suitExportLocations } from "./suitExportLocations";
 import type { ThreeDCoatConnection } from "../threeDCoat";
 import { PreviewLoader } from "./previewLoader";
 import { AnimationCoverQueue, type AnimationCoverTarget } from "./animationCoverQueue";
-import { isAnimationPreviewActive, subscribeToAnimationPreviewActivity } from "./animationPreviewActivity";
+import { isWindowForeground, pollWindowStatus, subscribeToWindowForeground } from "./windowForeground";
+import { getEngineImportFeedback, getScanFeedback, getSidebarStatus, type SidebarFeedback } from "./sidebarStatus";
 import { AnimationPreviewVideo } from "./AnimationPreviewVideo";
 import { getPreviewUrl } from "./previewUrl";
 import { evaluateUnifiedAnimationRules as evaluateAnimationImportRules, loadAnimationRuleReference } from "./animationRuleEvaluation";
@@ -100,6 +106,7 @@ import {
   defaultImportForm,
   defaultEditForm,
   type SearchState,
+  type AssetStageMetrics,
   type TextureEntry,
   type TextureMaterialRole,
   type ModelLodEntry,
@@ -138,8 +145,8 @@ function AnimationCoverWorker({ queue, loader, bridge, enabled, assets, resolveR
   const [prepared, setPrepared] = useState<{ target: AnimationCoverTarget; key: string } | null>(null);
   useEffect(() => {
     const update = () => queue.setEnabled(Boolean(enabled && bridge?.getAnimationPreview && bridge.cacheAnimationPreview)
-      && isAnimationPreviewActive());
-    const unsubscribe = subscribeToAnimationPreviewActivity(update);
+      && isWindowForeground());
+    const unsubscribe = subscribeToWindowForeground(update);
     update();
     return () => {
       unsubscribe();
@@ -902,6 +909,7 @@ const DECAL_EXPORT_MODE_OPTIONS = [
 const PLANT_EXPORT_MODE_OPTIONS = [
   { value: "opaque", zh: "OPAQUE 版本（不带 LOD）", en: "OPAQUE (No LOD)" },
   { value: "lod", zh: "LOD 版本（Masked + LOD）", en: "Masked + LOD" },
+  { value: "naniteFoliage", zh: "Nanite Foliage（USDA + Wind）", en: "Nanite Foliage (USDA + Wind)" },
   { value: "naniteMasked", zh: "Nanite Masked（仅 LOD0）", en: "Nanite Masked (LOD0 only)" }
 ] as const;
 
@@ -926,6 +934,7 @@ function normalizeExportResolutionValue(value: string) {
 
 function normalizePlantExportMode(value: string) {
   const normalized = String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (normalized === "nanitefoliage") return "naniteFoliage";
   if (normalized === "nanitemasked") return "naniteMasked";
   if (normalized === "lod" || normalized === "lods" || normalized === "masked" || normalized === "maskedlod" || normalized === "maskedlods") return "lod";
   return "opaque";
@@ -987,6 +996,10 @@ function collectAssetModelFilePaths(asset?: AssetRecord | null): string[] {
   return [...paths];
 }
 
+function isNaniteFoliageAsset(asset?: AssetRecord | null) {
+  return asset?.assetType === "3dplant" && plantBranches(asset).naniteFoliage;
+}
+
 function supportsPlantExportMode(asset?: AssetRecord | null): boolean {
   const extensions = collectAssetModelFilePaths(asset)
     .map((filePath) => {
@@ -1004,6 +1017,15 @@ function canSelectPlantExportMode(asset?: AssetRecord | null): boolean {
   if (!asset || asset.assetType !== "3dplant" || !supportsPlantExportMode(asset)) return false;
   if (isZionPlantAsset(asset)) return false;
   return true;
+}
+
+function resolvePlantModeForAssets(assets: Array<AssetRecord | undefined>, requested: string) {
+  const plants = assets.filter(asset => asset?.assetType === "3dplant");
+  const allNanite = plants.length > 0 && plants.every(isNaniteFoliageAsset);
+  if (allNanite && plants.every(asset => !plantBranches(asset).standard)) return "naniteFoliage";
+  const canOpaque = plants.some(canSelectPlantExportMode);
+  if (requested === "naniteFoliage" && !allNanite) return canOpaque ? "opaque" : "lod";
+  return requested === "opaque" && !canOpaque ? "lod" : requested;
 }
 
 // Zion 使用材质透明度，库内几何裁切仅对第三方 FBX 植被开放。
@@ -1357,6 +1379,70 @@ const categoryTree: CategoryNode[] = [
   }
 ];
 
+function getLibraryCategory(nodeId: string) {
+  if (nodeId === "home") return "home";
+  if (getCharacterNavigationSelection(nodeId)) return "character";
+  if (getAnimationNavigationSelection(nodeId)) return "animation";
+
+  for (const category of categoryTree[0].children ?? []) {
+    if (typeof category === "string") continue;
+    if (category.id === nodeId || category.children?.some(child => typeof child !== "string" && child.id === nodeId)) {
+      return category.id;
+    }
+  }
+}
+
+type LibraryCategory = NonNullable<AssetRecord["topCategory"]>;
+
+const NAVIGATION_ASSET_TYPES: Record<string, string[]> = {
+  environment: ["3d", "3dplant", "surface", "decal", "atlas", "imperfection", "displacement", "hdri"],
+  character: ["suit", "monster", "npc", "weapon", "item"],
+  "3d-assets": ["3d"],
+  "3d-plants": ["3dplant"],
+  surfaces: ["surface"],
+  decals: ["decal"],
+  atlases: ["atlas"],
+  imperfections: ["imperfection"],
+  displacements: ["displacement"],
+  hdri: ["hdri"],
+  animation: ["animation"]
+};
+
+function mapNodeIdToAssetTypes(nodeId: string | null) {
+  if (!nodeId) return [];
+  const characterSelection = getCharacterNavigationSelection(nodeId);
+  if (characterSelection) return [characterSelection.family];
+  if (getAnimationNavigationSelection(nodeId)) return ["animation"];
+  if (nodeId.startsWith("fav-")) return [nodeId.slice(4)];
+  return NAVIGATION_ASSET_TYPES[nodeId] || [];
+}
+
+function isLibraryCategory(id: string): id is LibraryCategory {
+  return id === "environment" || id === "character" || id === "animation";
+}
+
+function matchesLibraryCategory(asset: AssetRecord, category: LibraryCategory) {
+  if (category === "character") return isCharacterAssetType(asset.assetType);
+  const recordedCategory = String(asset.topCategory || "").trim().toLowerCase();
+  return recordedCategory ? recordedCategory === category : NAVIGATION_ASSET_TYPES[category].includes(String(asset.assetType || "").trim().toLowerCase());
+}
+
+function buildLibraryCategoryOverview(allAssets: AssetRecord[], category: LibraryCategory, animationOptions: AnimationGameTagOption[]) {
+  const assets = allAssets.filter(asset => matchesLibraryCategory(asset, category) && !asset.meta?.componentView);
+  const branch = categoryTree[0].children?.find((node): node is CategoryNode => typeof node !== "string" && node.id === category);
+  const sections = (branch?.children ?? []).flatMap(node => {
+    if (typeof node === "string") return [];
+    const types = mapNodeIdToAssetTypes(node.id);
+    const matching = category === "animation"
+      ? assets.filter(asset => matchesAnimationNavigation(asset, node.id, animationOptions))
+      : assets.filter(asset => types.includes(String(asset.assetType || "").trim().toLowerCase()));
+    const paths = matching.map(asset => String(asset.previewImage || asset.preview || "").trim());
+    const cover = paths.find(path => path && !isAnimatedPreviewPath(path)) || paths.find(Boolean) || "";
+    return [{ id: node.id, label: node.label, cover }];
+  });
+  return { assets, sections };
+}
+
 const textureTypeOptions = [
   "Albedo",
   "Diffuse",
@@ -1379,6 +1465,7 @@ const textureTypeOptions = [
   "OpacityMaskRoughnessTranslucency",
   "Translucency",
   "AO",
+  "UV2AO",
   "Brush",
   "Bump",
   "Cavity",
@@ -1486,7 +1573,7 @@ function getAssetModelLodEntries(asset: AssetRecord | null) {
 }
 
 const standardAssetTagsByAssetType: Record<string, string[]> = {
-  "3d": ["Props", "Destructible", "Dressing", "ThirdParty", "Kits", "MEGA"],
+  "3d": ["Props", "Destructible", "Dressing", "ThirdParty", "Kits"],
   "3dplant": ["Tree", "Bush", "Grass", "Micro", "HeroFoliage", "ThirdParty"],
   surface: ["ThirdParty"],
   decal: ["ThirdParty"],
@@ -1515,6 +1602,7 @@ function getStandardAssetTagOptionsForAssetType(assetType: string) {
 // Legacy source presets now belong to ThirdParty; source tags stay in tags.
 function normalizeStandardAssetTag(value: string) {
   const tag = String(value || "").trim();
+  if (/^(mega|mask)$/i.test(tag)) return "";
   if (/^micro(?:[\s_-]*foliage)?$/i.test(tag)) return "Micro";
   return /^(megascans|pbrmax)$/i.test(tag) ? "ThirdParty" : tag;
 }
@@ -1566,7 +1654,6 @@ const standardAssetTagAssetTypeByTag: Record<string, string> = {
   Dressing: "3d",
   PBRMAX: "3d",
   Kits: "3d",
-  MEGA: "3d",
   Tree: "3dplant",
   Bush: "3dplant",
   Grass: "3dplant",
@@ -1596,7 +1683,6 @@ const standardAssetTagSearchAliases: Record<string, string[]> = {
   PBRMAX: ["pbrmax", "pbr max", "pbr-max", "pbr_max"],
   ThirdParty: ["thirdparty", "third party", "third-party", "third_party"],
   Kits: ["kits", "kit"],
-  MEGA: ["mega"],
   Tree: ["tree"],
   Bush: ["bush"],
   Grass: ["grass"],
@@ -1620,7 +1706,7 @@ function standardAssetTagMatchesSearchText(value: string, standardAssetTag: stri
   if (!haystack.trim()) {
     return false;
   }
-  if (standardAssetTag === "MEGA" && /(?:^| )mega ?scan(?: |$)/.test(haystack)) {
+  if (standardAssetTag === "Mask" && /(?:^| )mega ?scan(?: |$)/.test(haystack)) {
     return false;
   }
   const aliases = standardAssetTagSearchAliases[standardAssetTag] || [standardAssetTag];
@@ -1639,7 +1725,7 @@ function stripStandardAssetTagFolderPrefix(folderName: string, standardAssetTag:
   const lowerFolder = folder.toLowerCase();
   const lowerTag = tag.toLowerCase();
   const prefixCandidates = lowerTag === "kits" ? ["kits", "kit"] :
-    lowerTag === "micro" ? ["micro", "microfoliage"] : [lowerTag];
+    lowerTag === "micro" ? ["micro", "microfoliage"] : lowerTag === "mask" ? ["mask", "mega"] : [lowerTag];
   const matchedPrefix = prefixCandidates.find((prefix) => lowerFolder.startsWith(`${prefix}_`));
   if (!matchedPrefix) {
     return "";
@@ -2035,7 +2121,6 @@ const standardAssetTagDisplayLabels: Record<string, string> = {
   PBRMAX: "PBRMAX",
   ThirdParty: "第三方（ThirdParty）",
   Kits: "套件（Kits）",
-  MEGA: "巨构件（MEGA）",
   Tree: "树木（Tree）",
   Bush: "灌木（Bush）",
   Grass: "草（Grass）",
@@ -2054,7 +2139,6 @@ const subCategoryDisplayLabels: Record<string, string> = {
   PBRMAX: "PBRMAX",
   ThirdParty: "第三方",
   Kits: "套件（Kits）",
-  MEGA: "巨构件（MEGA）",
   Tree: "树",
   Bush: "灌木（Bush）",
   Grass: "草",
@@ -2122,15 +2206,13 @@ const appBrandIconPath = new URL("../../images/Icon_V2_256.png", import.meta.url
 
 function resolveExportStageLabel(percent: number, language: "zh" | "en" = "zh", target = "Unreal") {
   if (language === "en") {
-    if (percent < 20) return "Preparing import";
-    if (percent < 35) return "Checking plugin and environment";
+    if (percent < 35) return "Preparing import";
     if (percent < 55) return "Generating import manifest";
     if (percent < 75) return "Preparing and compressing assets";
     if (percent < 100) return `Importing into ${target}`;
     return "Import complete";
   }
-  if (percent < 20) return "准备导入任务";
-  if (percent < 35) return "检查插件与环境";
+  if (percent < 35) return "准备导入任务";
   if (percent < 55) return "生成导入清单";
   if (percent < 75) return "整理与压缩资产";
   if (percent < 100) return `${target} 导入中`;
@@ -3014,29 +3096,86 @@ const AssetCard = memo(({
   );
 });
 
-function OverviewAssetGrid({ assets, maxRows, children, fixedCharacters = false }: {
+function OverviewAssetGrid({ assets, maxRows, children, fixedCharacters = false, viewport, previewLoader }: {
   assets: AssetRecord[];
-  maxRows: number;
+  maxRows?: number;
   fixedCharacters?: boolean;
+  viewport?: AssetStageMetrics;
+  previewLoader?: PreviewLoader;
   children: (item: AssetGridItemLayout) => ReactNode;
 }) {
   const ref = useRef<HTMLElement>(null);
-  const [width, setWidth] = useState(0);
-  useEffect(() => {
+  const [{ width, top }, setBounds] = useState({ width: 0, top: 0 });
+  const virtual = Boolean(viewport);
+  useLayoutEffect(() => {
     const node = ref.current;
     if (!node) return;
-    const update = () => setWidth(node.clientWidth);
+    const stage = virtual ? node.closest<HTMLElement>(".asset-stage") : null;
+    const update = () => {
+      const width = node.clientWidth;
+      if (width <= 0) return;
+      const top = stage ? node.getBoundingClientRect().top - stage.getBoundingClientRect().top + stage.scrollTop : 0;
+      setBounds(previous => previous.width === width && previous.top === top ? previous : { width, top });
+    };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(node);
+    if (stage && node.parentElement) observer.observe(node.parentElement);
     return () => observer.disconnect();
-  }, []);
-  const layout = useMemo(() => buildAssetGridLayout(assets, width, false, 0, false, fixedCharacters, fixedCharacters ? 240 : undefined), [assets, width, fixedCharacters]);
-  const height = Math.min(layout.totalHeight, maxRows * (layout.cardHeight + layout.gap) - layout.gap);
+  }, [virtual]);
+  const layout = useMemo(() => buildAssetGridLayout(width ? assets : [], width, false, 0, false, fixedCharacters, fixedCharacters ? 240 : undefined), [assets, width, fixedCharacters]);
+  const height = maxRows === undefined ? layout.totalHeight : Math.max(0, Math.min(layout.totalHeight, maxRows * (layout.cardHeight + layout.gap) - layout.gap));
+  const viewportHeight = viewport?.viewportHeight ?? 0;
+  const scrollTop = (viewport?.scrollTop ?? 0) - top;
+  const items = virtual ? getVisibleAssetGridItems(layout.items, viewportHeight, scrollTop, layout.cardHeight) : layout.items.filter(item => item.y < height);
+  useLayoutEffect(() => {
+    if (!virtual || !previewLoader) return;
+    previewLoader.setViewport(getAssetGridItemsInRange(layout.items, scrollTop, scrollTop + viewportHeight)
+      .map(item => getAssetThumbnailSource(item.asset)));
+  }, [virtual, previewLoader, layout.items, scrollTop, viewportHeight]);
   return (
     <section ref={ref} className="asset-grid asset-grid-virtual overview-packed-grid" style={{ height, minHeight: 0 }}>
-      {width > 0 && layout.items.filter((item) => item.y < height).map(children)}
+      {width > 0 && items.map(children)}
     </section>
+  );
+}
+
+function LibraryCategoryOverview({ category, data, loader, t, scanning, labelFor, onOpenCategory, viewport, renderAsset }: {
+  category: LibraryCategory;
+  data: ReturnType<typeof buildLibraryCategoryOverview>;
+  loader: PreviewLoader;
+  t: (zh: string, en: string) => string;
+  scanning: boolean;
+  labelFor: (id: string, fallback: string) => string;
+  onOpenCategory: (id: string) => void;
+  viewport: AssetStageMetrics;
+  renderAsset: (item: AssetGridItemLayout) => ReactNode;
+}) {
+  const [seed] = useState(() => Math.floor(Math.random() * 2 ** 32));
+  const ordered = useMemo(() => buildStaggeredOrder(data.assets, seed), [data.assets, seed]);
+
+  return (
+    <div className={`all-overview-wrapper library-category-overview library-category-overview-${category}`}>
+      <section className="overview-section">
+        <h2 className="overview-section-title">{labelFor(category, category)}</h2>
+        <div className="library-category-tiles">
+          {data.sections.map(({ id, label, cover }) => (
+            <button key={id} type="button" className="library-category-tile" onClick={() => onOpenCategory(id)}>
+              <span className="library-category-art" aria-hidden="true">
+                <AssetThumbnail key={cover} sourcePath={cover} loader={loader} toUrl={getPreviewUrl}
+                  name="" cover={false} fallback={<Icon name={category === "environment" ? "cube" : "file"} />} />
+              </span>
+              <span className="library-category-caption">{labelFor(id, label)}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+      {ordered.length > 0 ? (
+        <OverviewAssetGrid assets={ordered} viewport={viewport} previewLoader={loader} fixedCharacters={category === "character"}>{renderAsset}</OverviewAssetGrid>
+      ) : (
+        <p className="overview-empty-hint">{scanning ? t("正在扫描资产…", "Scanning assets…") : t("该分类暂无资产", "No assets in this category")}</p>
+      )}
+    </div>
   );
 }
 
@@ -3490,7 +3629,7 @@ export function App() {
     expandedCategories, setExpandedCategories,
     recentAssetIds, setRecentAssetIds,
     recordAssetUsage
-  } = useAssetState();
+  } = useAssetState(getLibraryCategory);
   const [deletionPlan, setDeletionPlan] = useState<{ token: string; path: string; flat: boolean; fileCount: number; entries: Array<{ relativePath: string }> } | null>(null);
   const [characterUpdateTarget, setCharacterUpdateTarget] = useState<AssetRecord | null>(null);
   const [characterCollision, setCharacterCollision] = useState<{ asset: AssetRecord; paths: string[]; index: number } | null>(null);
@@ -3794,12 +3933,10 @@ export function App() {
       statusClearTimerRef.current = null;
     }
     const safeMsg = String(msg || "");
-    // Truncate long messages
-    const truncatedMsg = safeMsg.length > 80 ? safeMsg.substring(0, 77) + "..." : safeMsg;
-    setStatusText(truncatedMsg);
-    if (truncatedMsg && durationMs && durationMs > 0) {
+    setStatusText(safeMsg);
+    if (safeMsg && durationMs > 0) {
       statusClearTimerRef.current = window.setTimeout(() => {
-        setStatusText((currentMsg) => currentMsg === truncatedMsg ? "" : currentMsg);
+        setStatusText((currentMsg) => currentMsg === safeMsg ? "" : currentMsg);
         statusClearTimerRef.current = null;
       }, durationMs);
     }
@@ -3810,17 +3947,17 @@ export function App() {
   }, [showStatus]);
 
   // Keep export feedback independent from background scan updates and timers.
-  const [exportStatus, setExportStatus] = useState("");
+  const [exportFeedback, setExportFeedback] = useState<SidebarFeedback | null>(null);
   const exportStatusClearTimerRef = useRef<number | null>(null);
-  const showExportStatus = useCallback((msg: string, durationMs = 10000) => {
+  const showExportStatus = useCallback((text: string, durationMs = 10000, detail?: string) => {
     if (exportStatusClearTimerRef.current !== null) {
       window.clearTimeout(exportStatusClearTimerRef.current);
       exportStatusClearTimerRef.current = null;
     }
-    setExportStatus(String(msg || ""));
+    setExportFeedback({ text, detail });
     if (durationMs > 0) {
       exportStatusClearTimerRef.current = window.setTimeout(() => {
-        setExportStatus("");
+        setExportFeedback(null);
         exportStatusClearTimerRef.current = null;
       }, durationMs);
     }
@@ -3967,6 +4104,9 @@ export function App() {
     const updateMetrics = () => {
       const viewportWidth = node.clientWidth;
       const viewportHeight = node.clientHeight;
+      // Native window transitions can briefly remove layout. Keep the last
+      // visible rows and thumbnail subscriptions until a usable size returns.
+      if (viewportWidth <= 0 || viewportHeight <= 0) return;
       const scrollTop = node.scrollTop;
       const last = lastStageMetricsRef.current;
       if (viewportWidth === last.viewportWidth && viewportHeight === last.viewportHeight && scrollTop === last.scrollTop) {
@@ -3997,7 +4137,7 @@ export function App() {
     window.clearTimeout(gridScrollPlaceholderTimerRef.current);
   }, []);
 
-  const scanCompleteHideTimerRef = useRef<number | null>(null);
+  const [scanFeedback, setScanFeedback] = useState<SidebarFeedback | null>(null);
   const saveCompleteHideTimerRef = useRef<number | null>(null);
   const statusRef = useRef<string>("");
   const uiLanguage = settings.uiLanguage === "en" ? "en" : "zh";
@@ -4104,28 +4244,8 @@ export function App() {
     ? getCharacterCategoryDisplayLabel(characterContext.family, characterContext.category, uiLanguage)
     : characterContext.family === "all" ? t("角色", "Characters") : getAssetTypeLabel(characterContext.family) : "";
   const textSearch = useAssetSearch(characterContext ? catalogAssets : allAssets, search.text, search.tags);
-  const orderedAssets = useMemo(
-    // Keep the seeded order stable; the layout handles size-aware packing once.
-    () => {
-      const cards = expandCharacterCards(groupMonsterCards(buildStaggeredOrder(assets, staggerOrderSeedRef.current)));
-      const filtered = characterContext ? filterCharacterCards(cards, characterFilters, textSearch.ids) : cards;
-      if (activeMenu !== "character" || characterFilters.display !== "all") return filtered;
-      const familyOrder = new Map(["suit", "monster", "npc", "weapon", "item"].map((family, index) => [family, index]));
-      return filtered.map((asset, index) => ({ asset, index })).sort((a, b) =>
-        (familyOrder.get(a.asset.assetType) ?? familyOrder.size) - (familyOrder.get(b.asset.assetType) ?? familyOrder.size) || a.index - b.index
-      ).map(item => item.asset);
-    },
-    [assets, activeMenu, characterContext, characterFilters, textSearch.ids]
-  );
-
   // Data for All categories overview page
-  const allOverviewCategoryList = useMemo(() => activeMenu === "character" ? [
-    { id: "character-suit", label: t("套装", "Outfits"), assetTypes: ["suit"], icon: "file" },
-    { id: "character-monster", label: t("怪物", "Monsters"), assetTypes: ["monster"], icon: "file" },
-    { id: "character-npc", label: "NPC", assetTypes: ["npc"], icon: "file" },
-    { id: "character-weapon", label: t("武器", "Weapons"), assetTypes: ["weapon"], icon: "file" },
-    { id: "character-item", label: t("玩法物件", "Gameplay Item"), assetTypes: ["item"], icon: "file" }
-  ] : [
+  const allOverviewCategoryList = useMemo(() => [
     { id: "3d-assets", label: t("3D 资产", "3D Assets"), assetTypes: ["3d"], icon: "cube" },
     { id: "3d-plants", label: t("3D 植物", "3D Plants"), assetTypes: ["3dplant"], icon: "leaf" },
     { id: "surfaces", label: t("表面材质", "Surfaces"), assetTypes: ["surface"], icon: "layer" },
@@ -4135,7 +4255,7 @@ export function App() {
     { id: "displacements", label: t("置换贴图", "Displacements"), assetTypes: ["displacement"], icon: "layer" },
     { id: "hdri", label: "HDRI", assetTypes: ["hdri"], icon: "image-preview" },
     { id: "animation", label: t("动画", "Animation"), assetTypes: ["animation"], icon: "file" }
-  ], [t, activeMenu]);
+  ], [t]);
 
   const recentAssets = useMemo(() => {
     const assetById = new Map(allAssets.map((a) => [a.id, a]));
@@ -4144,12 +4264,13 @@ export function App() {
 
   const allCategoryAssetMap = useMemo(() => {
     const map: Record<string, AssetRecord[]> = {};
+    if (activeMenu !== "home") return map;
     allOverviewCategoryList.forEach((cat) => {
       const types = cat.assetTypes.map((t) => t.toLowerCase());
       map[cat.id] = allAssets.filter((a) => types.includes(String(a.assetType || "").trim().toLowerCase()));
     });
     return map;
-  }, [allAssets, allOverviewCategoryList]);
+  }, [activeMenu, allAssets, allOverviewCategoryList]);
 
   // The overview uses the full library; active searches must show the filtered grid.
   const hasActiveSearch = Boolean(
@@ -4165,15 +4286,33 @@ export function App() {
     search.standardAssetTag !== "all" ||
     (search.favoriteState || (search.onlyFavorites ? "fav" : "all")) !== "all"
   );
-  const isCharacterOverviewView = activeMenu === "character" && !search.text.trim() && !search.tags.length
-    && characterFilters.display === "parents" && characterFilters.maturity === "all";
-  const isAllOverviewView = (activeMenu === "home" && !hasActiveSearch) || isCharacterOverviewView;
+  const libraryCategory = isLibraryCategory(activeMenu) ? activeMenu : null;
+  const hasCategoryFilters = characterContext
+    ? Boolean(search.text.trim() || search.tags.length || characterFilters.display !== "parents" || activeCharacterFilterFields.some(field => field.key !== "display"))
+    : hasActiveSearch;
+  const isLibraryCategoryOverview = Boolean(libraryCategory && !hasCategoryFilters);
+  const libraryCategoryOverview = useMemo(() => libraryCategory && isLibraryCategoryOverview
+    ? buildLibraryCategoryOverview(allAssets, libraryCategory, animationNavigationOptions) : null,
+    [libraryCategory, isLibraryCategoryOverview, allAssets, animationNavigationOptions]);
+  const isAllOverviewView = activeMenu === "home" && !hasActiveSearch;
+  const isOverviewView = isAllOverviewView || isLibraryCategoryOverview;
+
+  const orderedAssets = useMemo(() => {
+    if (isLibraryCategoryOverview) return [];
+    const cards = expandCharacterCards(groupMonsterCards(buildStaggeredOrder(assets, staggerOrderSeedRef.current)));
+    const filtered = characterContext ? filterCharacterCards(cards, characterFilters, textSearch.ids) : cards;
+    if (activeMenu !== "character" || characterFilters.display !== "all") return filtered;
+    const familyOrder = new Map(["suit", "monster", "npc", "weapon", "item"].map((family, index) => [family, index]));
+    return filtered.map((asset, index) => ({ asset, index })).sort((a, b) =>
+      (familyOrder.get(a.asset.assetType) ?? familyOrder.size) - (familyOrder.get(b.asset.assetType) ?? familyOrder.size) || a.index - b.index
+    ).map(item => item.asset);
+  }, [assets, activeMenu, characterContext, characterFilters, textSearch.ids, isLibraryCategoryOverview]);
 
   const compactAssetGrid = Boolean(selectedAssetId);
   const [collapsedMonsterGroups, setCollapsedMonsterGroups] = useState<Set<string>>(new Set());
   const hasMonsterVariantGrid = Boolean(characterContext && orderedAssets.some(asset => asset.assetType === 'monster' && !asset.meta?.componentView));
-  const isAnimationGrid = activeMenu === "animation" || Boolean(getAnimationNavigationSelection(activeMenu))
-    || (orderedAssets.length > 0 && orderedAssets.every(asset => asset.assetType === "animation"));
+  const isAnimationGrid = !isLibraryCategoryOverview && (activeMenu === "animation" || Boolean(getAnimationNavigationSelection(activeMenu))
+    || (orderedAssets.length > 0 && orderedAssets.every(asset => asset.assetType === "animation")));
   const [assetCardScale, setAssetCardScale] = useState(readAssetCardScale);
   const cardScaleScrollRatioRef = useRef<number | null>(null);
   useEffect(() => {
@@ -4287,31 +4426,43 @@ export function App() {
   useEffect(() => bridge.onCharacterDeleted?.(payload => characterDeletedRef.current(payload)), [bridge]);
 
   useLayoutEffect(() => {
+    if (isLibraryCategoryOverview) return;
     const top = assetStageMetrics.scrollTop;
     const bottom = top + assetStageMetrics.viewportHeight;
     previewLoader.setViewport(isAllOverviewView ? [] : assetGridLayout.visibleItems
       .filter(item => item.y + item.height > top && item.y < bottom)
       .map(item => getAssetThumbnailSource(item.asset)));
-  }, [assetGridLayout.visibleItems, assetStageMetrics.scrollTop, assetStageMetrics.viewportHeight, isAllOverviewView, previewLoader]);
+  }, [assetGridLayout.visibleItems, assetStageMetrics.scrollTop, assetStageMetrics.viewportHeight, isAllOverviewView, isLibraryCategoryOverview, previewLoader]);
+
+  useLayoutEffect(() => {
+    const syncActivity = () => previewLoader.setPaused(!isWindowForeground());
+    const unsubscribe = subscribeToWindowForeground(syncActivity);
+    syncActivity();
+    return unsubscribe;
+  }, [previewLoader]);
 
   useEffect(() => {
-    if (isAllOverviewView) {
-      // Overview cards subscribe directly; main-grid coordinates do not apply.
-      previewLoader.setPrefetch([]);
-      return;
-    }
-    const velocity = scrollVelocityRef.current;
-    const factor = velocity >= 3 ? 4 : velocity >= 2 ? 3 : velocity >= 1 ? 2 : 1;
-    const distance = Math.max(assetGridLayout.cardHeight * 5, assetStageMetrics.viewportHeight) * factor;
-    const top = assetStageMetrics.scrollTop;
-    const bottom = top + assetStageMetrics.viewportHeight;
-    const down = scrollDirectionRef.current === "down";
-    const forward = getAssetGridItemsInRange(assetGridLayout.items, down ? bottom : Math.max(0, top - distance), down ? bottom + distance : top);
-    const backward = getAssetGridItemsInRange(assetGridLayout.items, down ? Math.max(0, top - distance / 2) : bottom, down ? top : bottom + distance / 2);
-    const paths = [...visibleAssets, ...forward.map(item => item.asset), ...backward.map(item => item.asset)]
-      .map(getAssetThumbnailSource).filter(path => path && !/\.fbx$/i.test(path));
-    previewLoader.setPrefetch([...new Set(paths)].slice(0, 220 * factor));
-  }, [assetGridLayout.cardHeight, assetGridLayout.items, assetStageMetrics.scrollTop, assetStageMetrics.viewportHeight, isAllOverviewView, previewLoader, visibleAssets]);
+    const updatePrefetch = () => {
+      if (!isWindowForeground() || isOverviewView) {
+        previewLoader.setPrefetch([]);
+        return;
+      }
+      const velocity = scrollVelocityRef.current;
+      const factor = velocity >= 3 ? 4 : velocity >= 2 ? 3 : velocity >= 1 ? 2 : 1;
+      const distance = Math.max(assetGridLayout.cardHeight * 5, assetStageMetrics.viewportHeight) * factor;
+      const top = assetStageMetrics.scrollTop;
+      const bottom = top + assetStageMetrics.viewportHeight;
+      const down = scrollDirectionRef.current === "down";
+      const forward = getAssetGridItemsInRange(assetGridLayout.items, down ? bottom : Math.max(0, top - distance), down ? bottom + distance : top);
+      const backward = getAssetGridItemsInRange(assetGridLayout.items, down ? Math.max(0, top - distance / 2) : bottom, down ? top : bottom + distance / 2);
+      const paths = [...visibleAssets, ...forward.map(item => item.asset), ...backward.map(item => item.asset)]
+        .map(getAssetThumbnailSource).filter(path => path && !/\.fbx$/i.test(path));
+      previewLoader.setPrefetch([...new Set(paths)].slice(0, 220 * factor));
+    };
+    const unsubscribe = subscribeToWindowForeground(updatePrefetch);
+    updatePrefetch();
+    return unsubscribe;
+  }, [assetGridLayout.cardHeight, assetGridLayout.items, assetStageMetrics.scrollTop, assetStageMetrics.viewportHeight, isOverviewView, previewLoader, visibleAssets]);
 
   useEffect(() => () => { previewLoader.setPrefetch([]); previewLoader.setViewport([]); }, [previewLoader]);
 
@@ -4373,17 +4524,8 @@ export function App() {
       else if (getCharacterNavigationSelection(activeMenu)) {
         filtered = filtered.filter((asset) => matchesCharacterNavigation(asset, activeMenu));
       }
-      else if (activeMenu === "environment" || activeMenu === "character" || activeMenu === "animation") {
-        const environmentTypes = mapNodeIdToAssetTypes("environment");
-        filtered = filtered.filter((asset) => {
-          const topCategory = String(asset.topCategory || "").trim().toLowerCase();
-          if (topCategory) {
-            return topCategory === activeMenu;
-          }
-          // Backward compatibility for assets indexed before topCategory existed.
-          return activeMenu === "environment"
-            && environmentTypes.includes(String(asset.assetType || "").trim().toLowerCase());
-        });
+      else if (isLibraryCategory(activeMenu)) {
+        filtered = filtered.filter(asset => matchesLibraryCategory(asset, activeMenu));
       }
       else if (getAnimationNavigationSelection(activeMenu)) {
         filtered = filtered.filter(asset => matchesAnimationNavigation(asset, activeMenu, animationNavigationOptions));
@@ -4491,11 +4633,8 @@ export function App() {
       return;
     }
     let disposed = false;
-    let inFlight = false;
     setBlenderStatus({ installed: false, connected: false });
     const refresh = async () => {
-      if (inFlight) return;
-      inFlight = true;
       try {
         if (typeof bridge.getBlenderStatus !== "function") {
           if (!disposed) setBlenderStatus({ installed: false, connected: false, message: t("请重启 AssetHive 以加载 Blender 插件接口", "Restart AssetHive to load Blender support") });
@@ -4505,11 +4644,10 @@ export function App() {
         if (!disposed) setBlenderStatus(result);
       } catch (error) {
         if (!disposed) setBlenderStatus({ installed: false, connected: false, message: String(error) });
-      } finally { inFlight = false; }
+      }
     };
-    void refresh();
-    const timer = window.setInterval(() => { void refresh(); }, 4000);
-    return () => { disposed = true; window.clearInterval(timer); };
+    const stop = pollWindowStatus(refresh, 4000);
+    return () => { disposed = true; stop(); };
   }, [bridge, bridgeAvailable, isBlenderTarget, settings.blenderExecutablePath, blenderStatusRevision, t]);
 
   // 3DCoat 走内置 AppLink：没有可安装的插件，只需要程序与数据目录都有效。
@@ -4531,10 +4669,7 @@ export function App() {
   useEffect(() => {
     if (!isThreeDCoatTarget || !bridgeAvailable) return;
     let disposed = false;
-    let inFlight = false;
     const refresh = async () => {
-      if (disposed || inFlight) return;
-      inFlight = true;
       try {
         const result = await bridge.getThreeDCoatStatus?.();
         if (!disposed && result?.ok) {
@@ -4545,11 +4680,9 @@ export function App() {
           });
         }
       } catch { /* Keep the previous status; the timer retries. */ }
-      finally { inFlight = false; }
     };
-    void refresh();
-    const timer = window.setInterval(() => { void refresh(); }, 5000);
-    return () => { disposed = true; window.clearInterval(timer); };
+    const stop = pollWindowStatus(refresh, 5000);
+    return () => { disposed = true; stop(); };
   }, [bridge, bridgeAvailable, isThreeDCoatTarget, threeDCoatStatusRevision]);
 
   const favoriteDirtyRef = useRef(false);
@@ -4724,7 +4857,7 @@ export function App() {
     const presets = getStandardAssetTagOptions(assetType);
     if (presets.length === 0) return [];
     const present = new Set(parseTagsText(tagsText).map((tag) =>
-      normalizeStandardAssetTag(tag) === "Micro" ? "micro" : tag.toLowerCase()));
+      normalizeStandardAssetTag(tag) === "Micro" ? normalizeStandardAssetTag(tag).toLowerCase() : tag.toLowerCase()));
     const selected = presets.filter((preset) => present.has(preset.toLowerCase()));
     if (selected.length > 0) return selected;
     return presets.filter((preset) => preset === "ThirdParty"
@@ -4800,40 +4933,6 @@ export function App() {
     return String(identity?.sourceAssetId || "").trim();
   }
 
-
-  function mapNodeIdToAssetTypes(nodeId: string | null) {
-    if (!nodeId) {
-      return [];
-    }
-    const characterSelection = getCharacterNavigationSelection(nodeId);
-    if (getAnimationNavigationSelection(nodeId)) return ["animation"];
-    if (characterSelection) return [characterSelection.family];
-    if (nodeId.startsWith("fav-")) {
-      return [nodeId.replace("fav-", "")];
-    }
-    const table: Record<string, string[]> = {
-      environment: ["3d", "3dplant", "surface", "decal", "atlas", "imperfection", "displacement", "hdri"],
-      character: ["suit", "monster", "npc", "weapon", "item"],
-      "character-suit": ["suit"],
-      "character-monster": ["monster"],
-      "character-npc": ["npc"],
-      "character-weapon": ["weapon"],
-      "3d-assets": ["3d"],
-      "3d-plants": ["3dplant"],
-      surfaces: ["surface"],
-      decals: ["decal"],
-      atlases: ["atlas"],
-      imperfections: ["imperfection"],
-      displacements: ["displacement"],
-      hdri: ["hdri"],
-      animation: ["animation"],
-      "animation-hero": ["animation"],
-      "animation-monster": ["animation"],
-      "animation-npc": ["animation"],
-      "fav-animation": ["animation"]
-    };
-    return table[nodeId] || [];
-  }
 
   const [selectedAssetDetails, setSelectedAssetDetails] = useState<AssetRecord | null>(null);
   const [selectedComponentMesh, setSelectedComponentMesh] = useState<{ assetId: string; kind: 'staticMesh' | 'skeletalMesh' } | null>(null);
@@ -4991,7 +5090,7 @@ export function App() {
   const overwriteOptions = [
     { value: "material", label: t("材质实例", "Material instances") },
     { value: "texture", label: t("纹理", "Textures") },
-    { value: "mesh", label: t("网格体", "Meshes") }
+    { value: "mesh", label: t("网格体（静态/骨骼）", "Meshes (static / skeletal)") }
   ] as const;
   const meshOverwritePolicy = settings.meshOverwritePolicy;
   const [savingOverwritePolicy, setSavingOverwritePolicy] = useState(false);
@@ -5042,11 +5141,13 @@ export function App() {
   const showDecalExportModeSelect = showUnrealExportOptions && detailExportAssetIds.length > 0
     && detailExportAssetIds.every((id) => allAssets.find((asset) => asset.id === id)?.assetType === "decal");
   const exportPlants = detailExportAssetIds.map((id) => allAssets.find((asset) => asset.id === id))
-    .filter((asset) => asset?.assetType === "3dplant" && supportsPlantExportMode(asset));
+    .filter((asset) => asset?.assetType === "3dplant" && (supportsPlantExportMode(asset) || isNaniteFoliageAsset(asset)));
   const showPlantExportModeSelect = showUnrealExportOptions && exportPlants.length > 0;
   const canSelectOpaqueMode = exportPlants.some(canSelectPlantExportMode);
-  const effectivePlantMode = showPlantExportModeSelect && !canSelectOpaqueMode && currentPlantExportMode === "opaque" ? "lod" : currentPlantExportMode;
-  const plantExportModeOptions = PLANT_EXPORT_MODE_OPTIONS.filter((option) => option.value !== "opaque" || canSelectOpaqueMode)
+  const allNaniteFoliage = exportPlants.length > 0 && exportPlants.every(isNaniteFoliageAsset);
+  const allNaniteOnly = allNaniteFoliage && exportPlants.every(asset => !plantBranches(asset).standard);
+  const effectivePlantMode = resolvePlantModeForAssets(exportPlants, currentPlantExportMode);
+  const plantExportModeOptions = PLANT_EXPORT_MODE_OPTIONS.filter(option => option.value === "naniteFoliage" ? allNaniteFoliage : !allNaniteOnly && (option.value !== "opaque" || canSelectOpaqueMode))
     .map((option) => ({ value: option.value, label: option.value === "lod" && !canSelectOpaqueMode
       ? t("原始模型（默认）", "Original mesh (default)") : t(option.zh, option.en) }));
   // 合成风与植被导出方式同属导出侧选项：只要所选里有原始资产为 FBX 的植被（3D Plants）就展示；
@@ -5307,7 +5408,6 @@ export function App() {
       return;
     }
     setBusy(true);
-    showStatus(t("扫描中...", "Scanning..."), 0);
     try {
       const index = await bridge.rescanAssets();
       setAllAssets(index);
@@ -5316,7 +5416,6 @@ export function App() {
       // if (index.length > 0) {
       //   setSelectedAssetId((prev) => prev ?? index[0].id);
       // }
-      showStatus(t(`扫描完成，共 ${index.length} 个资产`, `Scan complete: ${index.length} assets`), 2500);
     } catch (error) {
       showStatus(t(`扫描失败：${String(error)}`, `Scan failed: ${String(error)}`), 10000);
     } finally {
@@ -5335,13 +5434,18 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    let starting = true;
     const assetSync = createAssetIndexSync({
-      readIndex: () => bridge.getAssetIndex(), update: setAllAssets,
+      readIndex: () => bridge.getAssetIndex({ preferMemory: true }), update: setAllAssets,
       schedule: (callback, delay) => window.setTimeout(callback, delay),
       cancel: timer => window.clearTimeout(timer)
     });
-    // Subscribe before the first asynchronous read, including version loading.
+    // Subscribe before the first asynchronous read.
     const unsubscribe = bridgeAvailable ? bridge.onAssetChange(assetSync.onChange) : null;
+    // The initial snapshot also needs to reach a minimized or unfocused window.
+    const syncActivity = () => assetSync.setDeferred(!starting && !isWindowForeground());
+    const unsubscribeActivity = subscribeToWindowForeground(syncActivity);
+    syncActivity();
 
     async function init() {
       if (!bridgeAvailable) {
@@ -5362,22 +5466,25 @@ export function App() {
         await assetSync.refresh();
         if (!active) return;
         setStatus("");
-        if (bridge.getAppVersion) {
-          const versionResult = await bridge.getAppVersion();
-          if (!active) return;
-          if (versionResult?.ok && versionResult.version) {
-            setAppVersion(String(versionResult.version));
-          }
-        }
       } finally {
-        if (active) setSettingsLoaded(true);
+        if (active) {
+          starting = false;
+          syncActivity();
+          setSettingsLoaded(true);
+        }
       }
     }
 
     init();
+    if (bridgeAvailable && bridge.getAppVersion) {
+      void bridge.getAppVersion().then(result => {
+        if (active && result?.ok && result.version) setAppVersion(String(result.version));
+      }).catch(() => {});
+    }
 
     return () => {
       active = false;
+      unsubscribeActivity();
       assetSync.dispose();
       if (unsubscribe) {
         unsubscribe();
@@ -5446,56 +5553,51 @@ export function App() {
     if (!bridgeAvailable || typeof bridge.onScanProgress !== "function") {
       return;
     }
-    const unsubscribe = bridge.onScanProgress((payload) => {
+    setScanFeedback(null);
+    type ScanProgress = Parameters<Parameters<NonNullable<typeof bridge.onScanProgress>>[0]>[0];
+    let pendingProgress: { payload: ScanProgress; receivedAt: number } | undefined;
+    let feedbackTimer: number | undefined;
+    const applyProgress = (payload: ScanProgress, receivedAt: number) => {
       const active = Boolean(payload?.active);
       const progress = Math.max(0, Math.min(100, Number(payload?.progress) || 0));
       setScanning(active);
       setScanProgress(progress);
+      window.clearTimeout(feedbackTimer);
+      setScanFeedback(null);
       if (active) {
-        if (scanCompleteHideTimerRef.current) {
-          window.clearTimeout(scanCompleteHideTimerRef.current);
-          scanCompleteHideTimerRef.current = null;
-        }
         const phase = String(payload?.phase || "scan");
         const processed = Math.max(0, Number(payload?.processed) || 0);
         const total = Math.max(0, Number(payload?.total) || 0);
         const detail = total > 0 ? ` ${processed}/${total}` : "";
         const message = String(payload?.message || "").trim();
         setScanHint((message || `${phase}${detail}`).trim());
-        // 扫描阶段的具体动作直接显示在左下角，避免大库首扫时只有“扫描中”。
-        setStatus(message || (uiLanguage === "en" ? "Scanning" : "扫描中"));
-      } else if (["failed", "partial"].includes(String(payload?.phase || ""))) {
-        if (scanCompleteHideTimerRef.current) {
-          window.clearTimeout(scanCompleteHideTimerRef.current);
-          scanCompleteHideTimerRef.current = null;
-        }
-        setScanHint(String(payload?.message || ""));
-        setStatus(payload?.phase === "partial"
-          ? (uiLanguage === "en" ? "Scan incomplete · see logs" : "扫描未完整 · 查看日志")
-          : (uiLanguage === "en" ? "Scan failed" : "扫描失败"));
-      } else if (progress >= 100) {
-        setScanHint("");
-        const completeLabel = uiLanguage === "en" ? "Scan complete" : "扫描完成";
-        setStatus(completeLabel);
-        if (scanCompleteHideTimerRef.current) {
-          window.clearTimeout(scanCompleteHideTimerRef.current);
-        }
-        scanCompleteHideTimerRef.current = window.setTimeout(() => {
-          if (statusRef.current === completeLabel) {
-            setStatus("");
-          }
-          scanCompleteHideTimerRef.current = null;
-        }, 5000);
+        return;
       }
+      setScanHint("");
+      const feedback = getScanFeedback({ ...payload, progress }, Date.now() - receivedAt, t);
+      if (!feedback) return;
+      setScanFeedback(feedback);
+      feedbackTimer = window.setTimeout(() => setScanFeedback(null), feedback.durationMs);
+    };
+    const unsubscribe = bridge.onScanProgress(payload => {
+      const receivedAt = Date.now();
+      if (payload.startup || isWindowForeground()) {
+        pendingProgress = undefined;
+        applyProgress(payload, receivedAt);
+      } else pendingProgress = { payload, receivedAt };
+    });
+    const unsubscribeActivity = subscribeToWindowForeground(() => {
+      if (!isWindowForeground() || !pendingProgress) return;
+      const progress = pendingProgress;
+      pendingProgress = undefined;
+      applyProgress(progress.payload, progress.receivedAt);
     });
     return () => {
-      if (scanCompleteHideTimerRef.current) {
-        window.clearTimeout(scanCompleteHideTimerRef.current);
-        scanCompleteHideTimerRef.current = null;
-      }
+      unsubscribeActivity();
+      window.clearTimeout(feedbackTimer);
       unsubscribe();
     };
-  }, [bridge, bridgeAvailable, uiLanguage, setStatus, setScanHint, setScanProgress, setScanning]);
+  }, [bridge, bridgeAvailable, t, setScanHint, setScanProgress, setScanning]);
 
   const clearSavingProgress = useCallback((assetId: string) => {
     const key = String(assetId || "").trim();
@@ -5875,7 +5977,7 @@ export function App() {
     const stage = event.currentTarget;
     const direction = event.key as GridDirection;
     const stageRect = stage.getBoundingClientRect();
-    const items = isAllOverviewView
+    const items = isOverviewView
       ? Array.from(stage.querySelectorAll<HTMLElement>(".asset-card")).map((element) => {
         const rect = element.getBoundingClientRect();
         return { id: element.dataset.assetId || element.id.slice("asset-card-".length), variantId: element.dataset.variantId, element, x: rect.left - stageRect.left, y: rect.top - stageRect.top + stage.scrollTop, width: rect.width, height: rect.height };
@@ -6026,21 +6128,14 @@ export function App() {
   useEffect(() => {
     if (!selectedSuitOwnerId || !unrealConnected || suitExportAssetIds || !bridge.getSuitUnrealStatus) return;
     let disposed = false;
-    let running = false;
     const check = async () => {
-      if (running || disposed) return;
-      running = true;
       try {
         const reply = await bridge.getSuitUnrealStatus(selectedSuitOwnerId);
         if (!disposed && reply.ok && reply.changed) await refreshAssetFromDisk(selectedAssetIdRef.current || selectedSuitOwnerId);
       } catch { /* Offline editors retain the last confirmed receipt. */ }
-      finally { running = false; }
     };
-    void check();
-    const timer = window.setInterval(() => { void check(); }, 15000);
-    const onFocus = () => { void check(); };
-    window.addEventListener('focus', onFocus);
-    return () => { disposed = true; window.clearInterval(timer); window.removeEventListener('focus', onFocus); };
+    const stop = pollWindowStatus(check, 15000);
+    return () => { disposed = true; stop(); };
   }, [selectedSuitOwnerId, unrealConnected, suitExportAssetIds, bridge, refreshAssetFromDisk]);
   async function runImport(assetIds: string[]) {
     if (savingOverwritePolicy && !isBlenderTarget && !isThreeDCoatTarget) return;
@@ -6106,23 +6201,12 @@ export function App() {
           meshOverwritePolicy,
           blenderDecimationRatio: currentBlenderDecimationRatio,
           decalExportMode: currentDecalExportMode,
-          plantExportMode: currentPlantExportMode === "opaque" && assetIds.every(id =>
-            !canSelectPlantExportMode(allAssets.find(asset => asset.id === id))) ? "lod" : currentPlantExportMode,
+          plantExportMode: resolvePlantModeForAssets(assetIds.map(id => allAssets.find(asset => asset.id === id)), currentPlantExportMode),
           plantSyntheticWind: currentPlantSyntheticWind
         }
       });
-      if (result.ok) {
-        const pluginHint = result.pluginState?.copied ? "AssetHive plugin was auto-installed to project" : result.pluginState?.reason || "Using existing plugin";
-        const logHint = result.logFile ? t(`，日志：${result.logFile}`, `, log: ${result.logFile}`) : "";
-        const sentHint = /已发送到 Unreal/i.test(String(result.message || "")) ? t("已发送到 Unreal，导入进度请在引擎内查看", "Sent to Unreal. Check import progress in the editor") : t("导入完成", "Import complete");
-        const exportIssues = result.results?.filter(item => item.status !== "success")
-          .map(item => `${item.name}：${item.message}`).join("；");
-        showExportStatus(result.partial
-          ? `${t("部分资产未导出", "Some assets were not exported")}${exportIssues ? `：${exportIssues}` : ""}${logHint}`
-          : isBlenderTarget ? t("Blender 导入完成", "Blender import complete") : `${sentHint}：${result.jobFile || ""}，${pluginHint}${logHint}`, result.partial ? 10000 : 4000);
-      } else {
-        showExportStatus(result.message, 10000);
-      }
+      const feedback = getEngineImportFeedback(result, isBlenderTarget, t);
+      showExportStatus(feedback.text, feedback.durationMs, feedback.detail);
     } catch (error) {
       showExportStatus(t(`导入失败：${String(error)}`, `Import failed: ${String(error)}`), 10000);
     } finally {
@@ -6441,15 +6525,11 @@ export function App() {
   }
 
   useEffect(() => {
-    void refreshPluginStatus();
     // 插件状态没有事件源：迁移插件位置、切换项目、插件目录瞬间不可见，都可能让某一次
     // 检查得到 false，而 canExportToUnreal 直接由它控制（false 即导入入口禁用）。
     // 没有自愈路径时只能重启应用才能恢复，因此这里低频重新确认（两次文件存在性检查 +
     // 一次项目文件读取，代价可忽略）。
-    const timer = window.setInterval(() => {
-      void refreshPluginStatus();
-    }, 8000);
-    return () => window.clearInterval(timer);
+    return pollWindowStatus(() => refreshPluginStatus(), 8000);
   }, [refreshPluginStatus, settings.unrealEditorPath, settings.unrealProjectPath, unrealConnected, unrealConnectedTargetName]);
 
   useEffect(() => {
@@ -6460,10 +6540,7 @@ export function App() {
       return;
     }
     let disposed = false;
-    let inFlight = false;
     const updateConnectionStatus = async () => {
-      if (inFlight) return;
-      inFlight = true;
       try {
         const result = await bridge.getUnrealConnectionStatus();
         if (disposed) {
@@ -6480,17 +6557,12 @@ export function App() {
           setUnrealConnectedTargetName("");
           setUnrealConnectionMessage(t("连接状态读取失败，将自动重试", "Could not read connection status. Retrying automatically"));
         }
-      } finally {
-        inFlight = false;
       }
     };
-    void updateConnectionStatus();
-    const timer = window.setInterval(() => {
-      void updateConnectionStatus();
-    }, 4000);
+    const stop = pollWindowStatus(updateConnectionStatus, 4000);
     return () => {
       disposed = true;
-      window.clearInterval(timer);
+      stop();
     };
   }, [bridge, bridgeAvailable, settings.unrealProjectPath, settings.unrealEditorPath, setUnrealConnected, setUnrealConnectedTargetName, setUnrealConnectionMessage, t]);
 
@@ -6887,7 +6959,7 @@ export function App() {
         return;
       }
     } else {
-      picked = await pickFileByInput(isAnimationAssetImportType(editForm.assetType) ? ".fbx" : ".fbx,.st9");
+      picked = await pickFileByInput(isAnimationAssetImportType(editForm.assetType) ? ".fbx" : ".fbx,.st9,.usda");
     }
     if (picked && !isModelFileAcceptedForType(picked, editForm.assetType)) {
       showStatus(t(`${getImportFileSlotPhrase(editForm.assetType, modelType)} 不支持该格式（允许：${formatAcceptedModelExts(editForm.assetType)}）`, `Unsupported format for ${getImportFileSlotPhrase(editForm.assetType, modelType)} (allowed: ${formatAcceptedModelExts(editForm.assetType)})`), 10000);
@@ -7075,6 +7147,18 @@ export function App() {
     };
   }
 
+  function ensureMaskTextureEntries(entries: TextureEntry[]) {
+    const result = [...entries];
+    for (const areaId of getTextureAreaIdList(entries)) {
+      for (const type of ["Diffuse", "Normal", "ORM", "Mask", "UV2AO"]) {
+        if (!result.some(entry => (entry.areaId || 1) === areaId && entry.textureType === type)) {
+          result.push(makeTextureEntry(type, "", areaId));
+        }
+      }
+    }
+    return result;
+  }
+
   function removeImportModelSlot(modelType: string) {
     setImportForm((prev) => {
       const nextSlots = { ...prev.modelSlots };
@@ -7160,7 +7244,7 @@ export function App() {
       return {
         ...prev,
         normalMapFormats: { ...prev.normalMapFormats, [nextAreaId]: prev.normalMapFormats[1] || prev.normalMapFormat },
-        textureEntries: [...prev.textureEntries, ...defaultTextureTypes.map((textureType) => makeTextureEntry(textureType, "", nextAreaId))]
+        textureEntries: [...prev.textureEntries, ...(prev.assetType === "3d" && prev.textureGroupMode === "channel" ? ["Diffuse", "Normal", "ORM", "Mask", "UV2AO"] : defaultTextureTypes).map((textureType) => makeTextureEntry(textureType, "", nextAreaId))]
       };
     });
   }
@@ -7172,7 +7256,7 @@ export function App() {
       return {
         ...prev,
         normalMapFormats: { ...prev.normalMapFormats, [nextAreaId]: prev.normalMapFormats[1] || prev.normalMapFormat },
-        textureEntries: [...prev.textureEntries, ...defaultTextureTypes.map((textureType) => makeTextureEntry(textureType, "", nextAreaId))]
+        textureEntries: [...prev.textureEntries, ...(prev.assetType === "3d" && prev.textureGroupMode === "channel" ? ["Diffuse", "Normal", "ORM", "Mask", "UV2AO"] : defaultTextureTypes).map((textureType) => makeTextureEntry(textureType, "", nextAreaId))]
       };
     });
   }
@@ -7201,6 +7285,7 @@ export function App() {
         ...prev,
         textureEntries: reindexedEntries,
         materialNames: reindexTextureAreaValues(prev.materialNames, filtered, ""),
+        maskGroups: reindexTextureAreaValues(prev.maskGroups, filtered, defaultMaskGroup()),
         normalMapFormats: nextNormalMapFormats
       };
     });
@@ -7216,6 +7301,7 @@ export function App() {
         ...prev,
         textureEntries: reindexedEntries,
         materialNames: reindexTextureAreaValues(prev.materialNames, filtered, ""),
+        maskGroups: reindexTextureAreaValues(prev.maskGroups, filtered, defaultMaskGroup()),
         normalMapFormats: nextNormalMapFormats
       };
     });
@@ -7464,7 +7550,7 @@ export function App() {
     }
     const presets = getStandardAssetTagOptions(editForm.assetType);
     const presetKeys = new Set(presets.map((item) => item.toLowerCase()));
-    const kept = parseTagsText(editForm.tagsText).filter((item) => !presetKeys.has(item.toLowerCase()));
+    const kept = parseTagsText(editForm.tagsText).filter((item) => !presetKeys.has(normalizeStandardAssetTag(item).toLowerCase()));
     if (editBatchAssetIds.length > 1) setEditBatchStandardTag(tag);
     syncEditTags([...new Set([...kept, tag])]);
   }
@@ -7477,7 +7563,7 @@ export function App() {
     const applyPresetToForm = (form: ImportFormState): ImportFormState => {
       const presets = getStandardAssetTagOptions(form.assetType);
       const presetKeys = new Set(presets.map((item) => item.toLowerCase()));
-      const kept = parseTagsText(form.tagsText).filter((item) => !presetKeys.has(item.toLowerCase()));
+      const kept = parseTagsText(form.tagsText).filter((item) => !presetKeys.has(normalizeStandardAssetTag(item).toLowerCase()));
       return { ...form, tagsText: [...new Set([...kept, tag])].join(", ") };
     };
     if (selectedImportIndexes.size > 1) {
@@ -7574,6 +7660,7 @@ export function App() {
   }
 
   function inferTextureTypeFromPath(filePath: string) {
+    if (/uv2[ _-]?ao/i.test(filePath.split(/[\\/]/).pop() || "")) return "UV2AO";
     const segments = String(filePath || "").replace(/\\/g, "/").split("/").filter(Boolean).reverse();
     for (const segment of segments) {
       const normalized = segment.toLowerCase();
@@ -7835,7 +7922,7 @@ export function App() {
       return ["fbx"];
     }
     if (normalized === "3dplant") {
-      return ["fbx", "st9"];
+      return ["fbx", "st9", "usda"];
     }
     return [];
   }
@@ -7999,6 +8086,7 @@ export function App() {
   }
 
   function detectTextureTypeFromFileName(fileName: string) {
+    if (/uv2[ _-]?ao/i.test(fileName)) return "UV2AO";
     const normalized = stripExt(String(fileName || "").trim())
       .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
       .toLowerCase();
@@ -8313,7 +8401,7 @@ export function App() {
           }
           return normalized;
         };
-        const modelExts = new Set([".fbx", ".st9", ".obj", ".abc", ".gltf", ".glb", ".ztl"]);
+        const modelExts = new Set([".fbx", ".st9", ".usda", ".obj", ".abc", ".gltf", ".glb", ".ztl"]);
         const modelFiles = files.filter((p) => {
           const ext = getFileExt(p);
           return modelExts.has(ext) && (ext === ".st9" || !isLodToken(p));
@@ -8342,7 +8430,7 @@ export function App() {
         // to metadata/model inference.
         const inferredType = isCharacterImportContext
           ? (activeCharacterType || inferCharacterAssetType([assetFolderName, preferredName, metadataName, ...files]))
-          : (hasSt9 || (metadata?.nativePlantWind && !hasMegascansSource && !isPbrMaxAsset)
+          : (metadata?.naniteFoliage || hasSt9 || (metadata?.nativePlantWind && !hasMegascansSource && !isPbrMaxAsset)
             ? "3dplant"
             : (hasPbrMaxDecalNameHint
               ? "decal"
@@ -8691,7 +8779,9 @@ export function App() {
           modelVariantKeys: nextModelVariantKeys,
           modelLodFiles: nextModelLodFiles,
           enabledModelTypes: nextEnabledModelTypes.length > 0 ? nextEnabledModelTypes : defaultImportForm.enabledModelTypes,
-          textureEntries: nextTextureEntries,
+          textureEntries: isMaskAsset({ ...metadata, assetType: inferredType }) ? ensureMaskTextureEntries(nextTextureEntries) : nextTextureEntries,
+          maskGroups: normalizeMaskGroups(metadata?.maskGroups),
+          textureGroupMode: isMaskAsset({ ...metadata, assetType: inferredType }) ? "channel" : "texture",
           materialNames: isCharacterAssetType(inferredType)
             ? characterMaterialNames
             : (metadata?.materialNames ? { ...metadata.materialNames } : {}),
@@ -8701,6 +8791,8 @@ export function App() {
           sourceSemanticTags: metadata?.sourceSemanticTags,
           sourceClassification: metadata?.sourceClassification,
           sourceArchivePath: String(resolved.sourceArchivePath || "").trim() || undefined,
+          plantAssetType: metadata?.naniteFoliage ? "naniteFoliage" : "standard",
+          naniteFoliage: metadata?.naniteFoliage || undefined,
           nativePlantWind: metadata?.nativePlantWind || undefined,
           nativePlantWindWarnings: metadata?.nativePlantWindWarnings || undefined,
           destinationPath: resolveImportDestinationForType(inferredType, "", nextSubCategory),
@@ -8911,6 +9003,7 @@ export function App() {
   }
 
   function isFoliageOpaqueCandidate(form: ImportFormState) {
+    if (form.plantAssetType === "naniteFoliage" || Object.values(form.modelSlots).some(file => /\.usda$/i.test(file))) return false;
     return FOLIAGE_OPAQUE_ASSET_TYPES.has(String(form.assetType || "").trim().toLowerCase())
       && !isZionPlantAsset({ assetType: form.assetType, tags: parseTagsText(form.tagsText), zionTags: form.zionTags });
   }
@@ -10128,18 +10221,22 @@ export function App() {
       assetPath: asset.path,
       assetName: name,
       assetType: assetTypeFromMeta,
+      plantAssetType: (meta as { plantAssetType?: string }).plantAssetType === "naniteFoliage" ? "naniteFoliage" as const : "standard" as const,
+      naniteFoliage: (meta as { naniteFoliage?: Record<string, unknown> }).naniteFoliage,
       subCategory: subCategoryFromMeta,
       modelSlots: slots.modelSlots,
       modelVariantKeys: slots.modelVariantKeys,
       modelLodFiles: slots.modelLodFiles,
       enabledModelTypes: slots.enabledModelTypes,
-      textureEntries: slots.textureEntries,
+      textureEntries: isMaskAsset({ ...meta, assetType: assetTypeFromMeta }) ? ensureMaskTextureEntries(slots.textureEntries) : slots.textureEntries,
       materialNames: (meta as { materialNames?: Record<string, string> }).materialNames || {},
+      maskGroups: normalizeMaskGroups((meta as Record<string, unknown>).maskGroups),
+      textureGroupMode: isMaskAsset({ ...meta, assetType: assetTypeFromMeta }) ? "channel" as const : "texture" as const,
       baseTiling: String(meta?.baseTiling ?? 1),
       normalMapFormat,
       normalMapFormats,
       previewImagePath: asset.detailImage || asset.previewImage || asset.preview || "",
-      tagsText: (tags || []).filter(Boolean).join(", "),
+      tagsText: (tags || []).filter(tag => tag && (assetTypeFromMeta !== "3d" || !/^(mega|mask)$/i.test(tag))).join(", "),
       zionTags: zionTags.map((tag) => String(tag || "").trim()).filter(Boolean).slice(0, 1),
       animationAffiliation: resolveAnimationAffiliationValue(
         String((meta as { animationAffiliation?: string }).animationAffiliation || asset.animationAffiliation || ""),
@@ -11006,11 +11103,13 @@ export function App() {
     const normalMapFormatsChanged = JSON.stringify(selectedNormalMapFormats) !== JSON.stringify(baselineNormalMapFormats);
     const previewChanged = editForm.previewImagePath.trim() !== editBaseline.previewImagePath.trim();
     const baseTilingChanged = normalizeBaseTilingValue(editForm.baseTiling) !== normalizeBaseTilingValue(editBaseline.baseTiling);
+    const maskGroupsChanged = JSON.stringify(editForm.maskGroups || {}) !== JSON.stringify(editBaseline.maskGroups || {})
+      || editForm.textureGroupMode !== editBaseline.textureGroupMode;
     const materialNamesChanged = JSON.stringify(editForm.materialNames || {}) !== JSON.stringify(editBaseline.materialNames || {});
     const hasEmptySlots = editBaseline.hasEmptySlots
       || editForm.textureEntries.some(entry => !String(entry.filePath || "").trim())
       || Object.values(editForm.modelSlots).some(filePath => !String(filePath || "").trim());
-    if (!hasEmptySlots && !textureEntriesChanged && !batchStandardTag && !materialNamesChanged && !nameChanged && !typeChanged && !categoryChanged && !baseTilingChanged && !normalMapFormatChanged && !normalMapFormatsChanged && !previewChanged && !tagsChanged && !zionTagsChanged && !affiliationChanged && !animationLabelsChanged && !animationGameTagChanged
+    if (!hasEmptySlots && !textureEntriesChanged && !batchStandardTag && !materialNamesChanged && !maskGroupsChanged && !nameChanged && !typeChanged && !categoryChanged && !baseTilingChanged && !normalMapFormatChanged && !normalMapFormatsChanged && !previewChanged && !tagsChanged && !zionTagsChanged && !affiliationChanged && !animationLabelsChanged && !animationGameTagChanged
       && Object.keys(changedModelSlots).length === 0 && Object.keys(changedTextureSlots).length === 0
       && removedModelSlots.length === 0 && removedTextureSlots.length === 0) {
       setEditOpen(false);
@@ -11041,6 +11140,8 @@ export function App() {
           : (Object.keys(changedTextureSlots).length > 0 ? changedTextureSlots : undefined),
         textureEntries: textureEntriesChanged ? selectedTextureEntries : undefined,
         materialNames: !batchStandardTag && materialNamesChanged ? editForm.materialNames : undefined,
+        maskGroups: !batchStandardTag && maskGroupsChanged ? normalizeMaskGroups(editForm.maskGroups) : undefined,
+        textureGroupMode: !batchStandardTag && maskGroupsChanged ? editForm.textureGroupMode || "texture" : undefined,
         removeModelSlots: removedModelSlots.length > 0 ? removedModelSlots : undefined,
         removeTextureSlots: removedTextureSlots.length > 0 ? removedTextureSlots : undefined,
         baseTiling: baseTilingChanged ? normalizeBaseTilingValue(editForm.baseTiling) : undefined,
@@ -11320,11 +11421,15 @@ export function App() {
         standardAssetTags: selectedStandardAssetTags.length ? selectedStandardAssetTags : undefined,
         baseTiling: form.assetType === "surface" ? normalizeBaseTilingValue(form.baseTiling) : undefined,
         modelSlots: selectedModelSlots,
+        plantAssetType: form.assetType === "3dplant" ? form.plantAssetType : undefined,
+        naniteFoliage: form.assetType === "3dplant" ? form.naniteFoliage : undefined,
         nativePlantWind: form.assetType === "3dplant" ? form.nativePlantWind : undefined,
         modelVariantKeys: Object.keys(selectedModelVariantKeys).length > 0 ? selectedModelVariantKeys : undefined,
         modelLodFiles: Object.keys(selectedModelLodFiles).length > 0 ? selectedModelLodFiles : undefined,
         textureSlots: selectedTextureSlots,
         textureEntries: selectedTextureEntries,
+        maskGroups: form.assetType === "3d" ? normalizeMaskGroups(form.maskGroups) : undefined,
+        textureGroupMode: form.assetType === "3d" ? form.textureGroupMode || "texture" : undefined,
         materialNames: form.assetType === "3d" || form.assetType === "3dplant" || isCharacterAssetType(form.assetType) ? form.materialNames : undefined,
         textureAreaCount,
         normalMapFormat: form.normalMapFormat,
@@ -12748,6 +12853,51 @@ export function App() {
     void refreshAssetFromDisk(assetId);
   }, [refreshAssetFromDisk, savingAssetIdSet, setContextMenu]);
 
+  function openNavigationCategory(nodeId: string, expandBranch: boolean) {
+    setActiveMenu(nodeId);
+    if (expandBranch && nodeId !== "home") toggleCategory(nodeId);
+    if (isLibraryCategory(nodeId) || isLibraryCategoryOverview) assetStageRef.current?.scrollTo({ top: 0, behavior: "instant" });
+
+    const searchBase = { ...search, text: "", tags: [], themes: [], onlyFavorites: nodeId === "favorite" || nodeId.startsWith("fav-") };
+    if (isLibraryCategory(nodeId)) {
+      executeSearch(defaultSearchState);
+    } else if (nodeId === "home") {
+      executeSearch({ ...searchBase, assetTypes: [], source: "all" });
+    } else {
+      executeSearch({ ...searchBase, assetTypes: mapNodeIdToAssetTypes(nodeId) });
+    }
+  }
+
+  function renderOverviewAsset({ asset, x, y, width, height }: AssetGridItemLayout) {
+    return <AssetCard
+      key={asset.id}
+      animationProjectPath={settings.unrealProjectPath}
+      asset={asset}
+      monsterFormCounter={monsterFormCounters.get(asset.id)}
+      x={x} y={y} width={width} height={height}
+      previewLoader={previewLoader}
+      animationCoverQueue={animationCoverQueue}
+      isSelected={selectedAssetId === asset.id || selectedIdSet.has(asset.id)}
+      selectedMeshKind={selectedComponentMesh?.assetId === asset.id ? selectedComponentMesh.kind : undefined}
+      isFavorite={favoriteIds.has(asset.id)}
+      onSelect={handleSelectAsset}
+      onToggleSuitParts={handleToggleSuitParts}
+      onAddSuitPart={handleAddSuitPart}
+      onToggle={toggleSelect}
+      onToggleFavorite={toggleFavorite}
+      onContextMenu={handleContextMenu}
+      onQuickExport={handleQuickExport}
+      exportTarget={settings.exportTarget}
+      exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
+      exportDimmed={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : (isExporting && !importingAssetIds.includes(asset.id)) || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
+      exportLoading={isExporting && importingAssetIds.includes(asset.id)}
+      exportProgress={isExporting && importingAssetIds.includes(asset.id) ? exportProgress : 0}
+      savingProgress={savingProgressMap[asset.id]}
+      uiLanguage={uiLanguage}
+      exportTitle={isFolderOnlyAsset(asset) ? t("打开文件夹", "Open folder") : isBlenderTarget && !supportsBlenderExport(asset) ? blenderAssetUnavailableTitle : isThreeDCoatTarget && !supportsThreeDCoatExport(asset) ? threeDCoatAssetUnavailableTitle : !assetCanExport(asset) ? exportUnavailableTitle : undefined}
+    />;
+  }
+
   function renderCategoryTree(nodes: Array<CategoryNode | string>, depth = 0, parentNodeId: string | null = null) {
     return nodes.map((node) => {
       if (typeof node === "string") {
@@ -12896,29 +13046,7 @@ export function App() {
               e.stopPropagation();
               setHoveredTreeItemId((cur) => (cur === node.id ? null : cur));
             }}
-            onClick={() => {
-              setActiveMenu(node.id);
-              if (hasChildren && node.id !== "home") toggleCategory(node.id);
-
-              const searchBase = {
-                ...search,
-                text: "",
-                tags: [],
-                themes: [],
-                onlyFavorites: isFavNode
-              };
-
-              if (node.id === "home") {
-                executeSearch({ ...searchBase, assetTypes: [], source: "all" });
-              } else {
-                executeSearch({
-                  ...searchBase,
-                  assetTypes: ["environment", "character", "animation"].includes(node.id)
-                    ? []
-                    : mapNodeIdToAssetTypes(node.id)
-                });
-              }
-            }}
+            onClick={() => openNavigationCategory(node.id, Boolean(hasChildren))}
           >
             {(isActive || isHovered) && depth > 0 && (
               <div className={`active-strip${isActive ? "" : " hover-strip"}`} style={{ left: `${activeStripLeft}px` }}></div>
@@ -13079,12 +13207,11 @@ export function App() {
 
   const selectedImportCount = selectedImportIndexes.size;
   const importSelectionAssetType = getImportSelectionValue((form) => form.assetType) ?? importForm.assetType;
-  const sidebarStatusText = exportStatus || (batchImportProgress?.active && /^(正在批量导入|Importing selected) /.test(status)
-    ? t("导入中", "Importing")
-    : scanning && status === scanHint
-      ? t("扫描中", "Scanning")
-      : status);
-  const sidebarStatusDetail = exportStatus || [...new Set([status, scanning ? scanHint : ""].filter(Boolean))].join("\n");
+  const sidebarStatus = getSidebarStatus({ exportFeedback, exporting: isExporting, exportProgress, importSaving,
+    batchImport: batchImportProgress, characterImport: characterImportProgress, scanFeedback, scanning,
+    scanProgress, scanHint, status, t });
+  const sidebarProgress = sidebarStatus.progress;
+  const sidebarStatusDetail = sidebarStatus.detail || sidebarStatus.text || undefined;
   const activeImportDedupe = importDedupeMap[activeImportIndex];
   const importDedupeSignatures = importOpen && importDuplicateCheckEnabled
     ? (importDrafts.length
@@ -13101,6 +13228,7 @@ export function App() {
   if (shouldRequireLibrarySetup) {
     return (
       <div style={{ position: "fixed", inset: 0, background: "#111", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 99999 }}>
+        <StartupTiming />
         <div style={{ width: "560px", maxWidth: "92vw", padding: "24px", borderRadius: "12px", border: "1px solid #2a2a2a", background: "#171717", color: "#fff" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "24px" }}>
             <div style={{ width: "36px", height: "36px", background: `url(${appBrandIconPath}) center/contain no-repeat` }}></div>
@@ -13122,6 +13250,7 @@ export function App() {
 
   return (
     <div className={`app ${selectedAsset ? "has-details" : ""}`}>
+      {settingsLoaded && <StartupTiming />}
       {outputLogOpen && (
         <OutputLogWindow
           bridge={bridge}
@@ -13397,6 +13526,7 @@ export function App() {
                         <span className="about-collab-tag">锈迹金币</span>
                         <span className="about-collab-tag">菈雅</span>
                         <span className="about-collab-tag">狮子猿</span>
+                        <span className="about-collab-tag">火防</span>
                       </div>
                     </div>
                   </div>
@@ -14465,6 +14595,14 @@ export function App() {
                               </button>
                             </div>
                             )}
+                            {importForm.assetType === "3dplant" && <div className="field">
+                              <label>{t("植被资产类型", "Plant asset type")}</label>
+                              <select value={importForm.plantAssetType || "standard"} onChange={event => setImportForm(prev => ({ ...prev, plantAssetType: event.target.value as "standard" | "naniteFoliage" }))}>
+                                <option value="standard">{t("普通植被（FBX / ST9）", "Standard (FBX / ST9)")}</option>
+                                <option value="naniteFoliage">Nanite Foliage (USDA + Wind)</option>
+                              </select>
+                              {importForm.plantAssetType === "naniteFoliage" && <small>{t("按 USDA 引用自动归档纹理组；每个变体保留独立 Wind 数据，存在实例时启用 Assembly。", "Texture groups follow USDA references. Each variant keeps its wind data; instances enable Assembly.")}</small>}
+                            </div>}
                             {isZionPlantAsset({ assetType: importForm.assetType, tags: parseTagsText(importForm.tagsText), zionTags: importForm.zionTags }) && importForm.nativePlantWind && (
                               <div className="settings-field-hint" style={{ marginTop: "8px" }}>
                                 {t(`已检测原生风：${String(importForm.nativePlantWind.sourceFile || "_Wind.json")}，发送到 UE 时自动应用。`,
@@ -14683,7 +14821,12 @@ export function App() {
                       </div>
                     </div>
                   )}
-                  {importForm.assetType !== "animation" && (
+                  {importForm.plantAssetType === "naniteFoliage" && <div className="asset-form-card">
+                    <strong>{t("USDA 纹理组", "USDA texture groups")}</strong>
+                    <NaniteFoliageSummary manifest={importForm.naniteFoliage} english={t("zh", "en") === "en"} />
+                    <p>{t(`已识别 ${Array.isArray(importForm.naniteFoliage?.variants) ? importForm.naniteFoliage.variants.length : 0} 个变体、${Array.isArray(importForm.naniteFoliage?.groups) ? importForm.naniteFoliage.groups.length : 0} 套材质。纹理随 USDA 引用保存，修改源文件后重新导入即可更新。`, "Texture groups are archived from USDA references. Reimport the source package to update them.")}</p>
+                  </div>}
+                  {importForm.assetType !== "animation" && importForm.plantAssetType !== "naniteFoliage" && (
                   <div className="asset-form-card">
                     <div className="settings-row" style={{ gridTemplateColumns: "1fr" }}>
                       <div className="settings-field-col" style={{ width: "100%" }}>
@@ -14702,6 +14845,13 @@ export function App() {
                               )}
                             </div>
                           )}
+                          {importForm.assetType === "3d" && <div className="mask-group-tabs">
+                            {(["texture", "channel"] as const).map(mode => <button type="button" key={mode}
+                              className={(importForm.textureGroupMode || "texture") === mode ? "active" : ""} aria-pressed={(importForm.textureGroupMode || "texture") === mode}
+                              onClick={() => setImportForm(prev => ({ ...prev, textureGroupMode: mode, textureEntries: mode === "channel" ? ensureMaskTextureEntries(prev.textureEntries) : prev.textureEntries }))}>
+                              {mode === "texture" ? t("纹理组", "Texture groups") : t("通道组", "Channel groups")}
+                            </button>)}
+                          </div>}
                           {getTextureAreaIdList(importForm.textureEntries).map((areaId, areaIndex) => {
                             const areaEntries = importForm.textureEntries.filter((entry) => Math.max(1, Number(entry.areaId) || 1) === areaId);
                             return (
@@ -14709,7 +14859,7 @@ export function App() {
                                 <div className="texture-area-header">
                                   <span>{importForm.assetType === "hdri"
                                     ? t("HDRI 贴图", "HDRI Texture")
-                                    : `${t("贴图组", "Texture Group")} ${formatTextureAreaOrder(areaId)}${isCharacterAssetType(importForm.assetType) && importForm.materialNames?.[areaId] ? ` · ${importForm.materialNames[areaId]}` : ""}`}</span>
+                                    : `${(importForm.textureGroupMode || "texture") === "channel" ? t("通道组", "Channel group") : t("纹理组", "Texture group")} ${formatTextureAreaOrder(areaId)}${isCharacterAssetType(importForm.assetType) && importForm.materialNames?.[areaId] ? ` · ${importForm.materialNames[areaId]}` : ""}`}</span>
                                   {(importForm.assetType === "3d" || importForm.assetType === "3dplant") && (
                                     <input className="material-group-name" aria-label={t("材质名称", "Material name")}
                                       placeholder={t("材质名称（选填，对应模型槽名）", "Material name (optional, model slot)")}
@@ -14759,6 +14909,11 @@ export function App() {
                                     />
                                   );
                                 })}
+                                {importForm.assetType === "3d" && (importForm.textureGroupMode || "texture") === "channel" && <MaskChannelSettings
+                                  t={t} value={importForm.maskGroups?.[areaId]}
+                                  maskFile={areaEntries.find(entry => entry.textureType === "Mask")?.filePath || ""}
+                                  hasFullAo={areaEntries.some(entry => entry.textureType === "UV2AO" && Boolean(entry.filePath))}
+                                  onChange={group => setImportForm(prev => ({ ...prev, maskGroups: { ...prev.maskGroups, [areaId]: group } }))} />}
                                 <div className="texture-group-actions">
                                   {importForm.assetType !== "hdri" && (
                                     <>
@@ -14766,9 +14921,9 @@ export function App() {
                                         <Icon name="plus" />
                                       </button>
                                       {areaIndex === getTextureAreaIdList(importForm.textureEntries).length - 1 && (
-                                        <button type="button" className="texture-add-area-btn" title={t("添加贴图组", "Add Texture Group")} onClick={addImportTextureArea}>
+                                        <button type="button" className="texture-add-area-btn" title={importForm.assetType === "3d" && importForm.textureGroupMode === "channel" ? t("添加通道组", "Add Channel Group") : t("添加贴图组", "Add Texture Group")} onClick={addImportTextureArea}>
                                           <Icon name="plus" />
-                                          <span>{t("添加贴图组", "Add Texture Group")}</span>
+                                          <span>{importForm.assetType === "3d" && importForm.textureGroupMode === "channel" ? t("添加通道组", "Add Channel Group") : t("添加贴图组", "Add Texture Group")}</span>
                                         </button>
                                       )}
                                     </>
@@ -15183,17 +15338,28 @@ export function App() {
                       </div>
                     </div>
                   )}
-                  {editForm.assetType !== "animation" && (
+                  {editForm.naniteFoliage && <div className="asset-form-card">
+                    <strong>{t("Nanite Foliage 分支版本", "Nanite Foliage branch")}</strong>
+                    <NaniteFoliageSummary manifest={editForm.naniteFoliage} english={t("zh", "en") === "en"} />
+                  </div>}
+                  {editForm.assetType !== "animation" && editForm.plantAssetType !== "naniteFoliage" && (
                   <div className="asset-form-card">
                     <div className="settings-row" style={{ gridTemplateColumns: "1fr" }}>
                       <div className="settings-field-col" style={{ width: "100%" }}>
                         <div className="texture-section">
+                          {editForm.assetType === "3d" && <div className="mask-group-tabs">
+                            {(["texture", "channel"] as const).map(mode => <button type="button" key={mode}
+                              className={(editForm.textureGroupMode || "texture") === mode ? "active" : ""} aria-pressed={(editForm.textureGroupMode || "texture") === mode}
+                              onClick={() => setEditForm(prev => ({ ...prev, textureGroupMode: mode, textureEntries: mode === "channel" ? ensureMaskTextureEntries(prev.textureEntries) : prev.textureEntries }))}>
+                              {mode === "texture" ? t("纹理组", "Texture groups") : t("通道组", "Channel groups")}
+                            </button>)}
+                          </div>}
                           {getTextureAreaIdList(editForm.textureEntries).map((areaId, areaIndex) => {
                             const areaEntries = editForm.textureEntries.filter((entry) => Math.max(1, Number(entry.areaId) || 1) === areaId);
                             return (
                               <div key={`edit-area-${areaId}`} className={`texture-area${areaIndex > 0 ? " with-separator" : ""}`}>
                                 <div className="texture-area-header">
-                                  <span>{editForm.assetType === "hdri" ? t("HDRI 贴图", "HDRI Texture") : `${t("贴图组", "Texture Group")} ${formatTextureAreaOrder(areaId)}`}</span>
+                                  <span>{editForm.assetType === "hdri" ? t("HDRI 贴图", "HDRI Texture") : `${(editForm.textureGroupMode || "texture") === "channel" ? t("通道组", "Channel group") : t("纹理组", "Texture group")} ${formatTextureAreaOrder(areaId)}`}</span>
                                   {(editForm.assetType === "3d" || editForm.assetType === "3dplant") && (
                                     <input className="material-group-name" aria-label={t("材质名称", "Material name")}
                                       placeholder={t("材质名称（选填，对应模型槽名）", "Material name (optional, model slot)")}
@@ -15242,6 +15408,11 @@ export function App() {
                                     />
                                   );
                                 })}
+                                {editForm.assetType === "3d" && (editForm.textureGroupMode || "texture") === "channel" && <MaskChannelSettings
+                                  t={t} value={editForm.maskGroups?.[areaId]}
+                                  maskFile={areaEntries.find(entry => entry.textureType === "Mask")?.filePath || ""}
+                                  hasFullAo={areaEntries.some(entry => entry.textureType === "UV2AO" && Boolean(entry.filePath))}
+                                  onChange={group => setEditForm(prev => ({ ...prev, maskGroups: { ...prev.maskGroups, [areaId]: group } }))} />}
                                 <div className="texture-group-actions edit-texture-group-actions">
                                   {(editForm.assetType !== "hdri" || editForm.textureEntries.length === 0) && (
                                     <>
@@ -15249,9 +15420,9 @@ export function App() {
                                         <Icon name="plus" />
                                       </button>
                                       {editForm.assetType !== "hdri" && areaIndex === getTextureAreaIdList(editForm.textureEntries).length - 1 && (
-                                        <button type="button" className="texture-add-area-btn" title={t("添加贴图组", "Add Texture Group")} onClick={addEditTextureArea}>
+                                        <button type="button" className="texture-add-area-btn" title={editForm.assetType === "3d" && editForm.textureGroupMode === "channel" ? t("添加通道组", "Add Channel Group") : t("添加贴图组", "Add Texture Group")} onClick={addEditTextureArea}>
                                           <Icon name="plus" />
-                                          <span>{t("添加贴图组", "Add Texture Group")}</span>
+                                          <span>{editForm.assetType === "3d" && editForm.textureGroupMode === "channel" ? t("添加通道组", "Add Channel Group") : t("添加贴图组", "Add Texture Group")}</span>
                                         </button>
                                       )}
                                     </>
@@ -15623,37 +15794,15 @@ export function App() {
                 : isThreeDCoatTarget ? threeDCoatStatus.ready ? "3DCoat" : t("3DCoat 未配置，请在设置中选择程序和数据目录", "3DCoat is not configured. Choose the application and data directory in settings")
                   : unrealConnected ? `${unrealConnectedTargetName || "Unknown"}` : unrealConnectionMessage || t("未连接", "Not connected")}
             />
-            <span className="status-text" role="status" title={sidebarStatusDetail || undefined}>{sidebarStatusText}</span>
-            {isExporting ? (
-              <div className="status-right" role="progressbar"
-                aria-label={t("导出进度", "Export progress")} title={sidebarStatusDetail || undefined}
-                aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(Math.max(0, Math.min(100, exportProgress)))}>
+            <span className="status-text" role="status" title={sidebarStatusDetail}>{sidebarStatus.text}</span>
+            {sidebarProgress && (
+              <div className="status-right" role="progressbar" title={sidebarStatusDetail}
+                aria-label={sidebarProgress.label} aria-valuemin={0} aria-valuemax={sidebarProgress.max}
+                aria-valuenow={sidebarProgress.value} aria-valuetext={sidebarProgress.count}>
                 <div className="status-progress">
-                  <span className="status-progress-fill" style={{ width: `${Math.max(0, Math.min(100, exportProgress))}%` }} />
+                  <span className="status-progress-fill" style={{ width: `${sidebarProgress.percent}%` }} />
                 </div>
-                <span className="status-progress-text">{Math.round(Math.max(0, Math.min(100, exportProgress)))}%</span>
-              </div>
-            ) : exportStatus ? null : importSaving && characterImportProgress.message ? (
-              <div className="character-import-status" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={characterImportProgress.progress}>
-                <progress max={100} value={characterImportProgress.progress} />
-                <span>{characterImportProgress.message} · {Math.round(characterImportProgress.progress)}%</span>
-              </div>
-            ) : batchImportProgress ? (
-              <div className="status-right" role="progressbar"
-                aria-label={t("批量导入进度", "Batch import progress")} title={sidebarStatusDetail || undefined}
-                aria-valuemin={0} aria-valuemax={batchImportProgress.total} aria-valuenow={batchImportProgress.processed}
-                aria-valuetext={`${batchImportProgress.processed}/${batchImportProgress.total}`}>
-                <div className="status-progress">
-                  <span className="status-progress-fill" style={{ width: `${Math.round(batchImportProgress.processed / batchImportProgress.total * 100)}%` }} />
-                </div>
-                <span className="status-progress-text">{batchImportProgress.processed}/{batchImportProgress.total}</span>
-              </div>
-            ) : scanning && (
-              <div className="status-right" title={scanHint || undefined}>
-                <div className="status-progress">
-                  <span className="status-progress-fill" style={{ width: `${Math.max(0, Math.min(100, scanProgress))}%` }} />
-                </div>
-                <span className="status-progress-text">{Math.round(Math.max(0, Math.min(100, scanProgress)))}%</span>
+                <span className="status-progress-text">{sidebarProgress.count || `${sidebarProgress.value}%`}</span>
               </div>
             )}
           </div>
@@ -15967,7 +16116,7 @@ export function App() {
         <div className={`stage-container${characterContext ? " fixed-character-cards" : ""}`}>
           <div className="asset-stage" ref={assetStageRef} onScroll={handleAssetStageScroll}
             tabIndex={0} aria-label={t("资产卡片", "Asset cards")}
-            title={t("滚轮缩放卡片 · Shift＋滚轮滚动列表", "Wheel to zoom cards · Shift + wheel to scroll")}
+            title={isAnimationGrid ? t("滚轮缩放卡片 · Shift＋滚轮滚动列表", "Wheel to zoom cards · Shift + wheel to scroll") : undefined}
             onKeyDown={handleAssetStageKeyDown}
             onClickCapture={(event) => {
               const target = event.target as HTMLElement;
@@ -15976,7 +16125,11 @@ export function App() {
               event.currentTarget.focus({ preventScroll: true });
             }}
           >
-            {isAllOverviewView ? (
+            {libraryCategory && libraryCategoryOverview ? (
+              <LibraryCategoryOverview key={libraryCategory} category={libraryCategory} data={libraryCategoryOverview}
+                loader={previewLoader} t={t} scanning={scanning} labelFor={getNodeDisplayLabel}
+                onOpenCategory={id => openNavigationCategory(id, true)} viewport={assetStageMetrics} renderAsset={renderOverviewAsset} />
+            ) : isAllOverviewView ? (
               <div className="all-overview-wrapper">
                 {allAssets.length === 0 ? (
                   // 首次安装 / 空库：这里原来是空白（只剩一个空的“动画”分区），
@@ -16001,50 +16154,20 @@ export function App() {
                   </div>
                 ) : (
                   <>
-                {!isCharacterOverviewView && recentAssets.length > 0 && (
+                {recentAssets.length > 0 && (
                   <section className="overview-section overview-recent-section">
                     <div className="overview-section-header">
                       <div className="overview-section-title">
                         <span>{t("最近", "Recent")}</span>
                       </div>
                     </div>
-                    <OverviewAssetGrid assets={recentAssets.slice(0, 24)} maxRows={2}>
-                      {({ asset, x, y, width, height }) => (
-                        <AssetCard
-                          key={asset.id}
-                          animationProjectPath={settings.unrealProjectPath}
-                          asset={asset}
-                          monsterFormCounter={monsterFormCounters.get(asset.id)}
-                          x={x} y={y} width={width} height={height}
-                          previewLoader={previewLoader}
-                          animationCoverQueue={animationCoverQueue}
-                          isSelected={selectedAssetId === asset.id || selectedIdSet.has(asset.id)}
-                          selectedMeshKind={selectedComponentMesh?.assetId === asset.id ? selectedComponentMesh.kind : undefined}
-                          isFavorite={favoriteIds.has(asset.id)}
-                          onSelect={handleSelectAsset}
-                          onToggleSuitParts={handleToggleSuitParts}
-                          onAddSuitPart={handleAddSuitPart}
-                          onToggle={toggleSelect}
-                          onToggleFavorite={toggleFavorite}
-                          onContextMenu={handleContextMenu}
-                          onQuickExport={handleQuickExport}
-                          exportTarget={settings.exportTarget}
-                          exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
-                          exportDimmed={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : (isExporting && !importingAssetIds.includes(asset.id)) || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
-                          exportLoading={isExporting && importingAssetIds.includes(asset.id)}
-                          exportProgress={isExporting && importingAssetIds.includes(asset.id) ? exportProgress : 0}
-                          savingProgress={savingProgressMap[asset.id]}
-                          uiLanguage={uiLanguage}
-                          exportTitle={isFolderOnlyAsset(asset) ? t("打开文件夹", "Open folder") : isBlenderTarget && !supportsBlenderExport(asset) ? blenderAssetUnavailableTitle : isThreeDCoatTarget && !supportsThreeDCoatExport(asset) ? threeDCoatAssetUnavailableTitle : !assetCanExport(asset) ? exportUnavailableTitle : undefined}
-                        />
-                      )}
-                    </OverviewAssetGrid>
+                    <OverviewAssetGrid assets={recentAssets.slice(0, 24)} maxRows={2}>{renderOverviewAsset}</OverviewAssetGrid>
                   </section>
                 )}
 
                 {allOverviewCategoryList.map((category) => {
                   const catAssets = allCategoryAssetMap[category.id] || [];
-                  if (catAssets.length === 0 && category.id !== "animation" && !isCharacterOverviewView) {
+                  if (catAssets.length === 0 && category.id !== "animation") {
                     return null;
                   }
                   const displayAssets = catAssets.slice(0, 10);
@@ -16055,53 +16178,15 @@ export function App() {
                           className="overview-section-title overview-category-title"
                           onClick={() => {
                             setActiveMenu(category.id);
-                            if (isCharacterOverviewView) {
-                              const family = category.assetTypes[0];
-                              setExpandedCategories(["home", "character", category.id]);
-                              setCharacterFiltersByScope(previous => ({ ...previous, [family]: defaultCharacterFilters(characterFilterContext(category.id)) }));
-                              return;
-                            }
                             expandOutlineForCategory(category.id);
-                            executeSearch({ ...search, assetTypes: category.assetTypes });
+                            executeSearch({ ...search, assetTypes: category.id === "animation" ? [] : category.assetTypes });
                           }}
                         >
                           <span>{category.label}</span>
-                          {isCharacterOverviewView && <span className="character-overview-view-all">{t("查看全部", "View all")}</span>}
                           <span className="overview-crumb-sep" />
                         </div>
                       </div>
-                      {isCharacterOverviewView && !displayAssets.length && <p className="character-overview-empty">{t("暂无资产", "No assets yet")}</p>}
-                      <OverviewAssetGrid assets={displayAssets} maxRows={1} fixedCharacters={isCharacterOverviewView}>
-                          {({ asset, x, y, width, height }) => (
-                            <AssetCard
-                              key={asset.id}
-                              animationProjectPath={settings.unrealProjectPath}
-                              asset={asset}
-                          monsterFormCounter={monsterFormCounters.get(asset.id)}
-                              x={x} y={y} width={width} height={height}
-                              previewLoader={previewLoader}
-                              animationCoverQueue={animationCoverQueue}
-                              isSelected={selectedAssetId === asset.id || selectedIdSet.has(asset.id)}
-                              selectedMeshKind={selectedComponentMesh?.assetId === asset.id ? selectedComponentMesh.kind : undefined}
-                              isFavorite={favoriteIds.has(asset.id)}
-                              onSelect={handleSelectAsset}
-                              onToggleSuitParts={handleToggleSuitParts}
-                              onAddSuitPart={handleAddSuitPart}
-                              onToggle={toggleSelect}
-                              onToggleFavorite={toggleFavorite}
-                              onContextMenu={handleContextMenu}
-                              onQuickExport={handleQuickExport}
-                              exportTarget={settings.exportTarget}
-                              exportDisabled={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : busy || isExporting || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
-                              exportDimmed={isFolderOnlyAsset(asset) ? !bridgeAvailable || !asset.path : (isExporting && !importingAssetIds.includes(asset.id)) || !assetCanExport(asset) || (isBlenderTarget && !supportsBlenderExport(asset)) || (isThreeDCoatTarget && !supportsThreeDCoatExport(asset))}
-                              exportLoading={isExporting && importingAssetIds.includes(asset.id)}
-                              exportProgress={isExporting && importingAssetIds.includes(asset.id) ? exportProgress : 0}
-                              savingProgress={savingProgressMap[asset.id]}
-                              uiLanguage={uiLanguage}
-                              exportTitle={isFolderOnlyAsset(asset) ? t("打开文件夹", "Open folder") : isBlenderTarget && !supportsBlenderExport(asset) ? blenderAssetUnavailableTitle : isThreeDCoatTarget && !supportsThreeDCoatExport(asset) ? threeDCoatAssetUnavailableTitle : !assetCanExport(asset) ? exportUnavailableTitle : undefined}
-                            />
-                          )}
-                      </OverviewAssetGrid>
+                      <OverviewAssetGrid assets={displayAssets} maxRows={1}>{renderOverviewAsset}</OverviewAssetGrid>
                     </section>
                   );
                 })}
@@ -16412,6 +16497,10 @@ export function App() {
                     ) : null}
                   </div>
 
+                  {selectedAsset.assetType === "3dplant" && selectedAsset.meta?.naniteFoliage && <details className="asset-form-card">
+                    <summary>{t("Nanite Foliage 分支版本", "Nanite Foliage branch")}</summary>
+                    <NaniteFoliageSummary manifest={selectedAsset.meta.naniteFoliage as Record<string, unknown>} english={t("zh", "en") === "en"} />
+                  </details>}
                   <div className="detail-breadcrumbs">
                     <button
                       className="detail-crumb"

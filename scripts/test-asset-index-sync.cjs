@@ -19,7 +19,7 @@ function fixture(initial = []) {
   const reads = [];
   const history = [];
   const sync = createAssetIndexSync({
-    readIndex: () => new Promise(resolve => reads.push(resolve)),
+    readIndex: () => new Promise((resolve, reject) => reads.push(Object.assign(resolve, { reject }))),
     update: value => { assets = typeof value === "function" ? value(assets) : value; history.push(assets.length); },
     schedule: callback => { const id = ++nextTimer; timers.set(id, callback); return id; },
     cancel: id => timers.delete(id)
@@ -107,5 +107,66 @@ test("library resets and disposal reject in-flight responses from the previous l
   f.reads.shift()([asset("late")]);
   await lastRead;
   assert.equal(f.assets()[0].id, "new");
+  assert.equal(f.timers.size, 0);
+});
+
+test("the background keeps its cards and reloads once, applying imports made during recovery", async () => {
+  const f = fixture([asset("deleted"), asset("kept")]);
+  const beforeBlur = f.sync.refresh();
+  f.sync.setDeferred(true);
+  f.sync.onChange({ incremental: true, records: [asset("background-added")] });
+  f.sync.onChange({ incremental: true, complete: true, ids: ["kept", "background-added"] });
+  f.reads.shift()([asset("deleted")]);
+  await beforeBlur;
+  f.flush();
+  assert.deepEqual(f.history, []);
+  assert.equal(f.reads.length, 0);
+
+  f.sync.setDeferred(false);
+  f.flush();
+  assert.equal(f.reads.length, 1);
+  f.sync.onChange({ incremental: true, records: [asset("new-import")] });
+  f.reads.shift()([asset("kept"), asset("background-added")]);
+  await f.sync.refresh();
+  assert.deepEqual(f.assets().map(a => a.id), ["kept", "background-added", "new-import"]);
+  assert.equal(f.timers.size, 0);
+  f.sync.setDeferred(true);
+  f.sync.setDeferred(false);
+  assert.equal(f.timers.size, 0, "focusing an unchanged library does not trigger a full read");
+});
+
+test("switching libraries in the background discards the old base and any interrupted recovery", async () => {
+  const f = fixture([asset("old")]);
+  f.sync.setDeferred(true);
+  f.sync.onChange({ reset: true });
+  f.sync.setDeferred(false);
+  f.flush();
+  assert.deepEqual(f.assets(), []);
+  f.sync.setDeferred(true);
+  f.sync.onChange({ reset: true });
+  f.sync.setDeferred(false);
+  f.reads.shift()([asset("wrong-library")]);
+  await Promise.resolve();
+  f.flush();
+  f.reads.shift()([asset("current-library")]);
+  await f.sync.refresh();
+  assert.deepEqual(f.assets().map(a => a.id), ["current-library"]);
+});
+
+test("a failed foreground catch-up retries without changing the visible cards", async () => {
+  const f = fixture([asset("old")]);
+  f.sync.setDeferred(true);
+  f.sync.onChange({ incremental: true, count: 1 });
+  f.sync.setDeferred(false);
+  f.flush();
+  const failed = f.sync.refresh();
+  f.reads.shift().reject(new Error("temporarily unavailable"));
+  await assert.rejects(failed, /temporarily unavailable/);
+  assert.equal(f.assets()[0].id, "old");
+  assert.equal(f.timers.size, 1);
+  f.flush();
+  f.reads.shift()([asset("fresh")]);
+  await f.sync.refresh();
+  assert.equal(f.assets()[0].id, "fresh");
   assert.equal(f.timers.size, 0);
 });
